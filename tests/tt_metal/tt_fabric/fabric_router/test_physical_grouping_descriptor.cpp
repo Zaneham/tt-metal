@@ -9,7 +9,6 @@
 #include <string>
 #include <algorithm>
 #include <set>
-#include <iostream>
 #include <sstream>
 #include <cstdlib>
 
@@ -21,6 +20,7 @@
 #include "tt_metal/fabric/physical_system_discovery.hpp"
 #include "impl/context/metal_context.hpp"
 #include "llrt/tt_cluster.hpp"
+#include <tt-logger/tt-logger.hpp>
 
 using namespace tt::tt_fabric;
 
@@ -41,6 +41,40 @@ static tt::tt_metal::PhysicalSystemDescriptor create_psd_from_mock_cluster() {
     return tt::tt_metal::run_physical_system_discovery(
         *cluster.get_cluster_desc(), distributed_context, rtoptions.get_target_device());
 }
+
+namespace {
+// Dumps get_valid_groupings* maps (used only by GetValidGroupingsForMGDs_TwoDifferentMGDs_MockSubcontextMeshGraphs).
+void pgd_sp3_print_valid_groupings(const char* test_name, const ValidGroupingsMap& m) {
+    log_info(tt::LogFabric, "========== {} (PGD valid groupings) ==========", test_name);
+    std::vector<std::string> types;
+    types.reserve(m.size());
+    for (const auto& [t, _] : m) {
+        types.push_back(t);
+    }
+    std::sort(types.begin(), types.end());
+    for (const std::string& type : types) {
+        log_info(tt::LogFabric, "  type \"{}\":", type);
+        std::vector<std::string> names;
+        for (const auto& [n, _] : m.at(type)) {
+            names.push_back(n);
+        }
+        std::sort(names.begin(), names.end());
+        for (const std::string& n : names) {
+            const auto& gvec = m.at(type).at(n);
+            log_info(tt::LogFabric, "    instance \"{}\": {} grouping(s)", n, gvec.size());
+            for (const auto& g : gvec) {
+                log_info(
+                    tt::LogFabric,
+                    "      - name={} type={} asic_count={} adjacency_nodes={}",
+                    g.name,
+                    g.type,
+                    g.asic_count,
+                    g.adjacency_graph.get_nodes().size());
+            }
+        }
+    }
+}
+}  // namespace
 
 // Helper to check that a node's neighbors match expected (order-independent)
 static void expect_neighbors(
@@ -1614,16 +1648,6 @@ TEST(PhysicalGroupingDescriptorSP4Tests, GetValidGroupingsForMGD_BlitzPipeline2x
     MeshGraphDescriptor mgd{std::filesystem::path(mgd_path)};
 
     auto valid_groupings = pgd.get_valid_groupings_for_mgd(mgd, psd);
-
-    // Print valid groupings
-    for (const auto& [instance_type, instances] : valid_groupings) {
-        for (const auto& [instance_name, groupings] : instances) {
-            std::cout << "Instance type: " << instance_type << ", Instance name: " << instance_name << std::endl;
-            for (const auto& grouping : groupings) {
-                std::cout << "Grouping name: " << grouping.name << ", ASIC count: " << grouping.asic_count << std::endl;
-            }
-        }
-    }
 
     // Count total groupings across all instances
     size_t total_groupings = 0;
