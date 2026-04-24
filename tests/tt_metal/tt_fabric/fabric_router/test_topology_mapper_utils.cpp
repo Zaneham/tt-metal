@@ -71,37 +71,6 @@ void expect_bh_halfpod_tray_pairing_for_graph_nodes(
 }
 
 // Test diagnostics (Fabric logger). Per-ASIC output uses AdjacencyGraph::print_adjacency_map (tt-logger).
-void print_valid_groupings_map_debug(const char* label, const ::tt::tt_fabric::ValidGroupingsMap& m) {
-    log_info(tt::LogFabric, "========== {} (ValidGroupingsMap) ==========", label);
-    std::vector<std::string> types;
-    types.reserve(m.size());
-    for (const auto& [t, _] : m) {
-        types.push_back(t);
-    }
-    std::sort(types.begin(), types.end());
-    for (const std::string& type : types) {
-        log_info(tt::LogFabric, "  type \"{}\":", type);
-        std::vector<std::string> names;
-        for (const auto& [n, _] : m.at(type)) {
-            names.push_back(n);
-        }
-        std::sort(names.begin(), names.end());
-        for (const std::string& n : names) {
-            const auto& gvec = m.at(type).at(n);
-            log_info(tt::LogFabric, "    instance \"{}\": {} grouping(s)", n, gvec.size());
-            for (const auto& g : gvec) {
-                log_info(
-                    tt::LogFabric,
-                    "      - name={} type={} asic_count={} adjacency_nodes={}",
-                    g.name,
-                    g.type,
-                    g.asic_count,
-                    g.adjacency_graph.get_nodes().size());
-            }
-        }
-    }
-}
-
 void print_physical_multimesh_graph_debug(const char* label, const PhysicalMultiMeshGraph& g) {
     log_info(
         tt::LogFabric,
