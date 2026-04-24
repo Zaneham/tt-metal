@@ -1032,11 +1032,13 @@ enum class UnpackerProgramType
  * On any mismatch the function fires an `LLK_ASSERT` for the offending field with a descriptive
  * message; otherwise it returns normally.
  *
- * @param expected_src_format Expected input data format for the selected unpacker
- * @param expected_dst_format Expected output data format for the selected unpacker
- * @param expected_face_r_dim Expected face row dimension for the selected unpacker (default FACE_R_DIM)
- * @param expected_num_faces  Expected number of faces for the selected unpacker (default TILE_NUM_FACES)
- * @param nop_count           Number of nop operations to ensure configuration writes complete (default 10)
+ * @param unpA_src_format   Expected input data format for unpacker A (context 0)
+ * @param unpA_dst_format   Expected output data format for unpacker A (context 0)
+ * @param unpA_face_r_dim   Expected face row dimension for unpacker A (default FACE_R_DIM)
+ * @param unpA_num_faces    Expected number of faces for unpacker A (default TILE_NUM_FACES)
+ * @param nop_count         Number of nop operations to ensure configuration writes complete (default 10)
+ * @return UnpackerAConfigStatus::Configured if the configuration matches all expected values,
+ *         otherwise the enum value identifying the first mismatching field.
  */
 template <UnpackerProgramType program_type = UnpackerProgramType::ProgramByTile, bool check_unpacker_b = false>
 __attribute__((noinline)) void is_unpacker_A_configured_correctly(
@@ -1156,6 +1158,8 @@ __attribute__((noinline)) void is_unpacker_A_configured_correctly(
  * @param unpA_num_faces    Expected number of faces for unpacker A (default TILE_NUM_FACES)
  * @param unpB_num_faces    Expected number of faces for unpacker B (default TILE_NUM_FACES)
  * @param nop_count         Number of nop operations to ensure configuration writes complete (default 80)
+ * @return UnpackersABConfigStatus::Configured if the configuration matches all expected values,
+ *         otherwise the enum value identifying the first mismatching field/unpacker.
  */
 template <UnpackerProgramType program_type = UnpackerProgramType::ProgramByTile>
 __attribute__((noinline)) void are_unpackers_AB_configured_correctly(
