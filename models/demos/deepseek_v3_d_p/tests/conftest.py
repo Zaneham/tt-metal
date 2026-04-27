@@ -61,14 +61,20 @@ def pytest_collection_modifyitems(config, items):
         devices_needed = mesh_shape[0] * mesh_shape[1]
         is_ring = topology == "ring"
 
+        # Multi-host runs (launched via ttrun) set TT_MESH_ID per host process.
+        # In that case ttnn.get_num_devices() only sees the local slice, not
+        # the full mesh, so the device-count and per-arch "all-devices" gates
+        # below are meaningless — the mesh is sized by the rank binding.
+        is_multihost = os.getenv("TT_MESH_ID") is not None
+
         skip_reason = None
 
         # Check device count first
-        if devices_needed > num_devices:
+        if not is_multihost and devices_needed > num_devices:
             skip_reason = f"Requires {devices_needed} devices, only {num_devices} available"
 
         # Architecture-specific constraints
-        elif is_blackhole():
+        elif is_blackhole() and not is_multihost:
             # BH: only supports all available devices configs
             if devices_needed != num_devices:
                 skip_reason = f"Blackhole only supports {num_devices}-device mesh configs (requested {devices_needed})"
