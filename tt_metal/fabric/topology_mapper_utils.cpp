@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <tt_stl/assert.hpp>
 #include <tt_stl/fmt.hpp>
 #include <tt-metalium/experimental/fabric/topology_mapper_utils.hpp>
 
@@ -467,10 +468,79 @@ LogicalMultiMeshGraph build_logical_multi_mesh_adjacency_graph_impl(
 
 }  // namespace
 
-// TODO: Add merge logical adjacnecy graphs from multiple MGDs
+namespace {
+
+void collect_mesh_ids_from_logical_multi_mesh_graph(const LogicalMultiMeshGraph& g, std::set<MeshId>& out) {
+    for (const auto& [mesh_id, fab_adj] : g.mesh_adjacency_graphs_) {
+        out.insert(mesh_id);
+        for (const auto& [node, neighbors] : fab_adj.get_adjacency_map()) {
+            out.insert(node.mesh_id);
+            for (const auto& nb : neighbors) {
+                out.insert(nb.mesh_id);
+            }
+        }
+    }
+    for (const auto& [_, exit_graph] : g.mesh_exit_node_graphs_) {
+        for (const auto& [exit_node, neighbors] : exit_graph.get_adjacency_map()) {
+            out.insert(exit_node.mesh_id);
+            if (exit_node.fabric_node_id.has_value()) {
+                out.insert(exit_node.fabric_node_id->mesh_id);
+            }
+            for (const auto& nb : neighbors) {
+                out.insert(nb.mesh_id);
+                if (nb.fabric_node_id.has_value()) {
+                    out.insert(nb.fabric_node_id->mesh_id);
+                }
+            }
+        }
+    }
+    for (const auto& node : g.mesh_level_graph_.get_nodes()) {
+        out.insert(node);
+        for (const auto& nbr : g.mesh_level_graph_.get_neighbors(node)) {
+            out.insert(nbr);
+        }
+    }
+}
+
+}  // namespace
+
 LogicalMultiMeshGraph merge_logical_multi_mesh_adjacency_graphs(
     const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs) {
-    // Implement this
+    LogicalMultiMeshGraph merged;
+    ::tt::tt_fabric::AdjacencyGraph<MeshId>::AdjacencyMap merged_mesh_level;
+    std::set<MeshId> global_seen_mesh_ids;
+
+    for (const auto& g : logical_multi_mesh_graphs) {
+        std::set<MeshId> meshes;
+        collect_mesh_ids_from_logical_multi_mesh_graph(g, meshes);
+
+        for (MeshId m : meshes) {
+            if (global_seen_mesh_ids.contains(m)) {
+                TT_THROW(
+                    "merge_logical_multi_mesh_adjacency_graphs: MeshId {} appears in more than one input graph. "
+                    "Assign disjoint mesh IDs across inputs.",
+                    m.get());
+            }
+        }
+
+        for (const auto& [mesh_id, adj] : g.mesh_adjacency_graphs_) {
+            merged.mesh_adjacency_graphs_[mesh_id] = adj;
+        }
+
+        for (const auto& [node, nbrs] : g.mesh_level_graph_.get_adjacency_map()) {
+            auto& slot = merged_mesh_level[node];
+            slot.insert(slot.end(), nbrs.begin(), nbrs.end());
+        }
+
+        for (const auto& [mesh_id, exit_adj] : g.mesh_exit_node_graphs_) {
+            merged.mesh_exit_node_graphs_[mesh_id] = exit_adj;
+        }
+
+        global_seen_mesh_ids.insert(meshes.begin(), meshes.end());
+    }
+
+    merged.mesh_level_graph_ = ::tt::tt_fabric::AdjacencyGraph<MeshId>(merged_mesh_level);
+    return merged;
 }
 
 LogicalMultiMeshGraph build_logical_multi_mesh_adjacency_graph(

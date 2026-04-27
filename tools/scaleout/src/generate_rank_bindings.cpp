@@ -221,6 +221,9 @@ TopologyMappingResult run_topology_mapping(
     log_info(tt::LogFabric, "Building physical multi-mesh adjacency graph...");
     PhysicalMultiMeshGraph physical_graph = build_physical_multi_mesh_adjacency_graph(psd, pgd, mgd);
 
+    // TODO: Add multiple logical ids, and save the mapping offset for each logical graph please
+    // LogicalMultiMeshGraph logical_graph = build_logical_multi_mesh_adjacency_graph(mesh_graph, offset);
+
     // Build logical multi-mesh graph from MGD
     // Need to create MeshGraph from cluster and MGD path
     log_info(tt::LogFabric, "Building logical multi-mesh adjacency graph...");

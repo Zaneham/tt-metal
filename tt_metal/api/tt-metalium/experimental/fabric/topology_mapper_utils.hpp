@@ -314,6 +314,29 @@ LogicalMultiMeshGraph build_logical_multi_mesh_adjacency_graph(
     const ::tt::tt_fabric::MeshGraphDescriptor& mesh_graph_descriptor);
 
 /**
+ * @brief Merge logical multi-mesh graphs into one, preserving mesh IDs
+ *
+ * Concatenates the inputs in vector order without remapping MeshId or FabricNodeId mesh
+ * components. If any MeshId from a later graph already appears in an earlier one (in per-mesh
+ * fabric adjacency, mesh-level graph, or exit-node map), throws via TT_THROW (std::runtime_error).
+ *
+ * @note Why preserve mesh IDs? Downstream topology mapping and rank-binding paths key logical
+ *       state by MeshId and by FabricNodeId (which embeds mesh_id). Silently renumbering meshes
+ *       here would break alignment with per-MGD metadata (e.g. fabric_node_id_to_mesh_rank,
+ *       YAML sub-context coordinates) unless every caller also carried a global remap table.
+ *       Keeping IDs stable makes the merged graph a true union of disjoint logical worlds.
+ *
+ * @note Why disjoint IDs are required: LogicalMultiMeshGraph stores per-mesh data in
+ *       std::map<MeshId, ...>. Two different input MGDs that both use mesh_id 0 would map to the
+ *       same key; merging would overwrite or mix unrelated intra-mesh graphs and inter-mesh edges.
+ *       Requiring disjoint MeshId spaces across inputs (or editing MGDs before building logical
+ *       graphs) avoids ambiguous merges. Typical multi-sub-context setups offset mesh_id in the
+ *       descriptor so each overlay occupies its own id range.
+ */
+LogicalMultiMeshGraph merge_logical_multi_mesh_adjacency_graphs(
+    const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs);
+
+/**
  * @brief Represents a physical mesh node in a 2-layer adjacency graph
  *
  * Simplified to just be a MeshId. The internal adjacency graph is accessed via

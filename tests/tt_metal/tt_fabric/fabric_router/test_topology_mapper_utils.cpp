@@ -19,8 +19,10 @@
 #include <random>
 #include <unordered_set>
 #include <string>
+#include <string_view>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <tt-logger/tt-logger.hpp>
 #include <tt-metalium/experimental/fabric/fabric_types.hpp>
 #include <tt-metalium/experimental/fabric/topology_mapper_utils.hpp>
