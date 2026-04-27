@@ -71,6 +71,7 @@ inline void llk_math_eltwise_binary(
     LLK_ASSERT((dst_index < get_dest_max_tiles<DST_SYNC_MODE, DST_ACCUM_MODE, DstTileShape::Tile32x32>()), "");
 
     const std::uint32_t operand_id = get_operand_id(operand_A);
+    // Demo 4: Set invalid tensor_shape to trigger LLK_ASSERT
     const ckernel::TensorShape tensor_shape = get_operand_tensor_shape(operand_id);
 
     _llk_math_eltwise_binary_<

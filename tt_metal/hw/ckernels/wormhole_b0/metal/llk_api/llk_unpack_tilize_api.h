@@ -197,6 +197,7 @@ inline void llk_unpack_fast_tilize_block(
     const std::uint32_t num_units,
     const std::uint32_t full_dim) {
     const std::uint32_t operand_id = get_operand_id(operand);
+    // Demo 1: Replace num_faces with value 1.
     const std::uint32_t num_faces = get_operand_num_faces(operand_id);
     const std::uint32_t base_address = get_local_cb_interface(operand_id).fifo_rd_ptr - 1;
 

@@ -262,6 +262,7 @@ Internal helper function for all broadcast ops
 template <EltwiseBinaryType tBcastOp, BroadcastType tBcastDim>
 ALWI void any_tiles_bcast(
     uint32_t icb0, uint32_t icb1, uint32_t itile0, uint32_t itile1, uint32_t idst, uint32_t bcast_row_idx = 0) {
+    // Demo 4: Put MATH_FIDELITY instead of MathFidelity::LoFi to trigger LLK_ASSERT
     if constexpr (tBcastOp == ELWMUL) {
         MATH((llk_math_eltwise_binary<
               tBcastOp,

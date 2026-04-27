@@ -109,6 +109,7 @@ struct DeepseekMoeGate {
             // TRISC: Compute gate logic
             // ================================================================
 
+            // Demo 3: Comment out reconfig_data_format to make kernel returning wrong results.
             // Input indices CB should have the same tile shape as the input CB
             reconfig_data_format<false, true>(CTArgs::input_indices_cb, CTArgs::bias_cb);
             // Output indices CB should have the same tile shape as the output CB

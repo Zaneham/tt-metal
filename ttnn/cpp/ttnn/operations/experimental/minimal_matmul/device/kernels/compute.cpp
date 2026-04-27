@@ -51,6 +51,7 @@ void add_bias_block(uint32_t in_cb, uint32_t bias_cb, uint32_t out_cb, uint32_t 
     pack_reconfig_data_format(out_cb);
     uint32_t fused_act_dst_id = 0;
 
+    // Demo 4: Set invalid tile_id to trigger LLK_ASSERT
     uint32_t tile_id = 0;
     for (uint32_t m = 0; m < M_block_tiles; m++) {
         for (uint32_t n = 0; n < N_block_tiles; n++) {

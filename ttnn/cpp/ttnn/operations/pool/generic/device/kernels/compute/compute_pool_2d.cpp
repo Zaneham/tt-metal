@@ -56,6 +56,9 @@ void kernel_main() {
 
     constexpr uint32_t face_r_dim = window_size_hw < FACE_HEIGHT ? window_size_hw : FACE_HEIGHT;
     constexpr bool last_tile_is_partial = in_c % TILE_WIDTH != 0;
+    // Demo 1 part 1: Set invalid num_faces_in_input_tile to trigger LLK_ASSERT
+    //
+    // constexpr uint32_t num_faces_in_input_tile = 3;
     constexpr uint32_t num_faces_in_input_tile =
         (max_sticks_for_reduction < TILE_HEIGHT || window_size_hw <= FACE_HEIGHT) ? 2 : 4;
     constexpr uint32_t num_faces_in_output_tile = 2;
