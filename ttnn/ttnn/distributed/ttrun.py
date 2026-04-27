@@ -358,6 +358,101 @@ def find_generate_rank_bindings_executable() -> Path:
     )
 
 
+# Key must match C++ :cpp:expr:`kSubcontextMgdMappingYamlKey` in
+# :file:`tools/scaleout/src/generate_rank_bindings_helpers.hpp`
+SUBCONTEXT_MGD_MAPPING_YAML_KEY = "subcontext_id_to_mesh_graph_descriptor"
+
+
+def _resolve_mgd_path_for_subcontext_mapping(path_str: str, base_dir: Path, tt_metal_home: Optional[str]) -> Path:
+    """Resolve one MGD path the same way as C++ :cpp:func:`load_subcontext_id_to_mesh_graph_descriptor_mapping`."""
+    mgd = Path(path_str)
+    if mgd.is_absolute():
+        if not mgd.is_file():
+            raise FileNotFoundError(f"MGD file does not exist: {mgd}")
+        return mgd
+    from_mapping = (base_dir / mgd).resolve()
+    if from_mapping.is_file():
+        return from_mapping
+    if tt_metal_home:
+        from_home = (Path(tt_metal_home) / path_str).resolve()
+        if from_home.is_file():
+            return from_home
+        raise FileNotFoundError(
+            f"MGD file does not exist: {from_mapping} (also tried {from_home} via TT_METAL_HOME={tt_metal_home!r})"
+        )
+    raise FileNotFoundError(
+        f"MGD file does not exist: {from_mapping}. "
+        f"Set environment variable TT_METAL_HOME to the top of your tt-metal checkout so each mapping "
+        f"path (e.g. {path_str!r}) can resolve to $TT_METAL_HOME/{path_str} — the same as "
+        f"generate_rank_bindings for repository-relative MGD entries."
+    )
+
+
+def _load_resolved_mgd_paths_from_mapping_yaml(mapping_yaml_path: Path) -> list[tuple[int, Path]]:
+    """Parse MGD mapping YAML, validate like C++, return ``(subcontext_id, path)`` sorted by id.
+
+    Raises:
+        FileNotFoundError: Mapping file or a referenced MGD is missing.
+        ValueError: Invalid structure (missing key, non-dense ids, etc.).
+    """
+    if not mapping_yaml_path.is_file():
+        raise FileNotFoundError(f"MGD mapping file does not exist: {mapping_yaml_path}")
+    with open(mapping_yaml_path, "r", encoding="utf-8") as f:
+        root = yaml.safe_load(f)
+    if not isinstance(root, dict) or SUBCONTEXT_MGD_MAPPING_YAML_KEY not in root:
+        raise ValueError(
+            f"MGD mapping YAML must contain top-level key '{SUBCONTEXT_MGD_MAPPING_YAML_KEY}': {mapping_yaml_path}"
+        )
+    map_node = root[SUBCONTEXT_MGD_MAPPING_YAML_KEY]
+    if not isinstance(map_node, dict):
+        raise ValueError(f"'{SUBCONTEXT_MGD_MAPPING_YAML_KEY}' must be a mapping in {mapping_yaml_path}")
+    base_dir = mapping_yaml_path.parent if mapping_yaml_path.parent.parts else Path(".")
+    tt_metal_home = os.environ.get("TT_METAL_HOME")
+    out: dict[int, Path] = {}
+    for k, v in map_node.items():
+        try:
+            subctx = int(k)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"MGD mapping: subcontext id key must be an integer, got {k!r} in {mapping_yaml_path}"
+            ) from e
+        if subctx < 0:
+            raise ValueError(f"MGD mapping: subcontext id must be non-negative, got {subctx} in {mapping_yaml_path}")
+        if subctx in out:
+            raise ValueError(f"MGD mapping: duplicate subcontext id: {subctx} in {mapping_yaml_path}")
+        if v is None or isinstance(v, (list, dict)):
+            raise ValueError(
+                f"MGD mapping: path for subcontext {subctx} must be a string scalar, got {v!r} in {mapping_yaml_path}"
+            )
+        path_str = str(v)
+        out[subctx] = _resolve_mgd_path_for_subcontext_mapping(path_str, base_dir, tt_metal_home)
+    if not out:
+        raise ValueError(f"MGD mapping: must list at least one subcontext_id in {mapping_yaml_path}")
+    max_id = max(out.keys())
+    for i in range(max_id + 1):
+        if i not in out:
+            raise ValueError(
+                f"MGD mapping: subcontext ids must be dense starting at 0; missing subcontext_id {i} in {mapping_yaml_path}"
+            )
+    return sorted(out.items(), key=lambda x: x[0])
+
+
+def mesh_graph_path_is_mgd_mapping_yaml(mgd_path: Path) -> bool:
+    """Return True if ``mgd_path`` is a multi-MGD mapping YAML (``subcontext_id_to_mesh_graph_descriptor``).
+
+    ``generate_rank_bindings`` then needs ``--mesh-graph-descriptor-mapping`` (``-M``), not
+    ``--mesh-graph-descriptor`` (``-m``). Single MGDs use ``.textproto``; a ``.yaml``/``.yml`` with the
+    mapping key is the mapping file from :file:`mgd-rank-binding-plan.md`.
+    """
+    if mgd_path.suffix.lower() not in (".yaml", ".yml"):
+        return False
+    try:
+        head = mgd_path.read_text(encoding="utf-8", errors="replace")[:32768]
+    except OSError:
+        return False
+    return SUBCONTEXT_MGD_MAPPING_YAML_KEY in head
+
+
 def get_generate_rank_bindings_output_paths(output_dir: Path) -> tuple[Path, Path]:
     """Get the output paths for generate_rank_bindings.
 
@@ -386,12 +481,18 @@ def compute_phase1_cache_fingerprint_full(
     hosts: Optional[List[str]],
     mock_rank_to_desc: Optional[Dict[int, Path]],
 ) -> str:
-    """Full SHA-256 hex (64 chars) of MGD + hosts or mock descriptor contents.
+    """Full SHA-256 hex (64 chars) of MGD (or MGD mapping + all referenced MGDs) + hosts or mock descriptor contents.
+
+    If ``mgd_path`` is a multi-MGD mapping YAML
+    (see :func:`mesh_graph_path_is_mgd_mapping_yaml`), the fingerprint includes the mapping file bytes
+    and each resolved :file:`.textproto` MGD, in subcontext id order, matching
+    C++ :cpp:func:`load_subcontext_id_to_mesh_graph_descriptor_mapping`.
 
     Stored in :data:`PHASE1_CACHE_KEY_FILENAME` to validate cache hits; directory name uses only a prefix.
 
     Raises:
-        ValueError: Invalid host/mock combination.
+        ValueError: Invalid host/mock combination, or invalid mapping YAML.
+        FileNotFoundError: Referenced MGD from mapping is missing.
     """
     if hosts is not None and mock_rank_to_desc is not None:
         raise ValueError("hosts and mock_rank_to_desc are mutually exclusive for cache id")
@@ -399,8 +500,17 @@ def compute_phase1_cache_fingerprint_full(
         raise ValueError("Either hosts or mock_rank_to_desc is required")
 
     h = hashlib.sha256()
-    h.update(mgd_path.read_bytes())
-    h.update(b"\0")
+    if mesh_graph_path_is_mgd_mapping_yaml(mgd_path):
+        h.update(mgd_path.read_bytes())
+        h.update(b"\0")
+        for subctx, mgd_file in _load_resolved_mgd_paths_from_mapping_yaml(mgd_path):
+            h.update(str(subctx).encode("ascii"))
+            h.update(b"\0")
+            h.update(mgd_file.read_bytes())
+        h.update(b"\0")
+    else:
+        h.update(mgd_path.read_bytes())
+        h.update(b"\0")
     if hosts is not None:
         h.update(json.dumps(hosts, separators=(",", ":"), ensure_ascii=False).encode())
     else:
@@ -419,7 +529,8 @@ def compute_phase1_cache_id(
 ) -> str:
     """Short hex id for Phase 1 cache directory (prefix of SHA-256).
 
-    Content-based on MGD bytes; host sets are order-invariant (use sorted(hosts) when calling).
+    Content-based on MGD bytes, or on MGD mapping YAML plus every resolved MGD for multi-MGD configs;
+    host sets are order-invariant (use sorted(hosts) when calling).
     Mock mode fingerprints each mock descriptor file by content, keys in sorted order.
 
     Args:
@@ -786,6 +897,12 @@ def build_generate_rank_bindings_mpi_cmd(
     if mpi_args:
         cmd.extend(mpi_args)
 
+    mgd_arg = (
+        ["--mesh-graph-descriptor-mapping", str(mgd_path.resolve())]
+        if mesh_graph_path_is_mgd_mapping_yaml(mgd_path)
+        else ["--mesh-graph-descriptor", str(mgd_path.resolve())]
+    )
+
     if mock_rank_to_desc:
         # Mock cluster: all processes on localhost
         # Use per-rank -np 1 segments to set per-rank env vars (similar to legacy_flow)
@@ -802,7 +919,7 @@ def build_generate_rank_bindings_mpi_cmd(
             cmd.extend(["-np", "1"])
             cmd.extend(["-x", f"TT_METAL_MOCK_CLUSTER_DESC_PATH={desc_path.resolve()}"])
             cmd.append(str(executable.resolve()))
-            cmd.extend(["--mesh-graph-descriptor", str(mgd_path.resolve())])
+            cmd.extend(mgd_arg)
             cmd.extend(["--output-dir", str(output_dir.resolve())])
 
         # Return early for mock mode (already added executable and args per rank)
@@ -817,7 +934,7 @@ def build_generate_rank_bindings_mpi_cmd(
         cmd.extend(["--host", hosts_str])
         cmd.extend(["-np", str(np)])
         cmd.append(str(executable.resolve()))
-        cmd.extend(["--mesh-graph-descriptor", str(mgd_path.resolve())])
+        cmd.extend(mgd_arg)
         cmd.extend(["--output-dir", str(output_dir.resolve())])
     else:
         raise ValueError("Either hosts or mock_rank_to_desc must be provided")
@@ -2689,7 +2806,9 @@ def new_mode_flow(
     "--mesh-graph-descriptor",
     type=click.Path(path_type=Path),
     required=False,
-    help="Mesh graph descriptor file. When provided, enables new mode (mutually exclusive with --rank-binding). "
+    help="Single MGD as a .textproto, or a YAML mapping (subcontext_id_to_mesh_graph_descriptor) for multiple MGDs. "
+    "The same option is used for both; tt-run passes -m or -M to generate_rank_bindings accordingly. "
+    "When set, enables new mode (mutually exclusive with --rank-binding). "
     "Requires --hosts unless --mock-cluster-rank-binding is provided.",
 )
 @click.option(

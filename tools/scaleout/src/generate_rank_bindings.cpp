@@ -40,6 +40,38 @@ using namespace tt::tt_metal;
 using namespace tt::tt_metal::experimental::tt_fabric;
 using namespace tt::tt_fabric;
 
+namespace {
+struct MeshGraphAndLocalMeshId {
+    const MeshGraph* graph = nullptr;
+    MeshId local_mesh_id{0};
+};
+
+// Resolves a logical global MeshId (after merge) to the owning MeshGraph and MGD-local mesh id.
+std::optional<MeshGraphAndLocalMeshId> resolve_mesh_graph_for_global_mesh_id(
+    const std::vector<MeshGraph>& mesh_graphs, MeshId global_mesh_id, const TopologyMappingResult& mapping_result) {
+    const auto& rem = mapping_result.logical_mesh_id_merge_remap;
+    if (rem.has_value() && !rem->global_mesh_id_to_origin.empty()) {
+        auto it = rem->global_mesh_id_to_origin.find(global_mesh_id);
+        if (it == rem->global_mesh_id_to_origin.end()) {
+            return std::nullopt;
+        }
+        const std::size_t idx = it->second.input_index;
+        if (idx >= mesh_graphs.size()) {
+            return std::nullopt;
+        }
+        return MeshGraphAndLocalMeshId{&mesh_graphs[idx], it->second.local_mesh_id};
+    }
+    for (const auto& g : mesh_graphs) {
+        for (const auto& mid : g.get_all_mesh_ids()) {
+            if (mid == global_mesh_id) {
+                return MeshGraphAndLocalMeshId{&g, global_mesh_id};
+            }
+        }
+    }
+    return std::nullopt;
+}
+}  // namespace
+
 /**
  * @brief Run Physical System Descriptor discovery via MPI
  *
@@ -205,54 +237,58 @@ void print_physical_adjacency_map(
 /**
  * @brief Run topology mapper to map logical meshes to physical ASICs
  *
- * This function:
- * 1. Builds physical multi-mesh graph from PSD, PGD, and MGD
- * 2. Builds logical multi-mesh graph from MGD (via MeshGraph)
- * 3. Configures topology mapping with strict mode and disabled rank bindings
- * 4. Runs map_multi_mesh_to_physical
- * 5. Returns the mapping result
+ * @param mesh_graph_descriptors  Const reference to the caller's vector of loaded MGDs (the `std::vector`
+ *                                is not copied—only a reference is passed). Must match `mgd_paths_in_order`
+ *                                in length and order (one path per descriptor for `MeshGraph` host ranks).
+ * @param mgd_paths_in_order      Const reference to paths parallel to `mesh_graph_descriptors`.
  */
 TopologyMappingResult run_topology_mapping(
     const PhysicalSystemDescriptor& psd,
     const PhysicalGroupingDescriptor& pgd,
-    const MeshGraphDescriptor& mgd,
-    const std::filesystem::path& mgd_path) {
-    // Build physical multi-mesh graph from PSD, PGD, and MGD
-    log_info(tt::LogFabric, "Building physical multi-mesh adjacency graph...");
-    PhysicalMultiMeshGraph physical_graph = build_physical_multi_mesh_adjacency_graph(psd, pgd, mgd);
+    const std::vector<MeshGraphDescriptor>& mesh_graph_descriptors,
+    const std::vector<std::filesystem::path>& mgd_paths_in_order) {
+    if (mesh_graph_descriptors.size() != mgd_paths_in_order.size() || mesh_graph_descriptors.empty()) {
+        throw std::invalid_argument(
+            "run_topology_mapping: mesh_graph_descriptors and mgd_paths_in_order size must match and be non-empty");
+    }
 
-    // TODO: Add multiple logical ids, and save the mapping offset for each logical graph please
-    // LogicalMultiMeshGraph logical_graph = build_logical_multi_mesh_adjacency_graph(mesh_graph, offset);
+    log_info(
+        tt::LogFabric, "Building physical multi-mesh adjacency graph ({} MGD(s))...", mesh_graph_descriptors.size());
+    PhysicalMultiMeshGraph physical_graph = build_physical_multi_mesh_adjacency_graph(psd, pgd, mesh_graph_descriptors);
 
-    // Build logical multi-mesh graph from MGD
-    // Need to create MeshGraph from cluster and MGD path
-    log_info(tt::LogFabric, "Building logical multi-mesh adjacency graph...");
-    auto& context = tt::tt_metal::MetalContext::instance();
-    const auto& cluster = context.get_cluster();
-    MeshGraph mesh_graph(cluster, mgd_path.string());
-    LogicalMultiMeshGraph logical_graph = build_logical_multi_mesh_adjacency_graph(mesh_graph);
-
-    // Print adjacency maps
+    log_info(tt::LogFabric, "Building logical multi-mesh adjacency graph from MeshGraphDescriptor(s)...");
+    std::vector<LogicalMultiMeshGraph> logical_parts;
+    logical_parts.reserve(mesh_graph_descriptors.size());
+    for (const MeshGraphDescriptor& mgd : mesh_graph_descriptors) {
+        logical_parts.push_back(build_logical_multi_mesh_adjacency_graph(mgd));
+    }
+    LogicalMultiMeshMergeRemap merge_remap;
+    LogicalMultiMeshGraph logical_graph;
+    if (logical_parts.size() == 1) {
+        logical_graph = std::move(logical_parts[0]);
+        build_identity_logical_mesh_id_remap(logical_graph, merge_remap);
+    } else {
+        logical_graph = merge_logical_multi_mesh_adjacency_graphs(logical_parts, &merge_remap);
+    }
     print_logical_adjacency_map(logical_graph);
     print_physical_adjacency_map(physical_graph, psd);
 
-    // Configure topology mapping
     TopologyMappingConfig config;
     config.strict_mode = true;
-    config.disable_rank_bindings = false;  // Pass the rank bindings to make sure there isn't host rank boundary issues
+    config.disable_rank_bindings = false;
 
-    // Provide hostname_to_asics from PSD so same-host constraint is applied (all ASICs on a host map to one rank)
     for (const auto& [asic_id, desc] : psd.get_asic_descriptors()) {
         config.hostname_to_asics[desc.host_name].insert(asic_id);
     }
 
-    // Extract pinnings from MGD and add to config (same as control plane)
-    const auto& pinnings = mgd.get_pinnings();
-    for (const auto& [pos, fabric_node] : pinnings) {
-        config.pinnings.emplace_back(pos, fabric_node);
+    for (std::size_t mgi = 0; mgi < mesh_graph_descriptors.size(); ++mgi) {
+        const MeshGraphDescriptor& mgd = mesh_graph_descriptors[mgi];
+        for (const auto& [pos, fabric_node] : mgd.get_pinnings()) {
+            const MeshId global_mesh = merge_remap.per_mgd_local_to_global_mesh_id[mgi].at(fabric_node.mesh_id);
+            config.pinnings.emplace_back(pos, FabricNodeId(global_mesh, fabric_node.chip_id));
+        }
     }
 
-    // Build ASIC positions map (required if pinnings are used)
     if (!config.pinnings.empty()) {
         const auto& asic_descriptors = psd.get_asic_descriptors();
         for (const auto& [asic_id, _] : asic_descriptors) {
@@ -262,49 +298,64 @@ TopologyMappingResult run_topology_mapping(
         }
     }
 
-    // Set per-mesh validation modes based on mesh graph policy
-    for (const auto& mesh_id : mesh_graph.get_all_mesh_ids()) {
-        config.mesh_validation_modes[mesh_id] = mesh_graph.is_intra_mesh_policy_relaxed(mesh_id)
-                                                    ? ::tt::tt_fabric::ConnectionValidationMode::RELAXED
-                                                    : ::tt::tt_fabric::ConnectionValidationMode::STRICT;
+    auto& metal_context = MetalContext::instance();
+    const auto& cluster = metal_context.get_cluster();
+    std::vector<MeshGraph> mesh_graphs;
+    mesh_graphs.reserve(mgd_paths_in_order.size());
+    for (const auto& p : mgd_paths_in_order) {
+        mesh_graphs.emplace_back(cluster, p.string());
     }
 
-    // Set inter-mesh validation mode based on mesh graph policy
-    // TODO: Enable per-connection inter-mesh validation mode. Currently, all inter-mesh connections
-    // use the same validation mode based on the mesh graph's global inter-mesh policy. In the future,
-    // we should support mixed STRICT and RELAXED policies where some inter-mesh connections are
-    // device-level (strict) and others are mesh-level (relaxed).
-    config.inter_mesh_validation_mode = mesh_graph.is_inter_mesh_policy_relaxed()
-                                            ? ::tt::tt_fabric::ConnectionValidationMode::RELAXED
-                                            : ::tt::tt_fabric::ConnectionValidationMode::STRICT;
+    for (std::size_t gi = 0; gi < mesh_graphs.size(); ++gi) {
+        const auto& mesh_graph = mesh_graphs[gi];
+        for (const auto& mid_local : mesh_graph.get_all_mesh_ids()) {
+            const MeshId mid_global = merge_remap.per_mgd_local_to_global_mesh_id[gi].at(mid_local);
+            config.mesh_validation_modes[mid_global] = mesh_graph.is_intra_mesh_policy_relaxed(mid_local)
+                                                           ? ::tt::tt_fabric::ConnectionValidationMode::RELAXED
+                                                           : ::tt::tt_fabric::ConnectionValidationMode::STRICT;
+        }
+        const bool relaxed = mesh_graph.is_inter_mesh_policy_relaxed();
+        if (!config.inter_mesh_validation_mode.has_value()) {
+            config.inter_mesh_validation_mode = relaxed ? ::tt::tt_fabric::ConnectionValidationMode::RELAXED
+                                                        : ::tt::tt_fabric::ConnectionValidationMode::STRICT;
+        } else {
+            const bool existing_relaxed =
+                config.inter_mesh_validation_mode.value() == ::tt::tt_fabric::ConnectionValidationMode::RELAXED;
+            if (existing_relaxed != relaxed) {
+                throw std::runtime_error(
+                    "Multi-MGD: conflicting inter-mesh validation policy between MGDs (STRICT vs RELAXED).");
+            }
+        }
+    }
     if (config.inter_mesh_validation_mode.value() == ::tt::tt_fabric::ConnectionValidationMode::RELAXED) {
         log_info(tt::LogFabric, "Inter-mesh validation mode: RELAXED");
     } else {
         log_info(tt::LogFabric, "Inter-mesh validation mode: STRICT");
     }
 
-    // Build logical rank bindings from mesh graph: each fabric node gets its mesh_host_rank from the mesh graph
+    // Rank bindings use global logical MeshId keys (merged graph); FabricNodeId mesh_id matches the logical graph.
     std::map<MeshId, std::map<FabricNodeId, MeshHostRankId>> fabric_node_id_to_mesh_rank;
-    for (const auto& mesh_id : mesh_graph.get_all_mesh_ids()) {
-        const auto& chip_ids = mesh_graph.get_chip_ids(mesh_id);
-        for (const auto& [coord, chip_id] : chip_ids) {
-            FabricNodeId fabric_node_id(mesh_id, chip_id);
-            auto mesh_host_rank = mesh_graph.get_host_rank_for_chip(mesh_id, chip_id);
-            if (mesh_host_rank.has_value()) {
-                fabric_node_id_to_mesh_rank[mesh_id][fabric_node_id] = mesh_host_rank.value();
+    for (std::size_t gi = 0; gi < mesh_graphs.size(); ++gi) {
+        const auto& mesh_graph = mesh_graphs[gi];
+        for (const auto& mesh_id_local : mesh_graph.get_all_mesh_ids()) {
+            const MeshId mesh_id_global = merge_remap.per_mgd_local_to_global_mesh_id[gi].at(mesh_id_local);
+            const auto& chip_ids = mesh_graph.get_chip_ids(mesh_id_local);
+            for (const auto& [coord, chip_id] : chip_ids) {
+                FabricNodeId fabric_node_id(mesh_id_global, chip_id);
+                auto mesh_host_rank = mesh_graph.get_host_rank_for_chip(mesh_id_local, chip_id);
+                if (mesh_host_rank.has_value()) {
+                    fabric_node_id_to_mesh_rank[mesh_id_global][fabric_node_id] = mesh_host_rank.value();
+                }
             }
         }
     }
 
-    // Physical rank bindings: all ASICs set to UNSET - let topology mapper assign physical ASICs to hosts
-    // Build asic_id_to_mesh_rank from physical graph mesh IDs to match the physical graph structure
     std::map<MeshId, std::map<tt::tt_metal::AsicID, MeshHostRankId>> asic_id_to_mesh_rank = {};
 
-    // Run mapping with logical rank bindings from mesh graph
     log_info(tt::LogFabric, "Running topology mapping with mesh graph rank bindings...");
     TopologyMappingResult result = map_multi_mesh_to_physical(
         logical_graph, physical_graph, config, asic_id_to_mesh_rank, fabric_node_id_to_mesh_rank);
-
+    result.logical_mesh_id_merge_remap = std::move(merge_remap);
     return result;
 }
 
@@ -324,7 +375,13 @@ TopologyMappingResult run_topology_mapping(
  * Assigns contiguous ranks 0..N-1 and per-hostname slot indices for the rankfile.
  */
 std::vector<RankBindingConfig> extract_rank_bindings(
-    const PhysicalSystemDescriptor& psd, const TopologyMappingResult& mapping_result, const MeshGraph& mesh_graph) {
+    const PhysicalSystemDescriptor& psd,
+    const TopologyMappingResult& mapping_result,
+    const std::vector<MeshGraph>& mesh_graphs) {
+    if (mesh_graphs.empty()) {
+        throw std::invalid_argument("extract_rank_bindings: at least one MeshGraph is required");
+    }
+
     struct AsicGrouping {
         std::vector<AsicID> asic_ids;
         std::vector<tt::ChipId> chip_ids;
@@ -336,17 +393,29 @@ std::vector<RankBindingConfig> extract_rank_bindings(
 
     // Iterate through fabric_node_to_asic mapping
     for (const auto& [fabric_node_id, asic_id] : mapping_result.fabric_node_to_asic) {
-        MeshId mesh_id = fabric_node_id.mesh_id;
+        MeshId mesh_id_global = fabric_node_id.mesh_id;
         tt::ChipId chip_id_from_fabric_node = static_cast<tt::ChipId>(fabric_node_id.chip_id);
 
+        std::optional<MeshGraphAndLocalMeshId> resolved =
+            resolve_mesh_graph_for_global_mesh_id(mesh_graphs, mesh_id_global, mapping_result);
+        if (!resolved.has_value() || resolved->graph == nullptr) {
+            log_error(
+                tt::LogFabric,
+                "No MeshGraph / local mesh for global logical mesh_id {} (check logical_mesh_id merge remap).",
+                *mesh_id_global);
+            continue;
+        }
+        const MeshGraph* mesh_graph = resolved->graph;
+        const MeshId mesh_id_local = resolved->local_mesh_id;
+
         std::optional<MeshHostRankId> mesh_host_rank =
-            mesh_graph.get_host_rank_for_chip(mesh_id, chip_id_from_fabric_node);
+            mesh_graph->get_host_rank_for_chip(mesh_id_local, chip_id_from_fabric_node);
 
         if (!mesh_host_rank.has_value()) {
             log_error(
                 tt::LogFabric,
-                "No mesh host rank found for mesh_id {} and chip_id {}",
-                *mesh_id,
+                "No mesh host rank found for mesh_id (global) {} and chip_id {}",
+                *mesh_id_global,
                 chip_id_from_fabric_node);
             continue;
         }
@@ -354,7 +423,7 @@ std::vector<RankBindingConfig> extract_rank_bindings(
         std::string hostname = psd.get_host_name_for_asic(asic_id);
         tt::ChipId chip_id = psd.get_umd_unique_id(asic_id);
 
-        int mesh_id_int = static_cast<int>(*mesh_id);
+        int mesh_id_int = static_cast<int>(*mesh_id_global);
         const int mesh_host_rank_int = static_cast<int>(*mesh_host_rank.value());
         auto& bucket = mesh_host_asics[mesh_id_int][hostname][mesh_host_rank_int];
         bucket.asic_ids.push_back(asic_id);
@@ -534,7 +603,8 @@ void gather_mock_cluster_desc_paths(
 }
 
 struct ProgramArgs {
-    std::string mesh_graph_descriptor_path;
+    /// After parsing, sub-context id -> MGD path. `-m` is normalized to `{0: path}`; `-M` is loaded from YAML.
+    std::map<int, std::filesystem::path> subcontext_id_to_mgd_path;
     std::optional<std::string> physical_grouping_descriptor_path;
     std::optional<std::string> output_dir;
 };
@@ -549,12 +619,17 @@ ProgramArgs parse_arguments(int argc, char** argv) {
         "Requires a Metal build with Open MPI (USE_MPI) enabled; run under an MPI launcher (e.g. mpirun, srun).\n"
         "Single-process runs are allowed (e.g. mpirun -np 1) when mapping a single-rank allocation.\n\n"
         "The Mesh Graph Descriptor (MGD) specifies the logical mesh topology.\n"
+        "Provide either -m (single MGD) or -M (YAML map of subcontext_id_to_mesh_graph_descriptor). Not both.\n"
         "The Physical Grouping Descriptor (PGD) is optional and will be searched using fallback logic if not "
         "provided.");
 
     options.add_options()(
         "m,mesh-graph-descriptor",
-        "Path to Mesh Graph Descriptor file (.textproto) - REQUIRED",
+        "Path to Mesh Graph Descriptor file (.textproto) — one of -m or -M is required",
+        cxxopts::value<std::string>())(
+        "M,mesh-graph-descriptor-mapping",
+        "Path to YAML mapping: subcontext_id_to_mesh_graph_descriptor: {0: mgd0.textproto, ...} — mutually exclusive "
+        "with -m",
         cxxopts::value<std::string>())(
         "p,physical-grouping-descriptor",
         "Path to Physical Grouping Descriptor file (.textproto) - OPTIONAL",
@@ -571,12 +646,22 @@ ProgramArgs parse_arguments(int argc, char** argv) {
             exit(0);
         }
 
-        if (!result.contains("mesh-graph-descriptor")) {
-            throw std::invalid_argument("--mesh-graph-descriptor (-m) is required");
+        const bool has_m = result.contains("mesh-graph-descriptor");
+        const bool has_M = result.contains("mesh-graph-descriptor-mapping");
+        if (has_m == has_M) {
+            throw std::invalid_argument(
+                "Exactly one of --mesh-graph-descriptor (-m) or --mesh-graph-descriptor-mapping (-M) is required");
         }
 
         ProgramArgs args;
-        args.mesh_graph_descriptor_path = result["mesh-graph-descriptor"].as<std::string>();
+        if (has_m) {
+            const std::string p = result["mesh-graph-descriptor"].as<std::string>();
+            args.subcontext_id_to_mgd_path[0] = std::filesystem::path(p);
+        } else {
+            const std::string yaml_path = result["mesh-graph-descriptor-mapping"].as<std::string>();
+            args.subcontext_id_to_mgd_path =
+                load_subcontext_id_to_mesh_graph_descriptor_mapping(std::filesystem::path(yaml_path));
+        }
 
         if (result.contains("physical-grouping-descriptor")) {
             args.physical_grouping_descriptor_path = result["physical-grouping-descriptor"].as<std::string>();
@@ -618,14 +703,21 @@ int main(int argc, char** argv) {
         std::map<int, std::string> mpi_rank_to_cluster_desc_path;
         gather_mock_cluster_desc_paths(context, mpi_rank_to_cluster_desc_path);
 
-        // Stage: Load Mesh Graph Descriptor
-        std::filesystem::path mgd_path(args.mesh_graph_descriptor_path);
-        log_info(tt::LogFabric, "Stage: Loading Mesh Graph Descriptor from: {}", mgd_path.string());
-        if (!std::filesystem::exists(mgd_path) || !std::filesystem::is_regular_file(mgd_path)) {
-            throw std::runtime_error("Mesh Graph Descriptor file does not exist: " + mgd_path.string());
+        // Stage: Load Mesh Graph Descriptor (single MGD: either -m, or -M with one sub-context)
+        std::vector<MeshGraphDescriptor> mgds;
+        std::vector<std::filesystem::path> mgd_paths_in_order;
+        for (const auto& [subctx_id, mgd_path] : args.subcontext_id_to_mgd_path) {
+            log_info(
+                tt::LogFabric,
+                "Stage: Loading Mesh Graph Descriptor subcontext {} from: {}",
+                subctx_id,
+                mgd_path.string());
+            if (!std::filesystem::exists(mgd_path) || !std::filesystem::is_regular_file(mgd_path)) {
+                throw std::runtime_error("Mesh Graph Descriptor file does not exist: " + mgd_path.string());
+            }
+            mgds.emplace_back(MeshGraphDescriptor(mgd_path));
+            mgd_paths_in_order.push_back(mgd_path);
         }
-        MeshGraphDescriptor mgd(mgd_path);
-        log_info(tt::LogFabric, "Mesh Graph Descriptor loaded");
 
         // Stage: Load Physical Grouping Descriptor
         log_info(tt::LogFabric, "Stage: Loading Physical Grouping Descriptor...");
@@ -637,7 +729,8 @@ int main(int argc, char** argv) {
         if (current_rank == 0) {
             // Stage: Run topology mapping
             log_info(tt::LogFabric, "Stage: Running topology mapping...");
-            TopologyMappingResult mapping_result = run_topology_mapping(psd, pgd, mgd, mgd_path);
+
+            TopologyMappingResult mapping_result = run_topology_mapping(psd, pgd, mgds, mgd_paths_in_order);
 
             if (!mapping_result.success) {
                 log_error(tt::LogFabric, "Topology mapping failed: {}", mapping_result.error_message);
@@ -647,11 +740,15 @@ int main(int argc, char** argv) {
 
             // Stage: Extract rank bindings
             log_info(tt::LogFabric, "Stage: Extracting rank bindings...");
-            // Create MeshGraph for getting host ranks
-            auto& context = tt::tt_metal::MetalContext::instance();
-            const auto& cluster = context.get_cluster();
-            MeshGraph mesh_graph(cluster, mgd_path.string());
-            std::vector<RankBindingConfig> rank_bindings = extract_rank_bindings(psd, mapping_result, mesh_graph);
+            auto& metal_context = tt::tt_metal::MetalContext::instance();
+            const auto& cluster = metal_context.get_cluster();
+            std::vector<MeshGraph> mesh_graphs_for_extract;
+            mesh_graphs_for_extract.reserve(mgd_paths_in_order.size());
+            for (const auto& p : mgd_paths_in_order) {
+                mesh_graphs_for_extract.emplace_back(cluster, p.string());
+            }
+            std::vector<RankBindingConfig> rank_bindings =
+                extract_rank_bindings(psd, mapping_result, mesh_graphs_for_extract);
             log_info(tt::LogFabric, "Extracted {} rank binding(s)", rank_bindings.size());
 
             // Stage: Write YAML file
@@ -661,8 +758,9 @@ int main(int argc, char** argv) {
                 args.output_dir.has_value() ? std::filesystem::path(*args.output_dir) : "generated/ttrun";
             std::filesystem::create_directories(output_dir);
 
+            const std::string mesh_desc_path_str = mgd_paths_in_order.front().string();
             std::filesystem::path output_file = output_dir / "rank_bindings.yaml";
-            write_rank_bindings_yaml(rank_bindings, args.mesh_graph_descriptor_path, output_file.string());
+            write_rank_bindings_yaml(rank_bindings, mesh_desc_path_str, output_file.string());
             log_info(tt::LogFabric, "Successfully wrote: {}", output_file.string());
 
             std::filesystem::path rankfile_path = output_dir / "rankfile";

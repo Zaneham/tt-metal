@@ -502,43 +502,166 @@ void collect_mesh_ids_from_logical_multi_mesh_graph(const LogicalMultiMeshGraph&
     }
 }
 
+namespace {
+
+::tt::tt_fabric::FabricNodeId remap_fabric_node_mesh(
+    const ::tt::tt_fabric::FabricNodeId& n, const std::map<MeshId, MeshId>& local_to_global) {
+    auto it = local_to_global.find(n.mesh_id);
+    TT_FATAL(it != local_to_global.end(), "remap: missing local mesh id {} in merge remap", n.mesh_id.get());
+    return ::tt::tt_fabric::FabricNodeId(it->second, n.chip_id);
+}
+
+LogicalExitNode remap_logical_exit(const LogicalExitNode& e, const std::map<MeshId, MeshId>& local_to_global) {
+    LogicalExitNode o;
+    o.mesh_id = local_to_global.at(e.mesh_id);
+    if (e.fabric_node_id.has_value()) {
+        o.fabric_node_id = remap_fabric_node_mesh(e.fabric_node_id.value(), local_to_global);
+    }
+    return o;
+}
+
+::tt::tt_fabric::AdjacencyGraph<::tt::tt_fabric::FabricNodeId> remap_fabric_node_adjacency(
+    const ::tt::tt_fabric::AdjacencyGraph<::tt::tt_fabric::FabricNodeId>& g,
+    const std::map<MeshId, MeshId>& local_to_global) {
+    using AdjacencyMap = ::tt::tt_fabric::AdjacencyGraph<::tt::tt_fabric::FabricNodeId>::AdjacencyMap;
+    AdjacencyMap out;
+    for (const auto& [k, nbrs] : g.get_adjacency_map()) {
+        auto nk = remap_fabric_node_mesh(k, local_to_global);
+        auto& slot = out[nk];
+        for (const auto& n : nbrs) {
+            slot.push_back(remap_fabric_node_mesh(n, local_to_global));
+        }
+    }
+    return ::tt::tt_fabric::AdjacencyGraph<::tt::tt_fabric::FabricNodeId>(out);
+}
+
+::tt::tt_fabric::AdjacencyGraph<MeshId> remap_mesh_id_adjacency(
+    const ::tt::tt_fabric::AdjacencyGraph<MeshId>& g, const std::map<MeshId, MeshId>& local_to_global) {
+    using AdjacencyMap = ::tt::tt_fabric::AdjacencyGraph<MeshId>::AdjacencyMap;
+    AdjacencyMap out;
+    for (const auto& [k, nbrs] : g.get_adjacency_map()) {
+        MeshId nk = local_to_global.at(k);
+        auto& slot = out[nk];
+        for (const auto& n : nbrs) {
+            slot.push_back(local_to_global.at(n));
+        }
+    }
+    return ::tt::tt_fabric::AdjacencyGraph<MeshId>(out);
+}
+
+::tt::tt_fabric::AdjacencyGraph<LogicalExitNode> remap_exit_node_adjacency(
+    const ::tt::tt_fabric::AdjacencyGraph<LogicalExitNode>& g, const std::map<MeshId, MeshId>& local_to_global) {
+    using AdjacencyMap = ::tt::tt_fabric::AdjacencyGraph<LogicalExitNode>::AdjacencyMap;
+    AdjacencyMap out;
+    for (const auto& [k, nbrs] : g.get_adjacency_map()) {
+        auto nk = remap_logical_exit(k, local_to_global);
+        auto& slot = out[nk];
+        for (const auto& n : nbrs) {
+            slot.push_back(remap_logical_exit(n, local_to_global));
+        }
+    }
+    return ::tt::tt_fabric::AdjacencyGraph<LogicalExitNode>(out);
+}
+
+LogicalMultiMeshGraph remap_logical_multi_mesh_for_merge(
+    const LogicalMultiMeshGraph& g, const std::map<MeshId, MeshId>& local_to_global) {
+    LogicalMultiMeshGraph o;
+    for (const auto& [mid, adj] : g.mesh_adjacency_graphs_) {
+        o.mesh_adjacency_graphs_[local_to_global.at(mid)] = remap_fabric_node_adjacency(adj, local_to_global);
+    }
+    o.mesh_level_graph_ = remap_mesh_id_adjacency(g.mesh_level_graph_, local_to_global);
+    for (const auto& [mid, eadj] : g.mesh_exit_node_graphs_) {
+        o.mesh_exit_node_graphs_[local_to_global.at(mid)] = remap_exit_node_adjacency(eadj, local_to_global);
+    }
+    return o;
+}
+
 }  // namespace
 
+}  // namespace
+
+void build_identity_logical_mesh_id_remap(
+    const LogicalMultiMeshGraph& single_graph, LogicalMultiMeshMergeRemap& out_remap) {
+    out_remap.per_mgd_local_to_global_mesh_id.clear();
+    out_remap.per_mgd_local_to_global_mesh_id.resize(1);
+    out_remap.global_mesh_id_to_origin.clear();
+    out_remap.per_input_spans.clear();
+
+    std::set<MeshId> meshes;
+    collect_mesh_ids_from_logical_multi_mesh_graph(single_graph, meshes);
+    for (MeshId m : meshes) {
+        out_remap.per_mgd_local_to_global_mesh_id[0][m] = m;
+        out_remap.global_mesh_id_to_origin[m] = LogicalMultiMeshMergeRemap::GlobalMeshOrigin{0, m};
+    }
+    if (!meshes.empty()) {
+        out_remap.per_input_spans.resize(1);
+        out_remap.per_input_spans[0].global_base = *meshes.begin();
+        out_remap.per_input_spans[0].mesh_count = static_cast<std::uint32_t>(meshes.size());
+    }
+}
+
 LogicalMultiMeshGraph merge_logical_multi_mesh_adjacency_graphs(
-    const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs) {
+    const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs, LogicalMultiMeshMergeRemap* out_remap) {
+    if (out_remap) {
+        out_remap->per_mgd_local_to_global_mesh_id.clear();
+        out_remap->global_mesh_id_to_origin.clear();
+        out_remap->per_input_spans.clear();
+    }
+
+    if (logical_multi_mesh_graphs.empty()) {
+        return {};
+    }
+    if (logical_multi_mesh_graphs.size() == 1) {
+        if (out_remap) {
+            build_identity_logical_mesh_id_remap(logical_multi_mesh_graphs[0], *out_remap);
+        }
+        return logical_multi_mesh_graphs[0];
+    }
+
     LogicalMultiMeshGraph merged;
     ::tt::tt_fabric::AdjacencyGraph<MeshId>::AdjacencyMap merged_mesh_level;
-    std::set<MeshId> global_seen_mesh_ids;
+    if (out_remap) {
+        out_remap->per_mgd_local_to_global_mesh_id.resize(logical_multi_mesh_graphs.size());
+    }
 
-    for (const auto& g : logical_multi_mesh_graphs) {
+    std::uint32_t next_base = 0;
+    for (std::size_t i = 0; i < logical_multi_mesh_graphs.size(); ++i) {
+        const auto& g = logical_multi_mesh_graphs[i];
         std::set<MeshId> meshes;
         collect_mesh_ids_from_logical_multi_mesh_graph(g, meshes);
-
+        std::map<MeshId, MeshId> local_to_global;
+        std::uint32_t j = 0;
         for (MeshId m : meshes) {
-            if (global_seen_mesh_ids.contains(m)) {
-                TT_THROW(
-                    "merge_logical_multi_mesh_adjacency_graphs: MeshId {} appears in more than one input graph. "
-                    "Assign disjoint mesh IDs across inputs.",
-                    m.get());
+            local_to_global[m] = MeshId{next_base + j};
+            if (out_remap) {
+                out_remap->per_mgd_local_to_global_mesh_id[i][m] = local_to_global[m];
+                out_remap->global_mesh_id_to_origin[local_to_global[m]] =
+                    LogicalMultiMeshMergeRemap::GlobalMeshOrigin{i, m};
             }
+            ++j;
         }
-
-        for (const auto& [mesh_id, adj] : g.mesh_adjacency_graphs_) {
-            merged.mesh_adjacency_graphs_[mesh_id] = adj;
+        if (out_remap) {
+            LogicalMultiMeshMergeRemap::PerInputMeshIdSpan span;
+            if (!meshes.empty()) {
+                span.global_base = MeshId{next_base};
+                span.mesh_count = static_cast<std::uint32_t>(meshes.size());
+            }
+            out_remap->per_input_spans.push_back(span);
         }
+        next_base += static_cast<std::uint32_t>(meshes.size());
 
-        for (const auto& [node, nbrs] : g.mesh_level_graph_.get_adjacency_map()) {
+        LogicalMultiMeshGraph part = remap_logical_multi_mesh_for_merge(g, local_to_global);
+        for (const auto& [mesh_id, adj] : part.mesh_adjacency_graphs_) {
+            merged.mesh_adjacency_graphs_[mesh_id] = std::move(adj);
+        }
+        for (const auto& [node, nbrs] : part.mesh_level_graph_.get_adjacency_map()) {
             auto& slot = merged_mesh_level[node];
             slot.insert(slot.end(), nbrs.begin(), nbrs.end());
         }
-
-        for (const auto& [mesh_id, exit_adj] : g.mesh_exit_node_graphs_) {
-            merged.mesh_exit_node_graphs_[mesh_id] = exit_adj;
+        for (const auto& [mesh_id, exit_adj] : part.mesh_exit_node_graphs_) {
+            merged.mesh_exit_node_graphs_[mesh_id] = std::move(exit_adj);
         }
-
-        global_seen_mesh_ids.insert(meshes.begin(), meshes.end());
     }
-
     merged.mesh_level_graph_ = ::tt::tt_fabric::AdjacencyGraph<MeshId>(merged_mesh_level);
     return merged;
 }
@@ -1170,7 +1293,7 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
 PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     const tt::tt_metal::PhysicalSystemDescriptor& physical_system_descriptor,
     const tt::tt_fabric::PhysicalGroupingDescriptor& physical_grouping_descriptor,
-    const std::vector<const tt::tt_fabric::MeshGraphDescriptor*>& mesh_graph_descriptors) {
+    const std::vector<tt::tt_fabric::MeshGraphDescriptor>& mesh_graph_descriptors) {
     using namespace ::tt::tt_fabric;
 
     TT_FATAL(
@@ -1189,10 +1312,7 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     std::vector<GroupingInfo> all_mesh_grouping_infos;
 
     for (size_t mgd_i = 0; mgd_i < mesh_graph_descriptors.size(); ++mgd_i) {
-        const MeshGraphDescriptor* mgd_ptr = mesh_graph_descriptors[mgd_i];
-        TT_FATAL(mgd_ptr != nullptr, "Null MeshGraphDescriptor at index {}", mgd_i);
-
-        const MeshGraphDescriptor& mesh_graph_descriptor = *mgd_ptr;
+        const MeshGraphDescriptor& mesh_graph_descriptor = mesh_graph_descriptors[mgd_i];
         log_info(tt::LogFabric, "MGD [{}]: get_valid_groupings_for_mgd from descriptor", mgd_i);
 
         auto valid_groupings_map =

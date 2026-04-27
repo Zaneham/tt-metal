@@ -725,6 +725,25 @@ class TestPhase1CacheId:
         hosts = sorted(["n1"])
         assert compute_phase1_cache_id(mgd1, hosts, None) != compute_phase1_cache_id(mgd2, hosts, None)
 
+    def test_cache_fingerprint_includes_all_mapped_mgd_contents(self, temp_dir):
+        """Multi-MGD mapping fingerprint changes when any referenced .textproto changes."""
+        mgd_a = temp_dir / "a.textproto"
+        mgd_b = temp_dir / "b.textproto"
+        mgd_a.write_bytes(b"mgd-a")
+        mgd_b.write_bytes(b"mgd-b")
+        mapping = temp_dir / "map.yaml"
+        mapping.write_text("subcontext_id_to_mesh_graph_descriptor:\n" f"  0: {mgd_a.name}\n" f"  1: {mgd_b.name}\n")
+        hosts = sorted(["n1"])
+        fp0 = compute_phase1_cache_fingerprint_full(mapping, hosts, None)
+        cid0 = compute_phase1_cache_id(mapping, hosts, None)
+        mgd_a.write_bytes(b"mgd-a-v2")
+        assert compute_phase1_cache_fingerprint_full(mapping, hosts, None) != fp0
+        assert compute_phase1_cache_id(mapping, hosts, None) != cid0
+        mgd_a.write_bytes(b"mgd-a")
+        mgd_b.write_bytes(b"mgd-b-v2")
+        assert compute_phase1_cache_fingerprint_full(mapping, hosts, None) != fp0
+        assert compute_phase1_cache_id(mapping, hosts, None) != cid0
+
     def test_cache_id_mock_same_desc_bytes_different_paths(self, temp_dir):
         mgd = temp_dir / "m.textproto"
         mgd.write_bytes(b"mgd")
