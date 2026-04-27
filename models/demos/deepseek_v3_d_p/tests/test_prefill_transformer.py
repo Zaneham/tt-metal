@@ -53,7 +53,9 @@ PCC_THRESHOLD = 0.99
 # or any InfiniteBench subset name (downloaded on first use via infinitebench_prompt fixture).
 INFINITEBENCH_SUBSET_NAMES = {"passkey", "kv_retrieval", "longdialogue_qa_eng", "longbook_qa_eng"}
 SEQ_LEN_1K = 1024
+SEQ_LEN_4K = 4 * 1024
 SEQ_LEN_25K = 25 * 1024
+SEQ_LEN_100K = 100 * 1024
 
 
 @pytest.mark.skipif(not is_blackhole(), reason="Requires Blackhole.")
@@ -65,7 +67,7 @@ SEQ_LEN_25K = 25 * 1024
     ["json_prompts", "abc_1k", "random", "passkey", "kv_retrieval", "longdialogue_qa_eng", "longbook_qa_eng"],
 )
 @pytest.mark.parametrize("pcc_validation", [True, False], ids=["pcc", "smoke"])
-@pytest.mark.parametrize("isl_total", [SEQ_LEN_1K, SEQ_LEN_25K])
+@pytest.mark.parametrize("isl_total", [SEQ_LEN_1K, SEQ_LEN_4K, SEQ_LEN_25K, SEQ_LEN_100K])
 @pytest.mark.parametrize(
     "num_layers",
     [
@@ -107,6 +109,17 @@ SEQ_LEN_25K = 25 * 1024
             ttnn.Topology.Linear,
             marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
             id="mesh-8x4",
+        ),
+        pytest.param(
+            (32, 4),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+            },
+            2,
+            ttnn.Topology.Linear,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(32, 4), topology="mesh-32x4"),
+            id="mesh-32x4",
         ),
     ],
     indirect=["mesh_device", "device_params"],
