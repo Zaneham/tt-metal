@@ -28,6 +28,9 @@ inline void llk_unpack_tilize_init(
     // TODO: Once narrow-tile is supported c_dim_faces will be variable.
     constexpr std::uint32_t c_dim_faces = 2;
 
+    const DataFormat src_reg_format = static_cast<DataFormat>(unpack_dst_format[operand_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        src_reg_format, src_reg_format);
     _llk_unpack_tilize_init_<p_unpacr::UNP_A, DST_ACCUM_MODE, c_dim_faces>(operand_id, full_ct_dim, block_ct_dim);
 }
 

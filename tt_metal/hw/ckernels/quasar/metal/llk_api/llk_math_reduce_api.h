@@ -22,8 +22,15 @@
  *
  */
 template <PoolType pool_type, ReduceDim reduce_dim, ckernel::MathFidelity math_fidelity>
-inline void llk_math_reduce_init(const std::uint32_t operandA) {
+inline void llk_math_reduce_init(const std::uint32_t operandA, const std::uint32_t operandB) {
     const std::uint32_t operandA_id = get_operand_id(operandA);
+    const std::uint32_t operandB_id = get_operand_id(operandB);
+
+    const DataFormat srcA_reg_format = static_cast<DataFormat>(unpack_dst_format[operandA_id]);
+    const DataFormat srcB_reg_format = static_cast<DataFormat>(unpack_dst_format[operandB_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        srcA_reg_format, srcB_reg_format);
+
     const ckernel::TensorShape tensor_shape = get_operand_tensor_shape(operandA_id);
     _llk_math_reduce_init_<pool_type, reduce_dim, math_fidelity>(tensor_shape);
 }

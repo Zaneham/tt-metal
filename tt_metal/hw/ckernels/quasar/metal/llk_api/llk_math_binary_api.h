@@ -13,29 +13,6 @@
 
 /**
  * @brief Initialize FPU to perform an elementwise binary operation where Output = SrcA [+, -, *] SrcB.
- * Assumes default 32x32 tile shape.
- * SrcA/SrcB contain 1 tile each, and output is 1 tile in destination register
- * @tparam eltwise_binary_type: Type of eltwise binary op, values = <ELWADD/ELWSUB/ELWMUL>
- * @tparam src_b_bcast_type: Broadcast type for SrcB. Currently only BroadcastType::NONE is supported on Quasar.
- * @tparam math_fidelity: 0 = LoFi, 2 = HiFi2, 3 = HiFi3, 4 = HiFi4 - controls precision of multiplication
- *     when input is Tf32 format. Only applicable to ELWMUL.
- * @tparam binary_reuse_dest: When not NONE, reuses the destination register as SrcA or SrcB
- * @param acc_to_dest: Flag to control if the result should be accumulated with the current dest
- */
-template <
-    EltwiseBinaryType eltwise_binary_type,
-    BroadcastType src_b_bcast_type,
-    MathFidelity math_fidelity,
-    EltwiseBinaryReuseDestType binary_reuse_dest = EltwiseBinaryReuseDestType::NONE>
-inline void llk_math_eltwise_binary_init(bool acc_to_dest = false) {
-    static_assert(src_b_bcast_type == BroadcastType::NONE, "Broadcast types will be added in a future update");
-
-    _llk_math_eltwise_binary_init_<eltwise_binary_type, math_fidelity, binary_reuse_dest>(
-        ckernel::DEFAULT_TENSOR_SHAPE, acc_to_dest);
-}
-
-/**
- * @brief Initialize FPU to perform an elementwise binary operation where Output = SrcA [+, -, *] SrcB.
  * Derives the tensor shape from operand_A to support non-default tile dimensions.
  * SrcA/SrcB contain 1 tile each, and output is 1 tile in destination register
  * @tparam eltwise_binary_type: Type of eltwise binary op, values = <ELWADD/ELWSUB/ELWMUL>
@@ -52,12 +29,16 @@ template <
     BroadcastType src_b_bcast_type,
     MathFidelity math_fidelity,
     EltwiseBinaryReuseDestType binary_reuse_dest = EltwiseBinaryReuseDestType::NONE>
-inline void llk_math_eltwise_binary_init_with_operands(
+inline void llk_math_eltwise_binary_init(
     const std::uint32_t operand_A, [[maybe_unused]] const std::uint32_t operand_B, bool acc_to_dest = false) {
     static_assert(src_b_bcast_type == BroadcastType::NONE, "Broadcast types will be added in a future update");
 
-    const std::uint32_t operand_id = get_operand_id(operand_A);
-    const ckernel::TensorShape tensor_shape_A = get_operand_tensor_shape(operand_id);
+    const std::uint32_t operandA_id = get_operand_id(operand_A);
+    const ckernel::TensorShape tensor_shape_A = get_operand_tensor_shape(operandA_id);
+    const DataFormat srcA_reg_format = static_cast<DataFormat>(unpack_dst_format[operandA_id]);
+    const DataFormat srcB_reg_format = static_cast<DataFormat>(unpack_dst_format[operandB_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        srcA_reg_format, srcB_reg_format);
 
     _llk_math_eltwise_binary_init_<eltwise_binary_type, math_fidelity, binary_reuse_dest>(tensor_shape_A, acc_to_dest);
 }

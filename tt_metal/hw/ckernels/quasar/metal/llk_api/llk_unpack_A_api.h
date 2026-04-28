@@ -26,6 +26,9 @@ template <bool TRANSPOSE_EN, bool IS_32b_DEST_EN>
 inline void llk_unpack_A_init(const std::uint32_t operand) {
     const std::uint32_t operand_id = get_operand_id(operand);
 
+    const DataFormat src_reg_format = static_cast<DataFormat>(unpack_dst_format[operand_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, IS_32b_DEST_EN>(
+        src_reg_format, src_reg_format);
     _llk_unpack_unary_operand_init_<p_unpacr::UNP_A, TRANSPOSE_EN, IS_32b_DEST_EN>(operand_id);
 }
 
@@ -52,6 +55,10 @@ inline void llk_unpack_A_init(
 
     // TODO (tt-metal #42916): Once runtime asserts are added, add asserts for unsupported features above and for valid
     // transpose_of_faces and within_face_16x16_transpose values
+
+    const DataFormat src_reg_format = static_cast<DataFormat>(unpack_dst_format[operand_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, false /*EN_32BIT_DEST_FORMAT*/>(
+        src_reg_format, src_reg_format);
 
     // For Quasar, the unp_sel field is ignored if binary_reuse_dest != EltwiseBinaryReuseDestType::NONE
     _llk_unpack_unary_operand_init_<

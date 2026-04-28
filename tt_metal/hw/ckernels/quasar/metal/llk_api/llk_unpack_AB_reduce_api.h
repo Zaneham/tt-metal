@@ -28,6 +28,10 @@ inline void llk_unpack_AB_reduce_init(const std::uint32_t operandA, const std::u
     const std::uint32_t operandB_id = get_operand_id(operandB);
     const ckernel::TensorShape tensor_shape = get_operand_tensor_shape(operandA_id);
 
+    const DataFormat srcA_reg_format = static_cast<DataFormat>(unpack_dst_format[operandA_id]);
+    const DataFormat srcB_reg_format = static_cast<DataFormat>(unpack_dst_format[operandB_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        srcA_reg_format, srcB_reg_format);
     _llk_unpack_reduce_init_<reduce_dim>(operandA_id, operandB_id, tensor_shape);
 }
 

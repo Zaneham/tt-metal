@@ -43,6 +43,9 @@ inline void llk_pack_untilize_init(std::uint32_t pack_output) {
     // For now we set it to 2, instead of deducing a template parameter at runtime
     constexpr std::uint32_t c_dim_faces = 2; //c_dim_faces is 2 (standard 32x32 tile) and 1 for narrow tile where y-dim is <32
 
+    const DataFormat src_reg_format = static_cast<DataFormat>(unpack_dst_format[output_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        src_reg_format, src_reg_format);
     _llk_pack_untilize_init_<full_ct_dim, block_ct_dim, c_dim_faces>(output_id, output_tile_shape);
 }
 

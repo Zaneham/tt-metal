@@ -32,6 +32,9 @@
 inline void llk_pack_init(const std::uint32_t pack_output) {
     const std::uint8_t output_id = static_cast<std::uint8_t>(get_output_id(pack_output));
 
+    const DataFormat src_reg_format = static_cast<DataFormat>(unpack_dst_format[output_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        src_reg_format, src_reg_format);
     _llk_pack_init_(output_id);
 }
 

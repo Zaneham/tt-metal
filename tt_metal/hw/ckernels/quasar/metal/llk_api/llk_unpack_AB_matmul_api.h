@@ -36,6 +36,10 @@ __attribute__((always_inline)) inline void llk_unpack_AB_matmul_init(
     const std::uint32_t operandA_id = get_operand_id(operandA);
     const std::uint32_t operandB_id = get_operand_id(operandB);
 
+    const DataFormat srcB_reg_format = static_cast<DataFormat>(unpack_dst_format[operandA_id]);
+    const DataFormat srcA_reg_format = static_cast<DataFormat>(unpack_dst_format[operandB_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        srcA_reg_format, srcB_reg_format);
     _llk_unpack_matmul_init_<TRANSPOSE_EN>(operandA_id, operandB_id, ct_dim, rt_dim, kt_dim);
 }
 

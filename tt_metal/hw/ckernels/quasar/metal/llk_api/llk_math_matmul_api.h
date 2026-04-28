@@ -25,7 +25,18 @@ math is in Fp32 format
 * Output is a matrix block of dimension [rt_dim, ct_dim]
 */
 template <ckernel::MathFidelity math_fidelity>
-inline void llk_math_matmul_init(const std::uint32_t ct_dim = 1, const std::uint32_t rt_dim = 1) {
+inline void llk_math_matmul_init(
+    const std::uint32_t operandA,
+    const std::uint32_t operandB,
+    const std::uint32_t ct_dim = 1,
+    const std::uint32_t rt_dim = 1) {
+    const std::uint32_t operandA_id = get_operand_id(operandA);
+    const std::uint32_t operandB_id = get_operand_id(operandB);
+    const DataFormat srcB_reg_format = static_cast<DataFormat>(unpack_dst_format[operandA_id]);
+    const DataFormat srcA_reg_format = static_cast<DataFormat>(unpack_dst_format[operandB_id]);
+
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        srcA_reg_format, srcB_reg_format);
     _llk_math_matmul_init_<math_fidelity>(ct_dim, rt_dim);
 }
 

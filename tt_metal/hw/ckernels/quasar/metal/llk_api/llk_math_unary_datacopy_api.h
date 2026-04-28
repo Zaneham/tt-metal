@@ -26,6 +26,10 @@ inline void llk_math_eltwise_unary_datacopy_init(const std::uint32_t operand) {
     const std::uint32_t operand_id = get_operand_id(operand);
     const std::uint32_t num_faces = get_operand_num_faces(operand_id);
     const std::uint32_t face_r_dim = get_operand_face_r_dim(operand_id);
+
+    const DataFormat src_reg_format = static_cast<DataFormat>(unpack_dst_format[operand_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, IS_32b_DEST_EN>(
+        src_reg_format, src_reg_format);
     _llk_math_eltwise_unary_datacopy_init_<type, IS_32b_DEST_EN>(
         num_faces * face_r_dim /*num_rows_per_matrix*/, 1 /*num_matrices*/);
 }

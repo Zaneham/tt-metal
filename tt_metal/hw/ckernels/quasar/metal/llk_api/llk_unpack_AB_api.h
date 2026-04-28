@@ -30,6 +30,10 @@ inline void llk_unpack_AB_init(
     const std::uint32_t operandA_id = get_operand_id(operandA);
     const std::uint32_t operandB_id = get_operand_id(operandB);
 
+    const DataFormat srcA_reg_format = static_cast<DataFormat>(unpack_dst_format[operandA_id]);
+    const DataFormat srcB_reg_format = static_cast<DataFormat>(unpack_dst_format[operandB_id]);
+    _configure_default_data_format_state_<false /*EN_IMPLIED_MATH_FORMAT*/, DST_ACCUM_MODE>(
+        srcA_reg_format, srcB_reg_format);
     // num_tiles set to 1 for back-compatibility with existing APIs, can be increased in the future for better
     // performance.
     _llk_unpack_binary_operands_init_(operandA_id, operandB_id, 1);
