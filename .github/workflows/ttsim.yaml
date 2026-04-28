@@ -34,6 +34,14 @@ on:
         required: false
         type: boolean
         default: false
+      run-llk-cpp-unit-tests:
+        required: false
+        type: boolean
+        default: false
+      llk-cpp-unit-test-arch:
+        required: false
+        type: string
+        default: "all"
 
 jobs:
   ttsim-integration:
@@ -382,6 +390,65 @@ jobs:
             ./build/test/tt_metal/unit_tests_eth --gtest_filter="BlackholeSingleCardFixture.IdleEthKernelOnIdleErisc1"
             ./build/test/tt_metal/unit_tests_eth --gtest_filter="BlackholeSingleCardFixture.IdleEthKernelOnBothIdleEriscs"
           fi
+
+  ttsim-llk-cpp-unit-tests:
+    if: ${{ inputs.run-llk-cpp-unit-tests }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.job-timeout }}
+    name: "TTSim LLK C++ tests - ${{ matrix.arch }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.llk-cpp-unit-test-arch == 'wormhole_b0' && '[{"arch":"wormhole_b0","build_suffix":"release_wh","soc_desc":"wormhole_b0_80_arch.yaml"}]' || inputs.llk-cpp-unit-test-arch == 'blackhole' && '[{"arch":"blackhole","build_suffix":"release_bh","soc_desc":"blackhole_140_arch.yaml"}]' || '[{"arch":"wormhole_b0","build_suffix":"release_wh","soc_desc":"wormhole_b0_80_arch.yaml"},{"arch":"blackhole","build_suffix":"release_bh","soc_desc":"blackhole_140_arch.yaml"}]') }}
+    container:
+      image: ${{ inputs.test-docker-image || 'docker-image-unresolved!'}}
+      volumes:
+        - ${{ github.workspace }}:/work
+    defaults:
+      run:
+        shell: bash
+        working-directory: /work # https://github.com/actions/runner/issues/878
+    env:
+      TT_METAL_SIMULATOR_HOME: /work/sim
+      TT_METAL_SIMULATOR: /work/sim/libttsim.so
+      TT_METAL_SLOW_DISPATCH_MODE: 1
+      TT_METAL_DISABLE_SFPLOADMACRO: 1
+    steps:
+      - name: 🧬 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Setup Job
+        uses: ./.github/actions/setup-job
+        timeout-minutes: 10
+        with:
+          path: .
+          build-artifact-name: ${{ inputs.build-artifact-name }}
+          wheel-artifact-name: ${{ inputs.wheel-artifact-name }}
+
+      - name: Compute ttsim asset name
+        id: ttsim-asset
+        run: |
+          asset_suffix="${{ matrix.build_suffix }}"
+          asset_suffix="${asset_suffix#release_}"
+          echo "asset_name=libttsim_${asset_suffix}.so" >> "$GITHUB_OUTPUT"
+
+      - name: Download ttsim binary
+        run: |
+          mkdir -p /tmp/ttsim
+          curl -fL --retry 5 --retry-delay 10 "https://github.com/tenstorrent/ttsim/releases/download/${{ inputs.ttsim-version }}/${{ steps.ttsim-asset.outputs.asset_name }}" -o "/tmp/ttsim/${{ steps.ttsim-asset.outputs.asset_name }}"
+
+      - name: Install ttsim
+        run: |
+          set -euo pipefail
+          mkdir -p $TT_METAL_SIMULATOR_HOME
+          mv /tmp/ttsim/${{ steps.ttsim-asset.outputs.asset_name }} $TT_METAL_SIMULATOR_HOME/libttsim.so
+          cp /work/tt_metal/soc_descriptors/${{ matrix.soc_desc }} $TT_METAL_SIMULATOR_HOME/soc_descriptor.yaml
+
+      - name: LLK C++ tests
+        timeout-minutes: 5
+        run: |
+          ./build/test/tt_metal/unit_tests_llk
   ttsim-galaxy-cpp-unit-tests:
     if: ${{ inputs.run-metal-cpp-unit-tests }}
     runs-on: tt-ubuntu-2204-large-stable
