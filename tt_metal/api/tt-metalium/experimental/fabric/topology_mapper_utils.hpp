@@ -10,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <tt-metalium/experimental/fabric/fabric_types.hpp>
@@ -48,30 +49,6 @@ using AsicPositionMap = std::map<tt::tt_metal::AsicID, AsicPosition>;
 // Pinning constraint: maps an ASIC position to a FabricNodeId
 // This constrains which physical ASIC a logical node can be mapped to
 using PinningConstraint = std::pair<AsicPosition, FabricNodeId>;
-
-/**
- * @brief Bookkeeping for merge_logical_multi_mesh_adjacency_graphs: each input graph's MGD-local MeshId is
- *        reassigned to a contiguous global range so merged maps never collide.
- */
-struct LogicalMultiMeshMergeRemap {
-    // Input graph index -> (local MeshId as in that input -> global MeshId in merged graph)
-    std::vector<std::map<MeshId, MeshId>> per_mgd_local_to_global_mesh_id;
-
-    // Merged global MeshId -> which input and which local id (for MeshGraph / MGD metadata lookup)
-    struct GlobalMeshOrigin {
-        std::size_t input_index = 0;
-        MeshId local_mesh_id{0};
-    };
-    std::map<MeshId, GlobalMeshOrigin> global_mesh_id_to_origin;
-
-    // For input i: `global_base` is MeshId{running_offset} before assigning that part; `mesh_count` is the number
-    // of distinct local MeshIds; globals are MeshId{running_offset + j} for j in [0, mesh_count).
-    struct PerInputMeshIdSpan {
-        MeshId global_base{0};
-        std::uint32_t mesh_count = 0;
-    };
-    std::vector<PerInputMeshIdSpan> per_input_spans;
-};
 
 /**
  * @brief Configuration options for topology mapping
@@ -118,11 +95,6 @@ struct TopologyMappingResult {
     // Bidirectional mappings between logical fabric nodes and physical ASICs
     std::map<FabricNodeId, tt::tt_metal::AsicID> fabric_node_to_asic;
     std::map<tt::tt_metal::AsicID, FabricNodeId> asic_to_fabric_node;
-
-    // When the logical side was built by merging per-MGD graphs (or a single MGD: identity), maps global MeshId
-    // in the merged logical graph to the originating input index and that MGD's local MeshId. Used to resolve
-    // host-rank and chip data from the correct MeshGraph, which still uses MGD-local mesh ids.
-    std::optional<LogicalMultiMeshMergeRemap> logical_mesh_id_merge_remap;
 };
 
 /**
@@ -349,19 +321,15 @@ LogicalMultiMeshGraph build_logical_multi_mesh_adjacency_graph(
  *
  * Inputs are processed in order. For each part, all distinct MeshIds in that part (in fabric
  * adjacency, mesh-level graph, and exit maps) are collected, sorted, and assigned consecutive
- * global ids starting at the running base (the sum of \c mesh_count over previous parts). The
- * running base and count per part are written to \c out_remap->per_input_spans. Local→global
- * and inverse mappings are in \c per_mgd_local_to_global_mesh_id and \c global_mesh_id_to_origin.
+ * global ids starting at a running base. If \p per_part_local_to_global_mesh_ids is set, it is filled
+ * with one map per input part: MGD-local mesh id -> merged global mesh id (for pinnings, validation, rank
+ * bindings, etc.).
  *
- * A single input is returned unchanged; \p out_remap (if set) is filled with identity-style maps
- * (local equals global) for that one graph.
+ * A single input is returned unchanged; the optional vector contains one identity map for that graph.
  */
-void build_identity_logical_mesh_id_remap(
-    const LogicalMultiMeshGraph& single_graph, LogicalMultiMeshMergeRemap& out_remap);
-
 LogicalMultiMeshGraph merge_logical_multi_mesh_adjacency_graphs(
     const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs,
-    LogicalMultiMeshMergeRemap* out_remap = nullptr);
+    std::vector<std::map<MeshId, MeshId>>* per_part_local_to_global_mesh_ids = nullptr);
 
 /**
  * @brief Represents a physical mesh node in a 2-layer adjacency graph

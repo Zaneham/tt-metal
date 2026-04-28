@@ -4921,7 +4921,7 @@ TEST_F(TopologyMapperUtilsTest, MockClusterBH6U_2x4Pipeline) {
 // Generate rank bindings E2E (topology path)
 // =============================================================================
 // Same pipeline as tools/scaleout/generate_rank_bindings.cpp `run_topology_mapping` (merged logical
-// graph, `LogicalMultiMeshMergeRemap`, `MeshGraph` host ranks, `map_multi_mesh_to_physical`). Requires
+// graph, per-MGD local -> global mesh id maps, `MeshGraph` host ranks, `map_multi_mesh_to_physical`). Requires
 // mock PSD (TT_METAL_MOCK_CLUSTER_DESC_PATH) like other Tier-2 tests.
 
 // Sits with TopologyMapperUtilsTest: E2E / `generate_rank_bindings` path (mock PSD, MGDs, MeshGraph) — see

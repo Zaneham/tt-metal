@@ -248,6 +248,35 @@ TEST_F(TopologySolverTest, BuildAdjacencyMapLogicalFromDescriptor) {
     EXPECT_EQ(adjacency_map.size(), 2u) << "Should have 2 meshes (mesh_id 0 and 1)";
 }
 
+// Regression: MGD lists grid shape only (no explicit MESH connection entries); intra-mesh edges come from
+// MeshGraphDescriptor::populate_intra_mesh_connections. Used by generate_rank_bindings + multi-MGD merge tests.
+TEST_F(TopologySolverTest, BuildAdjacencyMapLogicalFromBhGalaxyDescriptorMatchesMeshGraph) {
+    const char* tt_metal_home = std::getenv("TT_METAL_HOME");
+    ASSERT_NE(tt_metal_home, nullptr) << "TT_METAL_HOME environment variable must be set";
+    const std::filesystem::path mesh_graph_desc_path =
+        std::filesystem::path(tt_metal_home) /
+        "tests/tt_metal/tt_fabric/custom_mesh_descriptors/bh_galaxy_single_4x4_mesh.textproto";
+
+    MeshGraphDescriptor mesh_graph_descriptor(mesh_graph_desc_path);
+    MeshGraph mesh_graph(cluster_type, mesh_graph_desc_path.string());
+
+    auto adjacency_from_descriptor = build_adjacency_graph_logical(mesh_graph_descriptor);
+    auto adjacency_from_graph = build_adjacency_graph_logical(mesh_graph);
+
+    ASSERT_EQ(adjacency_from_descriptor.size(), adjacency_from_graph.size());
+    for (const auto& [mesh_id, adj_graph] : adjacency_from_descriptor) {
+        ASSERT_TRUE(adjacency_from_graph.contains(mesh_id))
+            << "Mesh " << mesh_id.get() << " should exist in adjacency map from MeshGraph";
+        const auto& adj_graph_from_graph = adjacency_from_graph.find(mesh_id)->second;
+        EXPECT_EQ(adj_graph.get_nodes().size(), adj_graph_from_graph.get_nodes().size())
+            << "Mesh " << mesh_id.get() << " should have the same number of nodes";
+        for (const auto& node : adj_graph.get_nodes()) {
+            EXPECT_EQ(adj_graph.get_neighbors(node).size(), adj_graph_from_graph.get_neighbors(node).size())
+                << "Mesh " << mesh_id.get() << " node " << node << " neighbor count should match MeshGraph path";
+        }
+    }
+}
+
 TEST_F(TopologySolverTest, BuildAdjacencyMapLogicalFromDescriptor2) {
     const char* tt_metal_home = std::getenv("TT_METAL_HOME");
     ASSERT_NE(tt_metal_home, nullptr) << "TT_METAL_HOME environment variable must be set";

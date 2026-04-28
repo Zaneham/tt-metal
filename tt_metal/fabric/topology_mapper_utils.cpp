@@ -502,6 +502,42 @@ void collect_mesh_ids_from_logical_multi_mesh_graph(const LogicalMultiMeshGraph&
     }
 }
 
+struct MergeMeshIdRenumbering {
+    std::vector<std::map<MeshId, MeshId>> per_part_local_to_global_mesh_id;
+};
+
+MergeMeshIdRenumbering compute_merge_mesh_id_renumbering(
+    const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs) {
+    MergeMeshIdRenumbering r;
+    if (logical_multi_mesh_graphs.empty()) {
+        return r;
+    }
+    if (logical_multi_mesh_graphs.size() == 1) {
+        std::set<MeshId> meshes;
+        collect_mesh_ids_from_logical_multi_mesh_graph(logical_multi_mesh_graphs[0], meshes);
+        r.per_part_local_to_global_mesh_id.resize(1);
+        for (MeshId m : meshes) {
+            r.per_part_local_to_global_mesh_id[0][m] = m;
+        }
+        return r;
+    }
+    std::uint32_t next_base = 0;
+    for (const auto& g : logical_multi_mesh_graphs) {
+        std::set<MeshId> meshes;
+        collect_mesh_ids_from_logical_multi_mesh_graph(g, meshes);
+        std::map<MeshId, MeshId> local_to_global;
+        std::uint32_t j = 0;
+        for (MeshId m : meshes) {
+            const MeshId global_mesh = MeshId{next_base + j};
+            local_to_global[m] = global_mesh;
+            ++j;
+        }
+        next_base += static_cast<std::uint32_t>(meshes.size());
+        r.per_part_local_to_global_mesh_id.push_back(std::move(local_to_global));
+    }
+    return r;
+}
+
 namespace {
 
 ::tt::tt_fabric::FabricNodeId remap_fabric_node_mesh(
@@ -580,75 +616,27 @@ LogicalMultiMeshGraph remap_logical_multi_mesh_for_merge(
 
 }  // namespace
 
-void build_identity_logical_mesh_id_remap(
-    const LogicalMultiMeshGraph& single_graph, LogicalMultiMeshMergeRemap& out_remap) {
-    out_remap.per_mgd_local_to_global_mesh_id.clear();
-    out_remap.per_mgd_local_to_global_mesh_id.resize(1);
-    out_remap.global_mesh_id_to_origin.clear();
-    out_remap.per_input_spans.clear();
-
-    std::set<MeshId> meshes;
-    collect_mesh_ids_from_logical_multi_mesh_graph(single_graph, meshes);
-    for (MeshId m : meshes) {
-        out_remap.per_mgd_local_to_global_mesh_id[0][m] = m;
-        out_remap.global_mesh_id_to_origin[m] = LogicalMultiMeshMergeRemap::GlobalMeshOrigin{0, m};
-    }
-    if (!meshes.empty()) {
-        out_remap.per_input_spans.resize(1);
-        out_remap.per_input_spans[0].global_base = *meshes.begin();
-        out_remap.per_input_spans[0].mesh_count = static_cast<std::uint32_t>(meshes.size());
-    }
-}
-
 LogicalMultiMeshGraph merge_logical_multi_mesh_adjacency_graphs(
-    const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs, LogicalMultiMeshMergeRemap* out_remap) {
-    if (out_remap) {
-        out_remap->per_mgd_local_to_global_mesh_id.clear();
-        out_remap->global_mesh_id_to_origin.clear();
-        out_remap->per_input_spans.clear();
+    const std::vector<LogicalMultiMeshGraph>& logical_multi_mesh_graphs,
+    std::vector<std::map<MeshId, MeshId>>* per_part_local_to_global_mesh_ids) {
+    const MergeMeshIdRenumbering renum = compute_merge_mesh_id_renumbering(logical_multi_mesh_graphs);
+    if (per_part_local_to_global_mesh_ids) {
+        *per_part_local_to_global_mesh_ids = renum.per_part_local_to_global_mesh_id;
     }
 
     if (logical_multi_mesh_graphs.empty()) {
         return {};
     }
     if (logical_multi_mesh_graphs.size() == 1) {
-        if (out_remap) {
-            build_identity_logical_mesh_id_remap(logical_multi_mesh_graphs[0], *out_remap);
-        }
         return logical_multi_mesh_graphs[0];
     }
 
     LogicalMultiMeshGraph merged;
     ::tt::tt_fabric::AdjacencyGraph<MeshId>::AdjacencyMap merged_mesh_level;
-    if (out_remap) {
-        out_remap->per_mgd_local_to_global_mesh_id.resize(logical_multi_mesh_graphs.size());
-    }
 
-    std::uint32_t next_base = 0;
     for (std::size_t i = 0; i < logical_multi_mesh_graphs.size(); ++i) {
         const auto& g = logical_multi_mesh_graphs[i];
-        std::set<MeshId> meshes;
-        collect_mesh_ids_from_logical_multi_mesh_graph(g, meshes);
-        std::map<MeshId, MeshId> local_to_global;
-        std::uint32_t j = 0;
-        for (MeshId m : meshes) {
-            local_to_global[m] = MeshId{next_base + j};
-            if (out_remap) {
-                out_remap->per_mgd_local_to_global_mesh_id[i][m] = local_to_global[m];
-                out_remap->global_mesh_id_to_origin[local_to_global[m]] =
-                    LogicalMultiMeshMergeRemap::GlobalMeshOrigin{i, m};
-            }
-            ++j;
-        }
-        if (out_remap) {
-            LogicalMultiMeshMergeRemap::PerInputMeshIdSpan span;
-            if (!meshes.empty()) {
-                span.global_base = MeshId{next_base};
-                span.mesh_count = static_cast<std::uint32_t>(meshes.size());
-            }
-            out_remap->per_input_spans.push_back(span);
-        }
-        next_base += static_cast<std::uint32_t>(meshes.size());
+        const auto& local_to_global = renum.per_part_local_to_global_mesh_id[i];
 
         LogicalMultiMeshGraph part = remap_logical_multi_mesh_for_merge(g, local_to_global);
         for (const auto& [mesh_id, adj] : part.mesh_adjacency_graphs_) {

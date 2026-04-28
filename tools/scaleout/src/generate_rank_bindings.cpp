@@ -46,29 +46,48 @@ struct MeshGraphAndLocalMeshId {
     MeshId local_mesh_id{0};
 };
 
-// Resolves a logical global MeshId (after merge) to the owning MeshGraph and MGD-local mesh id.
+struct TopologyMappingWithLocalMaps {
+    TopologyMappingResult mapping;
+    std::vector<std::map<MeshId, MeshId>> per_part_local_to_global_mesh_ids;
+};
+
+// Resolves a logical global MeshId (after merge) to the owning MeshGraph and MGD-local mesh id using the same
+// per-part local -> global maps as \p merge_logical_multi_mesh_adjacency_graphs (out-parameter).
 std::optional<MeshGraphAndLocalMeshId> resolve_mesh_graph_for_global_mesh_id(
-    const std::vector<MeshGraph>& mesh_graphs, MeshId global_mesh_id, const TopologyMappingResult& mapping_result) {
-    const auto& rem = mapping_result.logical_mesh_id_merge_remap;
-    if (rem.has_value() && !rem->global_mesh_id_to_origin.empty()) {
-        auto it = rem->global_mesh_id_to_origin.find(global_mesh_id);
-        if (it == rem->global_mesh_id_to_origin.end()) {
-            return std::nullopt;
+    const std::vector<MeshGraph>& mesh_graphs,
+    MeshId global_mesh_id,
+    const std::vector<std::map<MeshId, MeshId>>& per_part_local_to_global_mesh_ids) {
+    if (per_part_local_to_global_mesh_ids.empty()) {
+        for (const auto& g : mesh_graphs) {
+            for (const auto& mid : g.get_all_mesh_ids()) {
+                if (mid == global_mesh_id) {
+                    return MeshGraphAndLocalMeshId{&g, global_mesh_id};
+                }
+            }
         }
-        const std::size_t idx = it->second.input_index;
-        if (idx >= mesh_graphs.size()) {
-            return std::nullopt;
-        }
-        return MeshGraphAndLocalMeshId{&mesh_graphs[idx], it->second.local_mesh_id};
+        return std::nullopt;
     }
-    for (const auto& g : mesh_graphs) {
-        for (const auto& mid : g.get_all_mesh_ids()) {
-            if (mid == global_mesh_id) {
-                return MeshGraphAndLocalMeshId{&g, global_mesh_id};
+    const std::size_t n = std::min(mesh_graphs.size(), per_part_local_to_global_mesh_ids.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& local_to_global = per_part_local_to_global_mesh_ids[i];
+        for (MeshId local : mesh_graphs[i].get_all_mesh_ids()) {
+            auto it = local_to_global.find(local);
+            if (it != local_to_global.end() && it->second == global_mesh_id) {
+                return MeshGraphAndLocalMeshId{&mesh_graphs[i], local};
             }
         }
     }
     return std::nullopt;
+}
+
+// MGDs with a single mesh or with no inter-mesh (fabric) links do not define inter-mesh STRICT vs RELAXED in a
+// meaningful way; skip them in the multi-MGD merge so a sibling MGD (e.g. two meshes + inter-mesh) sets
+// the policy and other overlays follow that choice.
+bool mesh_graph_includes_intermesh_links(const MeshGraph& g) {
+    if (g.get_all_mesh_ids().size() <= 1) {
+        return false;
+    }
+    return !g.get_requested_intermesh_connections().empty() || !g.get_requested_intermesh_ports().empty();
 }
 }  // namespace
 
@@ -241,8 +260,10 @@ void print_physical_adjacency_map(
  *                                is not copied—only a reference is passed). Must match `mgd_paths_in_order`
  *                                in length and order (one path per descriptor for `MeshGraph` host ranks).
  * @param mgd_paths_in_order      Const reference to paths parallel to `mesh_graph_descriptors`.
+ *
+ * @return Mapping result plus per-MGD local -> global mesh id maps (same order as descriptors / `MeshGraph`s).
  */
-TopologyMappingResult run_topology_mapping(
+TopologyMappingWithLocalMaps run_topology_mapping(
     const PhysicalSystemDescriptor& psd,
     const PhysicalGroupingDescriptor& pgd,
     const std::vector<MeshGraphDescriptor>& mesh_graph_descriptors,
@@ -262,14 +283,11 @@ TopologyMappingResult run_topology_mapping(
     for (const MeshGraphDescriptor& mgd : mesh_graph_descriptors) {
         logical_parts.push_back(build_logical_multi_mesh_adjacency_graph(mgd));
     }
-    LogicalMultiMeshMergeRemap merge_remap;
-    LogicalMultiMeshGraph logical_graph;
-    if (logical_parts.size() == 1) {
-        logical_graph = std::move(logical_parts[0]);
-        build_identity_logical_mesh_id_remap(logical_graph, merge_remap);
-    } else {
-        logical_graph = merge_logical_multi_mesh_adjacency_graphs(logical_parts, &merge_remap);
-    }
+
+    std::vector<std::map<MeshId, MeshId>> per_part_local_to_global_mesh_ids;
+    const LogicalMultiMeshGraph logical_graph =
+        merge_logical_multi_mesh_adjacency_graphs(logical_parts, &per_part_local_to_global_mesh_ids);
+
     print_logical_adjacency_map(logical_graph);
     print_physical_adjacency_map(physical_graph, psd);
 
@@ -284,7 +302,7 @@ TopologyMappingResult run_topology_mapping(
     for (std::size_t mgi = 0; mgi < mesh_graph_descriptors.size(); ++mgi) {
         const MeshGraphDescriptor& mgd = mesh_graph_descriptors[mgi];
         for (const auto& [pos, fabric_node] : mgd.get_pinnings()) {
-            const MeshId global_mesh = merge_remap.per_mgd_local_to_global_mesh_id[mgi].at(fabric_node.mesh_id);
+            const MeshId global_mesh = per_part_local_to_global_mesh_ids.at(mgi).at(fabric_node.mesh_id);
             config.pinnings.emplace_back(pos, FabricNodeId(global_mesh, fabric_node.chip_id));
         }
     }
@@ -309,10 +327,13 @@ TopologyMappingResult run_topology_mapping(
     for (std::size_t gi = 0; gi < mesh_graphs.size(); ++gi) {
         const auto& mesh_graph = mesh_graphs[gi];
         for (const auto& mid_local : mesh_graph.get_all_mesh_ids()) {
-            const MeshId mid_global = merge_remap.per_mgd_local_to_global_mesh_id[gi].at(mid_local);
+            const MeshId mid_global = per_part_local_to_global_mesh_ids.at(gi).at(mid_local);
             config.mesh_validation_modes[mid_global] = mesh_graph.is_intra_mesh_policy_relaxed(mid_local)
                                                            ? ::tt::tt_fabric::ConnectionValidationMode::RELAXED
                                                            : ::tt::tt_fabric::ConnectionValidationMode::STRICT;
+        }
+        if (!mesh_graph_includes_intermesh_links(mesh_graph)) {
+            continue;
         }
         const bool relaxed = mesh_graph.is_inter_mesh_policy_relaxed();
         if (!config.inter_mesh_validation_mode.has_value()) {
@@ -327,6 +348,9 @@ TopologyMappingResult run_topology_mapping(
             }
         }
     }
+    if (!config.inter_mesh_validation_mode.has_value()) {
+        config.inter_mesh_validation_mode = ::tt::tt_fabric::ConnectionValidationMode::STRICT;
+    }
     if (config.inter_mesh_validation_mode.value() == ::tt::tt_fabric::ConnectionValidationMode::RELAXED) {
         log_info(tt::LogFabric, "Inter-mesh validation mode: RELAXED");
     } else {
@@ -338,7 +362,7 @@ TopologyMappingResult run_topology_mapping(
     for (std::size_t gi = 0; gi < mesh_graphs.size(); ++gi) {
         const auto& mesh_graph = mesh_graphs[gi];
         for (const auto& mesh_id_local : mesh_graph.get_all_mesh_ids()) {
-            const MeshId mesh_id_global = merge_remap.per_mgd_local_to_global_mesh_id[gi].at(mesh_id_local);
+            const MeshId mesh_id_global = per_part_local_to_global_mesh_ids.at(gi).at(mesh_id_local);
             const auto& chip_ids = mesh_graph.get_chip_ids(mesh_id_local);
             for (const auto& [coord, chip_id] : chip_ids) {
                 FabricNodeId fabric_node_id(mesh_id_global, chip_id);
@@ -353,10 +377,11 @@ TopologyMappingResult run_topology_mapping(
     std::map<MeshId, std::map<tt::tt_metal::AsicID, MeshHostRankId>> asic_id_to_mesh_rank = {};
 
     log_info(tt::LogFabric, "Running topology mapping with mesh graph rank bindings...");
-    TopologyMappingResult result = map_multi_mesh_to_physical(
+    TopologyMappingWithLocalMaps out;
+    out.mapping = map_multi_mesh_to_physical(
         logical_graph, physical_graph, config, asic_id_to_mesh_rank, fabric_node_id_to_mesh_rank);
-    result.logical_mesh_id_merge_remap = std::move(merge_remap);
-    return result;
+    out.per_part_local_to_global_mesh_ids = std::move(per_part_local_to_global_mesh_ids);
+    return out;
 }
 
 /**
@@ -377,7 +402,8 @@ TopologyMappingResult run_topology_mapping(
 std::vector<RankBindingConfig> extract_rank_bindings(
     const PhysicalSystemDescriptor& psd,
     const TopologyMappingResult& mapping_result,
-    const std::vector<MeshGraph>& mesh_graphs) {
+    const std::vector<MeshGraph>& mesh_graphs,
+    const std::vector<std::map<MeshId, MeshId>>& per_part_local_to_global_mesh_ids) {
     if (mesh_graphs.empty()) {
         throw std::invalid_argument("extract_rank_bindings: at least one MeshGraph is required");
     }
@@ -397,11 +423,11 @@ std::vector<RankBindingConfig> extract_rank_bindings(
         tt::ChipId chip_id_from_fabric_node = static_cast<tt::ChipId>(fabric_node_id.chip_id);
 
         std::optional<MeshGraphAndLocalMeshId> resolved =
-            resolve_mesh_graph_for_global_mesh_id(mesh_graphs, mesh_id_global, mapping_result);
+            resolve_mesh_graph_for_global_mesh_id(mesh_graphs, mesh_id_global, per_part_local_to_global_mesh_ids);
         if (!resolved.has_value() || resolved->graph == nullptr) {
             log_error(
                 tt::LogFabric,
-                "No MeshGraph / local mesh for global logical mesh_id {} (check logical_mesh_id merge remap).",
+                "No MeshGraph / local mesh for global logical mesh_id {} (check per-MGD local-to-global mesh id map).",
                 *mesh_id_global);
             continue;
         }
@@ -730,10 +756,10 @@ int main(int argc, char** argv) {
             // Stage: Run topology mapping
             log_info(tt::LogFabric, "Stage: Running topology mapping...");
 
-            TopologyMappingResult mapping_result = run_topology_mapping(psd, pgd, mgds, mgd_paths_in_order);
+            TopologyMappingWithLocalMaps topology = run_topology_mapping(psd, pgd, mgds, mgd_paths_in_order);
 
-            if (!mapping_result.success) {
-                log_error(tt::LogFabric, "Topology mapping failed: {}", mapping_result.error_message);
+            if (!topology.mapping.success) {
+                log_error(tt::LogFabric, "Topology mapping failed: {}", topology.mapping.error_message);
                 return 1;
             }
             log_info(tt::LogFabric, "Topology mapping complete");
@@ -747,8 +773,8 @@ int main(int argc, char** argv) {
             for (const auto& p : mgd_paths_in_order) {
                 mesh_graphs_for_extract.emplace_back(cluster, p.string());
             }
-            std::vector<RankBindingConfig> rank_bindings =
-                extract_rank_bindings(psd, mapping_result, mesh_graphs_for_extract);
+            std::vector<RankBindingConfig> rank_bindings = extract_rank_bindings(
+                psd, topology.mapping, mesh_graphs_for_extract, topology.per_part_local_to_global_mesh_ids);
             log_info(tt::LogFabric, "Extracted {} rank binding(s)", rank_bindings.size());
 
             // Stage: Write YAML file
