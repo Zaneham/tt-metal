@@ -11,6 +11,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -19,17 +20,22 @@
 #include <yaml-cpp/yaml.h>
 
 struct RankBindingConfig {
-    int rank;               // Sequential MPI rank (0 to N-1, unique and contiguous) for rankfile and rank_bindings.yaml
+    // Sequential MPI rank for rankfile / rank_bindings.yaml / phase2 mock: normally 0..N-1 in that file;
+    // multi-MGD merged outputs use globally offset contiguous ranks in one combined rankfile and mock mapping.
+    int rank;
     int psd_mpi_rank = -1;  // PSD MPI rank from discovery (used for phase2_mock_mapping.yaml lookup)
     int mesh_id;            // Mesh ID this rank belongs to
     int mesh_host_rank = 0;  // Host rank within the mesh (from MeshGraph), defaults to 0
     std::string hostname;    // Physical host for rankfile
-    int slot;                // Slot number on host for rankfile (OpenMPI format)
+    int slot;                // Slot on host for OpenMPI rankfile; multi-MGD merge renumbers globally by MPI rank order
     std::map<std::string, std::string> env_overrides;
 };
 
 // YAML key for multi-MGD: sub-context id (int) -> path to MGD .textproto (string).
 inline constexpr const char* kSubcontextMgdMappingYamlKey = "subcontext_id_to_mesh_graph_descriptor";
+
+// Same key as :func:`parse_rank_bindings_mapping` in :file:`ttrun.py` (--rank-bindings-mapping).
+inline constexpr const char* kSubcontextRankBindingsMappingYamlKey = "subcontext_id_to_rank_bindings";
 
 /**
  * Load and validate `subcontext_id_to_mesh_graph_descriptor` from a mapping YAML file.
@@ -163,6 +169,26 @@ inline void write_rank_bindings_yaml(
         throw std::runtime_error("Failed to open output file: " + output_file);
     }
 
+    out_file << root << std::endl;
+    out_file.close();
+}
+
+/** Writes sibling paths (relative filenames) resolved by tt-run alongside this file. \p pairs must follow sub-context
+ * 0..N-1. */
+inline void write_subcontext_rank_bindings_mapping_yaml(
+    const std::vector<std::pair<int, std::string>>& subcontext_id_to_relative_rank_bindings_yaml,
+    const std::string& output_file) {
+    YAML::Node root;
+    YAML::Node map_node;
+    for (const auto& [sid, relpath] : subcontext_id_to_relative_rank_bindings_yaml) {
+        map_node[std::to_string(sid)] = relpath;
+    }
+    root[kSubcontextRankBindingsMappingYamlKey] = map_node;
+
+    std::ofstream out_file(output_file);
+    if (!out_file.is_open()) {
+        throw std::runtime_error("Failed to open rank bindings mapping file: " + output_file);
+    }
     out_file << root << std::endl;
     out_file.close();
 }

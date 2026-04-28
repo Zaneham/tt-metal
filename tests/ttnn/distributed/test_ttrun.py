@@ -40,6 +40,7 @@ from ttnn.distributed.ttrun import (
     read_stored_phase1_cache_key,
     PHASE2_MOCK_MAPPING_FILENAME,
     PHASE1_CACHE_ID_HEX_LEN,
+    RANK_BINDINGS_MAPPING_FILENAME,
 )
 
 # Import the module directly to avoid conflicts with distributed.py
@@ -783,6 +784,17 @@ class TestPhase1CacheArtifacts:
         rf.write_text("y")
         assert phase1_outputs_ready(run_dir, mock_mode=False)
 
+    def test_phase1_outputs_ready_multi_mgd_uses_rank_bindings_mapping_yaml(self, temp_dir):
+        run_dir = temp_dir / "r"
+        run_dir.mkdir()
+        mapping = run_dir / RANK_BINDINGS_MAPPING_FILENAME
+        _, rf = get_generate_rank_bindings_output_paths(run_dir)
+        mapping.write_text("subcontext_id_to_rank_bindings:\n  0: rank_bindings_subctx_0.yaml\n")
+        rf.write_text("y")
+        rb_single = run_dir / "rank_bindings.yaml"
+        assert not rb_single.exists()
+        assert phase1_outputs_ready(run_dir, mock_mode=False)
+
     def test_phase1_outputs_ready_mock_needs_phase2_mapping(self, temp_dir):
         run_dir = temp_dir / "r"
         run_dir.mkdir()
@@ -846,6 +858,33 @@ class TestRunPhase1GenerateRankBindings:
 
         assert result_rank_bindings == rank_bindings_path
         assert result_rankfile == rankfile_path
+
+    def test_run_phase1_generate_rank_bindings_multi_mgd_returns_mapping_path(self, temp_dir):
+        """Rank bindings mapping YAML is Phase 2 entry when Phase 1 used -M (MGD mapping)."""
+        from unittest.mock import MagicMock
+
+        mgd_path = temp_dir / "mapping.yaml"
+        mgd_path.write_text("subcontext_id_to_mesh_graph_descriptor:\n  0: m.textproto\n")
+        (temp_dir / "m.textproto").touch()
+        hosts = ["node1"]
+        output_dir = temp_dir / "output"
+        output_dir.mkdir()
+
+        mapping_path = output_dir / RANK_BINDINGS_MAPPING_FILENAME
+        rankfile_path = output_dir / "rankfile"
+
+        def mock_run(cmd, cwd=None, **kwargs):
+            mapping_path.write_text("subcontext_id_to_rank_bindings:\n  0: rank_bindings_subctx_0.yaml\n")
+            rankfile_path.write_text("rank 0=node1 slot=0\n")
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            return mock_result
+
+        rb_out, rf_out = run_phase1_generate_rank_bindings(
+            mgd_path, hosts, output_dir, subprocess_run=mock_run, sleep_secs=0
+        )
+        assert rb_out == mapping_path
+        assert rf_out == rankfile_path
 
     def test_run_phase1_generate_rank_bindings_failure(self, temp_dir):
         """Test Phase 1 failure handling."""
