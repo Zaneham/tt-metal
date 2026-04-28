@@ -118,10 +118,10 @@ public:
         const MeshGraphDescriptor& mesh_graph_descriptor,
         const tt::tt_metal::PhysicalSystemDescriptor& physical_system_descriptor) const;
 
-    // Run get_valid_groupings_for_mgd for every MGD in order and merge into one map. Instance map keys
-    // are prefixed "mgd{i}_" (i = 0, 1, …) so two MGDs that both use e.g. "M0" do not collide.
-    // MESH and higher-layer (FABRIC, etc.) results are all merged; total grouping count per type is
-    // the sum over all MGDs of what each would have returned on its own.
+    // Run get_valid_groupings_for_mgd for every MGD and merge into one map. Keys are prefixed "mgd{i}_"
+    // so the same logical instance name in different descriptors does not collide. For each (type,
+    // instance-name) tuple, drains each MGD's vector in round-robin (mgd0 head, mgd1 head, …, repeat)
+    // into the corresponding mgd{i}_ prefixed bucket. Contents per prefixed key match sequential per-MGD merge.
     // mesh_graph_descriptors: const reference to the caller's vector (no copy of the container).
     ValidGroupingsMap get_valid_groupings_for_mgds(
         const std::vector<MeshGraphDescriptor>& mesh_graph_descriptors,

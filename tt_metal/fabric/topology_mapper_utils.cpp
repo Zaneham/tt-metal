@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -32,6 +33,61 @@
 #include <tt-metalium/experimental/fabric/physical_grouping_descriptor.hpp>
 #include "tt_metal/impl/context/metal_context.hpp"
 #include <llrt/tt_cluster.hpp>
+
+namespace {
+
+using ::tt::tt_fabric::GroupingInfo;
+using ::tt::tt_fabric::ValidGroupingsMap;
+
+// Builds the vector find_all_in_psd expects: merged map buckets are untouched (same keys / GroupingInfo). Order is one
+// grouping from mgd 0, then mgd 1, … repeating until all queues are empty (queues = each mgd's keys sorted, then each
+// key's vector in map order).
+std::vector<GroupingInfo> mesh_groupings_vector_mgd_round_robin(const ValidGroupingsMap& merged_mgds, size_t n_mgd) {
+    const auto& mesh_by_key = merged_mgds.at("MESH");
+    std::vector<std::deque<GroupingInfo>> slots(n_mgd);
+    size_t reserve_hint = 0;
+
+    for (size_t mgd_i = 0; mgd_i < n_mgd; ++mgd_i) {
+        const std::string prefix = "mgd" + std::to_string(mgd_i) + "_";
+        std::vector<std::string> keys_for_mgd;
+        keys_for_mgd.reserve(mesh_by_key.size());
+        for (const auto& [k, _] : mesh_by_key) {
+            if (k.size() > prefix.size() && k.compare(0, prefix.size(), prefix) == 0) {
+                keys_for_mgd.push_back(k);
+            }
+        }
+        std::sort(keys_for_mgd.begin(), keys_for_mgd.end());
+        for (const std::string& key : keys_for_mgd) {
+            auto it = mesh_by_key.find(key);
+            if (it == mesh_by_key.end()) {
+                continue;
+            }
+            reserve_hint += it->second.size();
+            for (const GroupingInfo& g : it->second) {
+                slots[mgd_i].push_back(g);
+            }
+        }
+    }
+
+    std::vector<GroupingInfo> out;
+    out.reserve(reserve_hint);
+    while (true) {
+        bool progressed = false;
+        for (size_t mgd_i = 0; mgd_i < n_mgd; ++mgd_i) {
+            if (!slots[mgd_i].empty()) {
+                out.push_back(std::move(slots[mgd_i].front()));
+                slots[mgd_i].pop_front();
+                progressed = true;
+            }
+        }
+        if (!progressed) {
+            break;
+        }
+    }
+    return out;
+}
+
+}  // namespace
 
 namespace tt::tt_metal::experimental::tt_fabric {
 
@@ -1294,45 +1350,29 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
 
     log_info(
         tt::LogFabric,
-        "Getting valid groupings for {} MGD(s) and PGD (concatenated MESH groupings)",
+        "Getting valid groupings for {} MGD(s) and PGD (merged via get_valid_groupings_for_mgds)",
         mesh_graph_descriptors.size());
 
-    std::vector<GroupingInfo> all_mesh_grouping_infos;
+    const size_t n_mgd = mesh_graph_descriptors.size();
 
-    for (size_t mgd_i = 0; mgd_i < mesh_graph_descriptors.size(); ++mgd_i) {
-        const MeshGraphDescriptor& mesh_graph_descriptor = mesh_graph_descriptors[mgd_i];
-        log_info(tt::LogFabric, "MGD [{}]: get_valid_groupings_for_mgd from descriptor", mgd_i);
+    ValidGroupingsMap merged_groupings =
+        physical_grouping_descriptor.get_valid_groupings_for_mgds(mesh_graph_descriptors, physical_system_descriptor);
 
-        auto valid_groupings_map =
-            physical_grouping_descriptor.get_valid_groupings_for_mgd(mesh_graph_descriptor, physical_system_descriptor);
+    log_info(tt::LogFabric, "Merged valid groupings map has {} preset type slot(s)", merged_groupings.size());
 
-        log_info(
-            tt::LogFabric,
-            "MGD [{}]: got {} top-level type(s) in valid groupings map",
-            mgd_i,
-            valid_groupings_map.size());
+    TT_FATAL(
+        merged_groupings.contains("MESH"), "Internal error: MESH grouping not found in merged valid groupings map");
+    TT_FATAL(
+        !merged_groupings.at("MESH").empty(),
+        "Internal error: Physical grouping descriptor produced no merged MESH groupings");
 
-        TT_FATAL(
-            valid_groupings_map.contains("MESH"), "Internal error: MESH grouping not found in valid groupings map");
-        TT_FATAL(
-            !valid_groupings_map.at("MESH").empty(),
-            "Internal error: Physical grouping descriptor was not able to find mesh groupings for MGD at index {}",
-            mgd_i);
-
-        std::vector<std::string> mesh_instance_names;
-        for (const auto& [instance_name, _] : valid_groupings_map.at("MESH")) {
-            mesh_instance_names.push_back(instance_name);
-        }
-        std::sort(mesh_instance_names.begin(), mesh_instance_names.end());
-
-        for (const std::string& name : mesh_instance_names) {
-            for (const auto& grouping : valid_groupings_map.at("MESH").at(name)) {
-                log_info(
-                    tt::LogFabric, "MGD [{}] mesh grouping from PGD: {} (instance {})", mgd_i, grouping.name, name);
-                all_mesh_grouping_infos.push_back(grouping);
-            }
+    for (const auto& [instance_key, groupings] : merged_groupings.at("MESH")) {
+        for (const auto& grouping : groupings) {
+            log_info(tt::LogFabric, "Merged mesh grouping from PGD: {} (instance {})", grouping.name, instance_key);
         }
     }
+
+    std::vector<GroupingInfo> all_mesh_grouping_infos = mesh_groupings_vector_mgd_round_robin(merged_groupings, n_mgd);
 
     log_info(tt::LogFabric, "Total mesh groupings collected for find_all_in_psd: {}", all_mesh_grouping_infos.size());
 
