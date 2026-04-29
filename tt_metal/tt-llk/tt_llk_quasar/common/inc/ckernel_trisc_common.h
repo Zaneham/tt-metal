@@ -89,7 +89,7 @@ enum DataFormatConfigSet : std::uint8_t
 };
 
 // global variable for all 4 threads
-inline DataFormatConfigSet data_format_config_set = DataFormatConfigSet::DEFAULT;
+inline volatile DataFormatConfigSet data_format_config_set = DataFormatConfigSet::DEFAULT;
 
 /**
 * @brief Check divisibility by power of 2
@@ -216,7 +216,11 @@ inline void _update_dest_register_offset_()
     dest_register_offset                      = (dest_register_offset == 0) ? dest_bank1_offset : 0;
 }
 
-// Semaphores mapping and trisc space -> tensix space conversion
+struct mutex
+{
+    constexpr static std::uint32_t REG_RMW = 0; // used for atomic register read-modify-write from different threads
+};
+
 struct semaphore
 {
     constexpr static std::uint32_t MATH_PACK = 1; // math <-> pack sync on dest register
@@ -300,6 +304,7 @@ inline bool _is_src_fmt_int32_dest_compatible_(const DataFormat src_reg_fmt)
 template <bool EN_IMPLIED_MATH_FORMAT, bool EN_32BIT_DEST>
 inline void _configure_default_data_format_state_(DataFormat srcA_format, DataFormat srcB_format)
 {
+    TTI_ATGETM(mutex::REG_RMW);
     if (data_format_config_set != DataFormatConfigSet::DEFAULT)
     {
         TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::SFPU1, p_stall::MATH);
@@ -333,10 +338,12 @@ inline void _configure_default_data_format_state_(DataFormat srcA_format, DataFo
 
         data_format_config_set = DataFormatConfigSet::DEFAULT;
     }
+    TTI_ATRELM(mutex::REG_RMW);
 }
 
 inline void _configure_mov_src2dst_ops_data_format_state_(DataFormat srcA_format, DataFormat srcB_format)
 {
+    TTI_ATGETM(mutex::REG_RMW);
     if (data_format_config_set != DataFormatConfigSet::MOV_SRC2DST_OPS_INT32)
     {
         TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::SFPU1, p_stall::MATH);
@@ -366,6 +373,7 @@ inline void _configure_mov_src2dst_ops_data_format_state_(DataFormat srcA_format
 
         data_format_config_set = DataFormatConfigSet::MOV_SRC2DST_OPS_INT32;
     }
+    TTI_ATRELM(mutex::REG_RMW);
 }
 
 } // namespace ckernel::trisc
