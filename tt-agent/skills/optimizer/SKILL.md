@@ -107,7 +107,7 @@ entry body shape from `convergence.md` § Entry shape.
 
 Source repo (tt-metal):
 
-- One commit per iteration on branch `optimizer/<scope>-<YYYY-MM-DD>[-<letter>]`.
+- One commit per iteration on branch `<user>/optimizer/<scope>-<YYYY-MM-DD>[-<letter>]` (`<user>` = `$USER`, namespacing all tt-agent branches).
 - Source-repo commit subject format: see `iterate.md` § Record.
 - Source-repo commits are never pushed.
 

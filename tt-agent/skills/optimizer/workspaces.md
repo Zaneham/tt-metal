@@ -28,7 +28,7 @@ mkdir -p $NEW_WS
 git clone --reference <current-workspace>/tt-metal/.git \
           git@github.com:tenstorrent/tt-metal.git $NEW_WS/tt-metal
 cd $NEW_WS/tt-metal
-git checkout -b optimizer/<scope>-<YYYY-MM-DD>-<letter>
+git checkout -b $USER/optimizer/<scope>-<YYYY-MM-DD>-<letter>
 ```
 
 `--reference` shares git objects with the existing clone — near-instant.
@@ -99,7 +99,7 @@ At session end, report:
 Optimization session complete. Artifacts:
 
   Workspaces:
-    /localdev/$USER/workspaces/opt-<scope>-<date>-a/   (winner, branch optimizer/<scope>-<date>-a)
+    /localdev/$USER/workspaces/opt-<scope>-<date>-a/   (winner, branch $USER/optimizer/<scope>-<date>-a)
     ...
 
   Inspect winner's diff:
