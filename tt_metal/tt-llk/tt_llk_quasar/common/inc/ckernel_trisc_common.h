@@ -85,11 +85,8 @@ static std::uint32_t dest_register_offset = 0;
 enum DataFormatConfigSet : std::uint8_t
 {
     DEFAULT               = 0,
-    MOV_SRC2DST_OPS_INT32 = 1
+    MOV_SRC2DST_32BIT_OPS = 1
 };
-
-// global variable for all 4 threads
-inline volatile DataFormatConfigSet data_format_config_set = DataFormatConfigSet::DEFAULT;
 
 /**
 * @brief Check divisibility by power of 2
@@ -223,13 +220,28 @@ struct mutex
 
 struct semaphore
 {
-    constexpr static std::uint32_t MATH_PACK = 1; // math <-> pack sync on dest register
+    constexpr static std::uint32_t MATH_PACK    = 1; // math <-> pack sync on dest register
+    constexpr static std::uint32_t DF_CFG_STATE = 2; // tracks current DataFormatConfigSet across all threads
 
     constexpr static std::uint16_t t6_sem(const std::uint8_t sem_index)
     {
         return (1 << sem_index);
     }
 };
+
+inline DataFormatConfigSet data_format_cfg_state_read()
+{
+    return static_cast<DataFormatConfigSet>(semaphore_read(semaphore::DF_CFG_STATE));
+}
+
+inline void data_format_cfg_state_write(DataFormatConfigSet state)
+{
+    TTI_SEMINIT(
+        static_cast<std::uint32_t>(DataFormatConfigSet::MOV_SRC2DST_32BIT_OPS) /* semaphore max value */,
+        static_cast<std::uint32_t>(state),
+        0 /* semaphore bank */,
+        semaphore::t6_sem(semaphore::DF_CFG_STATE));
+}
 
 // Tensix thread semaphore post optionally stalled
 // Can stall on up to 3 resources at a time
@@ -255,6 +267,16 @@ inline void t6_semaphore_get(const std::uint8_t index)
     }
 
     TTI_SEMGET(0, semaphore::t6_sem(index));
+}
+
+inline void t6_mutex_acquire(const std::uint8_t index)
+{
+    TTI_ATGETM(index);
+}
+
+inline void t6_mutex_release(const std::uint8_t index)
+{
+    TTI_ATRELM(index);
 }
 
 /**
@@ -304,10 +326,11 @@ inline bool _is_src_fmt_int32_dest_compatible_(const DataFormat src_reg_fmt)
 template <bool EN_IMPLIED_MATH_FORMAT, bool EN_32BIT_DEST>
 inline void _configure_default_data_format_state_(DataFormat srcA_format, DataFormat srcB_format)
 {
-    TTI_ATGETM(mutex::REG_RMW);
-    if (data_format_config_set != DataFormatConfigSet::DEFAULT)
+    t6_mutex_acquire(mutex::REG_RMW);
+    if (data_format_cfg_state_read() != DataFormatConfigSet::DEFAULT)
     {
-        TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::SFPU1, p_stall::MATH);
+        TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::WAIT_SFPU, p_stall::MATH);
+        TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::UNPACK0, p_stall::UNPACK1, p_stall::PACK1);
         cfg_rmw(DISABLE_IMPLIED_SRCA_FMT_SEC0_Base_RMW, !EN_IMPLIED_MATH_FORMAT);
         cfg_rmw(DISABLE_IMPLIED_SRCA_FMT_SEC1_Base_RMW, !EN_IMPLIED_MATH_FORMAT);
         cfg_rmw(DISABLE_IMPLIED_SRCA_FMT_SEC2_Base_RMW, !EN_IMPLIED_MATH_FORMAT);
@@ -336,17 +359,18 @@ inline void _configure_default_data_format_state_(DataFormat srcA_format, DataFo
         cfg_rmw(ALU_ACC_CTRL_SFPU_Fp32_enabled_RMW, EN_32BIT_DEST && EN_FP32_DEST_FORMAT);
         cfg_rmw(ALU_ACC_CTRL_INT8_math_enabled_RMW, EN_32BIT_DEST && EN_INT32_DEST_FORMAT);
 
-        data_format_config_set = DataFormatConfigSet::DEFAULT;
+        data_format_cfg_state_write(DataFormatConfigSet::DEFAULT);
     }
-    TTI_ATRELM(mutex::REG_RMW);
+    t6_mutex_release(mutex::REG_RMW);
 }
 
 inline void _configure_mov_src2dst_ops_data_format_state_(DataFormat srcA_format, DataFormat srcB_format)
 {
-    TTI_ATGETM(mutex::REG_RMW);
-    if (data_format_config_set != DataFormatConfigSet::MOV_SRC2DST_OPS_INT32)
+    t6_mutex_acquire(mutex::REG_RMW);
+    if (data_format_cfg_state_read() != DataFormatConfigSet::MOV_SRC2DST_32BIT_OPS)
     {
-        TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::SFPU1, p_stall::MATH);
+        TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::WAIT_SFPU, p_stall::MATH);
+        TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::UNPACK0, p_stall::UNPACK1, p_stall::PACK1);
         cfg_rmw(DISABLE_IMPLIED_SRCA_FMT_SEC0_Base_RMW, 1);
         cfg_rmw(DISABLE_IMPLIED_SRCA_FMT_SEC1_Base_RMW, 1);
         cfg_rmw(DISABLE_IMPLIED_SRCA_FMT_SEC2_Base_RMW, 1);
@@ -371,9 +395,9 @@ inline void _configure_mov_src2dst_ops_data_format_state_(DataFormat srcA_format
         cfg_rmw(ALU_ACC_CTRL_SFPU_Fp32_enabled_RMW, 0);
         cfg_rmw(ALU_ACC_CTRL_INT8_math_enabled_RMW, 0);
 
-        data_format_config_set = DataFormatConfigSet::MOV_SRC2DST_OPS_INT32;
+        data_format_cfg_state_write(DataFormatConfigSet::MOV_SRC2DST_32BIT_OPS);
     }
-    TTI_ATRELM(mutex::REG_RMW);
+    t6_mutex_release(mutex::REG_RMW);
 }
 
 } // namespace ckernel::trisc

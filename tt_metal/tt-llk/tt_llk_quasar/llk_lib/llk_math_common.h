@@ -73,7 +73,7 @@ inline void _llk_math_srcAB_hw_configure_(DataFormat srcA_format, DataFormat src
     {
         cfg[ALU_FORMAT_SPEC_REG_SrcA_val_ADDR32 + i] = alu_config.val[i];
     }
-    data_format_config_set = DataFormatConfigSet::DEFAULT;
+    data_format_cfg_state_write(DataFormatConfigSet::DEFAULT);
 }
 
 /**
