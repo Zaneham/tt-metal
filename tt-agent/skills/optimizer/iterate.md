@@ -49,10 +49,13 @@ in one line:
 > "BRISC is 2.1× TRISC1 on matmul_tile — batching 4 reads before the
 > single barrier should overlap NOC with compute."
 
-**One variable per iteration.** Coordinated pairs are allowed only when
-the second change is physically required by the first (e.g., raising
-`in0_block_w` forces smaller `per_core_M` to fit L1). Note the coordination
-in the commit message so attribution stays traceable.
+**Bundle when justified, attribute always.** Single-knob change is the
+default. Bundle only when parts wouldn't win in isolation (e.g. one
+change unlocks the L1 budget another change needs). The hypothesis line
+names every knob changed and predicts which contributes most. Bundle
+small enough that a regression bisects in one follow-up iter (revert
+one knob, re-profile). Subject lists all knobs:
+`opt(<scope>): <knob1> + <knob2> + <knob3> — <metric>`.
 
 ### 3. Implement
 
@@ -60,13 +63,10 @@ Edit the source (dataflow) or test/config (parameter-search). Keep the
 edit tight — only what the hypothesis requires. Do not refactor or fix
 unrelated issues.
 
-**Comment hygiene.** A comment passes if it would still make sense were
-this iteration the first commit on the branch. Keep: subtle correctness
-arguments, hardware constraints the code depends on, workarounds for
-specific bugs. Drop anything that reads as a changelog: `vs`, `was`,
-`previously`, `instead of`, parenthesized numbers that no longer appear
-in the code, reasoning-by-elimination. The commit subject captures the
-Δ. Re-read every touched comment block at end of edit with this test.
+**Comment hygiene.** A comment passes if it reads sensibly as the first
+commit on the branch. Keep correctness arguments and hardware
+constraints; drop changelog phrasing (`vs`, `was`, `previously`,
+parenthesized obsolete numbers). The commit subject captures the Δ.
 
 On matmul kernel-level assertions, apply the `print(pc)` recipe per
 `knowledge/matmul.md` § "Print the realized program config on crashes".
@@ -114,20 +114,20 @@ audit contract.
 Next hypothesis can be informed by all prior trials (self + siblings).
 Read the overview file at each iteration — sibling evidence is signal.
 
-If 3 consecutive trials in this workspace regressed, pause and rethink
-direction before another incremental variation. Record the rethink in the
-findings note.
+**Pause triggers (this workspace, sliding 5-iter window):**
+- 3 reverts → **change approach.** Mode-switch or scope-narrow prompt.
+- 3 regressions (no revert) → **re-validate approach.** Pause and check
+  direction; no auto-prompt.
+
+Record either in the findings note.
 
 ## Forensic commits
 
-Keep failed trials as commits — do not revert. Label via the commit
-subject's first word:
+Keep failed trials as commits. Label via subject prefix:
+- `opt(<scope>): forensic — <…>` (kept-but-failed)
+- `opt(<scope>): revert — <…>` (explicit revert)
 
-- `opt(<scope>): forensic — <what was tried>` for kept-but-failed trials
-- `opt(<scope>): revert — <...>` for explicit reverts on the same branch
-
-The overview file's "Forensic failures" table is regenerated from `git log`
-by filtering on these prefixes.
+Filter the audit trail with `git log --grep`.
 
 ## Parallel workspace interaction
 

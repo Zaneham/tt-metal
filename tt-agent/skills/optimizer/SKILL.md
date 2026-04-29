@@ -40,6 +40,13 @@ starting:
    the conflict, quote the rule, ask for override or scope adjustment.
 3. Wait for explicit confirmation before proceeding.
 
+## Preflight: target device
+
+Pin the target device (N150, N300, T3K, …) explicitly before baseline.
+Ask the developer if not specified. Do not let device-MCP queue routing
+silently pick — comparison numbers across devices are not normalised in
+the trend table.
+
 ## Preflight: tool preload
 
 Fetch these schemas via `ToolSearch` before baseline — loading mid-session

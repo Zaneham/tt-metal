@@ -28,6 +28,12 @@ Governs when to stop, ask, or abort. Applies to both modes of `iterate.md`.
   best by ≥ threshold → **continue**. Else if `stall counter < stall_ask`
   → **continue** (no progress this window). Else → **ask developer**.
 
+**Parameter-search early prompt.** 3 consecutive trials in
+`parameter-search` mode showing no improvement → prompt the developer
+with "switch to `dataflow-optimize`" as the **default** option,
+regardless of `stall_ask` counter. `stall_ask=10` remains the final
+fallback.
+
 ## Success criterion
 
 `best` crosses the supplied goal:
@@ -65,6 +71,14 @@ Options:
 ```
 
 Prevents long subblock fiddling on a misclassified goal.
+
+## Constraint feasibility probe
+
+When a new constraint enters scope mid-session (e.g. PCC bar raised, new
+correctness gate, accuracy floor added), measure it at the baseline
+commit before adopting as a goal. If baseline already fails the
+constraint, declare it upstream/downstream-bound and out of scope — do
+not pursue from the current op. Record the probe result in `<scope>.md`.
 
 ## Stall prompt
 

@@ -133,6 +133,21 @@ typically drops PCC 2-5×.
 
 ## Structural pivots
 
+### Padding for divisor structure
+
+`in0_block_w` must divide `K_tiles` exactly; bad prime factors leave no
+friendly value. Pad the dim that becomes a neighbour's K (typically the
+upstream matmul's N) to a multiple of `grid_x * TILE * <small-int>` so
+clean divisors exist, at the cost of wasted compute on the padded slice.
+
+M-pad and K-pad are symmetric levers when the corresponding axes
+control divisor structure on the same matmul. Re-sharding (BLOCK ↔
+HEIGHT ↔ WIDTH) is the related structural lever — re-sharding to a dim
+with already-good divisors can substitute for padding.
+
+**Deviation:** skip when the wasted-FLOPs ratio exceeds the
+streaming-iter saving — measure both before committing the pad.
+
 ### Verify a sibling's mode before borrowing structural choices
 
 tt-metal models share kernels across PREFILL and DECODE with very

@@ -22,6 +22,11 @@ note in `~/.tt-agent/notes/` that the Baseline phase reads.
    `knowledge/matmul.md` § "Verify a sibling's mode before borrowing
    structural choices".
 
+   **Sibling-divergence guard.** If sibling and target diverge on M, K, N,
+   num_chunks, or `fuse_batch` path, treat the sibling as a counter-example
+   on those axes — list each divergence in the Prepare note and do **not**
+   carry the sibling's structural choices across them.
+
 3. **Actual-vs-derived dim check.** For every `args.<dim>` used in a
    progcfg, compare to `self.<weight>.shape[-1]` of the loaded tensor.
    `ModelArgs` fields are computed at config time and can truncate
@@ -29,13 +34,22 @@ note in `~/.tt-agent/notes/` that the Baseline phase reads.
    value in progcfgs. If a mismatch exists, flag it in the overview file —
    a standalone fix PR may be warranted.
 
-4. **Authoritative docs sweep.** Ask the developer whether internal guides
+4. **Shape-transform proposals.** For each matmul in scope, enumerate the
+   divisor structure of M_t, K_t, N_t. Where prime factors of K_t prevent
+   friendly `in0_block_w` divisors, propose padding hypotheses on the
+   upstream matmul's N (= K of next), or on M / K directly. Alternate
+   sharding axes (BLOCK ↔ HEIGHT ↔ WIDTH) are co-equal levers. Padding
+   hypotheses surface in the iter-1 queue, not after stall — they reshape
+   the parameter space. See `knowledge/matmul.md` § "Padding for divisor
+   structure".
+
+5. **Authoritative docs sweep.** Ask the developer whether internal guides
    exist (Confluence pages, `tech_reports/`, PDF exports in the workspace).
    For matmul the PSE Matmul Configuration Guide governs variant selection,
    L1 budgeting, and subblock rules — reading it before iterating reshapes
    the hypothesis queue substantially.
 
-5. **Topic knowledge skim.** Skim `knowledge/matmul.md` (and `ccl.md`,
+6. **Topic knowledge skim.** Skim `knowledge/matmul.md` (and `ccl.md`,
    `sharding.md` if relevant). Entries there cost prior sessions full
    iterations to discover.
 
