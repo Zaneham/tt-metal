@@ -839,7 +839,7 @@ def run_ring_joint_sdpa_perf(
     "seq_len, q_chunk_size, k_chunk_size",
     [
         (128 * 1024, 256, 128),
-        (100 * 1024, 160, 160),
+        (100 * 1024, 160, 320),
     ],
     ids=["seq128k", "seq100k"],
 )
