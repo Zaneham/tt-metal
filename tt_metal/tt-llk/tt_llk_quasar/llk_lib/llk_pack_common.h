@@ -227,6 +227,37 @@ inline void _llk_pack_relu_config_(const ckernel::ReluConfig& relu_config = cker
  * The following functions should be removed once the above issue is resolved
  */
 
+/**
+ * @brief One-time init for the packer's dest section base register.
+ *
+ * Resets the file-scope `dest_register_offset` static (which is already 0 in a
+ * fresh binary load) and writes the packer's source-address offset CFG register
+ * (THCON_PACKER0/1_REG0_SRC_ADDR_OFFSET) to point at bank 0.
+ *
+ * Why this is required on Quasar with semaphore-based math <-> pack sync:
+ * `_llk_pack_dest_semaphore_section_done_` is the only path that writes the
+ * packer's SRC_ADDR_OFFSET, and it only runs AFTER the first pack completes. The
+ * Quasar simulator (and silicon CFG block) preserves CFG register state across
+ * kernel-binary launches on the same session, so if a previous kernel left the
+ * packer pointing at bank 1, this kernel's FIRST pack reads stale cells from
+ * bank 1 while math is writing to bank 0 — producing wrong-data output on the
+ * second-and-later variant of a pytest matrix run (a "reconfig escape"). Call
+ * this once at the top of the pack TRISC `run_kernel`, mirroring how
+ * `_llk_math_pack_sync_init_` initializes SEC1 on the math TRISC.
+ *
+ * @tparam PACK_SEL: p_pacr::PACK0 or p_pacr::PACK1
+ * @tparam DST: DstSync::SyncHalf or DstSync::SyncFull
+ */
+template <std::uint32_t PACK_SEL, DstSync DST>
+inline void _llk_pack_dest_init_()
+{
+    static_assert((PACK_SEL == p_pacr::PACK0) || (PACK_SEL == p_pacr::PACK1), "PACK_SEL can only be set to p_pacr::PACK0/PACK1");
+    static_assert(DST == DstSync::SyncFull || DST == DstSync::SyncHalf, "Only Dest Sync Half and Full are supported");
+
+    ckernel::trisc::_reset_dest_register_offset_();
+    ckernel::trisc::_set_packer_dest_registers_<PACK_SEL, DST>();
+}
+
 // wait until math is done and has produced something to pack
 inline void _llk_packer_wait_for_math_done_()
 {
