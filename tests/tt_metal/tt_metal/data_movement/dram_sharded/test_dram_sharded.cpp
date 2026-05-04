@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "multi_device_fixture.hpp"
+#include "device_fixture.hpp"
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -84,21 +85,21 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramSh
     vector<uint32_t> packed_golden = packed_input;
 
     // Compile-time arguments for kernel
-    vector<uint32_t> reader_compile_args = {
-        (uint32_t)test_config.num_of_transactions,
-        (uint32_t)test_config.num_banks,
-        (uint32_t)test_config.pages_per_bank,
-        (uint32_t)test_config.page_size_bytes,
-        (uint32_t)test_config.test_id};
+    std::unordered_map<std::string, uint32_t> reader_compile_args = {
+        {"num_transactions", (uint32_t)test_config.num_of_transactions},
+        {"num_banks", (uint32_t)test_config.num_banks},
+        {"pages_per_bank", (uint32_t)test_config.pages_per_bank},
+        {"page_size", (uint32_t)test_config.page_size_bytes},
+        {"test_id", (uint32_t)test_config.test_id}};
 
     string kernel_path = "tests/tt_metal/tt_metal/data_movement/dram_sharded/kernels/dram_sharded_read";
     if (test_config.use_trid) {
         kernel_path += "_trid";
-        reader_compile_args.push_back((uint32_t)test_config.num_of_trids);
+        reader_compile_args["num_trids"] = (uint32_t)test_config.num_of_trids;
     }
     if (test_config.use_2_0) {
         kernel_path += "_2_0";
-        reader_compile_args.push_back((uint32_t)test_config.num_of_trids);
+        reader_compile_args["num_trids"] = (uint32_t)test_config.num_of_trids;
     }
     kernel_path += ".cpp";
 
@@ -111,7 +112,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramSh
             kernel_path,
             test_config.cores,
             experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .compile_args = reader_compile_args});
+                .num_threads_per_cluster = 1, .named_compile_args = reader_compile_args});
     } else {
         // WH/BH path: Use legacy API
         reader_kernel = CreateKernel(
@@ -121,7 +122,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramSh
             DataMovementConfig{
                 .processor = DataMovementProcessor::RISCV_0,
                 .noc = NOC::RISCV_0_default,
-                .compile_args = reader_compile_args});
+                .named_compile_args = reader_compile_args});
     }
 
     uint32_t l1_addr = get_l1_address_and_size(mesh_device, corerange_to_cores(test_config.cores)[0]).base_address;
@@ -346,6 +347,29 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadTridDirectedId
         .use_2_0 = true};
 
     // Run
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementDRAMShardedReadDirectedIdeal) {
+    auto mesh_device = devices_[0];
+
+    // Parameters
+    DataFormat l1_data_format = DataFormat::Float16_b;
+    uint32_t page_size_bytes = tt::tile_size(l1_data_format);
+    uint32_t num_of_transactions = 256;
+
+    CoreRange core_range({0, 0}, {0, 0});
+    CoreRangeSet core_range_set({core_range});
+
+    unit_tests::dm::dram_sharded::DramShardedConfig test_config = {
+        .test_id = 810,
+        .num_of_transactions = num_of_transactions,
+        .num_banks = mesh_device->num_dram_channels(),
+        .pages_per_bank = 32,
+        .page_size_bytes = page_size_bytes,
+        .l1_data_format = l1_data_format,
+        .cores = core_range_set};
+
     EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 

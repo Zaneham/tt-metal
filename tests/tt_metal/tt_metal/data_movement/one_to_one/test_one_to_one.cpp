@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "multi_device_fixture.hpp"
+#include "device_fixture.hpp"
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -106,13 +107,20 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToO
 
     // Create kernel - branch by architecture
     if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        // Quasar path: Use experimental API
+        // Quasar path: Use experimental API with named compile-time args
         experimental::quasar::CreateKernel(
             program,
             sender_kernel_path,
             test_config.master_core_coord,
             experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .compile_args = sender_compile_args});
+                .num_threads_per_cluster = 1,
+                .named_compile_args = {
+                    {"l1_addr", l1_base_address},
+                    {"num_tx", test_config.num_of_transactions},
+                    {"tx_size", bytes_per_transaction},
+                    {"test_id", test_config.test_id},
+                    {"dest_coords", packed_subordinate_core_coordinates},
+                    {"num_vc", test_config.num_virtual_channels}}});
     } else {
         // WH/BH path: Use legacy API
         CreateKernel(
@@ -122,7 +130,13 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToO
             DataMovementConfig{
                 .processor = DataMovementProcessor::RISCV_0,
                 .noc = test_config.noc_id,
-                .compile_args = sender_compile_args});
+                .named_compile_args = {
+                    {"l1_addr", l1_base_address},
+                    {"num_tx", test_config.num_of_transactions},
+                    {"tx_size", bytes_per_transaction},
+                    {"test_id", test_config.test_id},
+                    {"dest_coords", packed_subordinate_core_coordinates},
+                    {"num_vc", test_config.num_virtual_channels}}});
     }
 
     // Assign unique id
@@ -389,5 +403,39 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToOnePacketSizes2_0) {
     uint32_t test_id = 158;
 
     unit_tests::dm::core_to_core::packet_sizes_test(get_mesh_device(), test_id, CoreCoord(0, 0), CoreCoord(1, 1), true);
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneToOnePacketSizes) {
+    uint32_t test_id = 800;
+    // Single run to validate the Quasar code path within emulator timeout
+    auto mesh_device = devices_[0];
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+    unit_tests::dm::core_to_core::OneToOneConfig test_config = {
+        .test_id = test_id,
+        .master_core_coord = {0, 0},
+        .subordinate_core_coord = {1, 0},
+        .num_of_transactions = 4,
+        .pages_per_transaction = 4,
+        .bytes_per_page = bytes_per_page,
+        .l1_data_format = DataFormat::Float16_b};
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneToOneDirectedIdeal) {
+    uint32_t test_id = 801;
+    // Use reduced params to fit emulator 3-min timeout
+    auto mesh_device = devices_[0];
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+    unit_tests::dm::core_to_core::OneToOneConfig test_config = {
+        .test_id = test_id,
+        .master_core_coord = {0, 0},
+        .subordinate_core_coord = {1, 0},
+        .num_of_transactions = 4,
+        .pages_per_transaction = 1,
+        .bytes_per_page = bytes_per_page,
+        .l1_data_format = DataFormat::Float16_b};
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 }  // namespace tt::tt_metal

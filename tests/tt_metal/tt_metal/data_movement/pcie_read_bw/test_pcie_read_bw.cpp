@@ -84,12 +84,21 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const PCIeRe
 
     // Create kernel - branch by architecture
     if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        // Quasar path: Use experimental API
+        // Quasar path: Use experimental API with named compile-time args
         experimental::quasar::CreateKernel(
             program,
             kernel_path,
             test_config.master_core_coord,
-            experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = compile_args});
+            experimental::quasar::QuasarDataMovementConfig{
+                .num_threads_per_cluster = 1,
+                .named_compile_args = {
+                    {"num_transactions", test_config.num_of_transactions},
+                    {"bytes_per_tx", bytes_per_transaction},
+                    {"test_id", test_config.test_id},
+                    {"sub_coords", packed_subordinate_core_coordinates},
+                    {"pcie_l1_addr", (uint32_t)pcie_l1_local_addr},
+                    {"l1_addr", l1_base_address},
+                    {"clock_freq_mhz", clock_freq_mhz}}});
     } else {
         // WH/BH path: Use legacy API
         CreateKernel(
@@ -97,7 +106,16 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const PCIeRe
             kernel_path,
             test_config.master_core_coord,
             DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0, .noc = test_config.noc_id, .compile_args = compile_args});
+                .processor = DataMovementProcessor::RISCV_0,
+                .noc = test_config.noc_id,
+                .named_compile_args = {
+                    {"num_transactions", test_config.num_of_transactions},
+                    {"bytes_per_tx", bytes_per_transaction},
+                    {"test_id", test_config.test_id},
+                    {"sub_coords", packed_subordinate_core_coordinates},
+                    {"pcie_l1_addr", (uint32_t)pcie_l1_local_addr},
+                    {"l1_addr", l1_base_address},
+                    {"clock_freq_mhz", clock_freq_mhz}}});
     }
 
     log_info(

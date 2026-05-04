@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "multi_device_fixture.hpp"
+#include "device_fixture.hpp"
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -66,8 +67,10 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
     uint32_t subordinate_l1_address = subordinate_l1_info.base_address;
 
     // Compile-time arguments for kernels
-    vector<uint32_t> compile_args = {
-        (uint32_t)test_config.num_packets, (uint32_t)test_config.packet_size_bytes, (uint32_t)test_config.test_id};
+    std::unordered_map<std::string, uint32_t> compile_args = {
+        {"num_packets", (uint32_t)test_config.num_packets},
+        {"packet_size", (uint32_t)test_config.packet_size_bytes},
+        {"test_id", (uint32_t)test_config.test_id}};
 
     std::string kernels_dir = "tests/tt_metal/tt_metal/data_movement/one_packet/kernels/";
     std::string read_kernel_filename = "read_one_packet";
@@ -91,7 +94,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
                 kernels_dir,
                 master_core_set,
                 experimental::quasar::QuasarDataMovementConfig{
-                    .num_threads_per_cluster = 1, .compile_args = compile_args});
+                    .num_threads_per_cluster = 1, .named_compile_args = compile_args});
         } else {
             kernel = CreateKernel(
                 program,
@@ -100,7 +103,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
                 DataMovementConfig{
                     .processor = DataMovementProcessor::RISCV_1,
                     .noc = NOC::RISCV_1_default,
-                    .compile_args = compile_args});
+                    .named_compile_args = compile_args});
         }
     } else {
         if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
@@ -109,7 +112,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
                 kernels_dir,
                 master_core_set,
                 experimental::quasar::QuasarDataMovementConfig{
-                    .num_threads_per_cluster = 1, .compile_args = compile_args});
+                    .num_threads_per_cluster = 1, .named_compile_args = compile_args});
         } else {
             kernel = CreateKernel(
                 program,
@@ -118,7 +121,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
                 DataMovementConfig{
                     .processor = DataMovementProcessor::RISCV_0,
                     .noc = NOC::RISCV_0_default,
-                    .compile_args = compile_args});
+                    .named_compile_args = compile_args});
         }
     }
 
@@ -405,6 +408,40 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteSizes_2_0) {
             EXPECT_TRUE(run_dm(mesh_device, test_config));
         }
     }
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOnePacketReadSizes) {
+    auto mesh_device = devices_[0];
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    // Single run to validate the Quasar code path within emulator timeout
+    unit_tests::dm::one_packet::OnePacketConfig test_config = {
+        .test_id = 806,
+        .master_core_coord = {0, 0},
+        .subordinate_core_coord = {1, 0},
+        .num_packets = 4,
+        .packet_size_bytes = page_size_bytes,
+        .read = true,
+    };
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOnePacketWriteSizes) {
+    auto mesh_device = devices_[0];
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    // Single run to validate the Quasar code path within emulator timeout
+    unit_tests::dm::one_packet::OnePacketConfig test_config = {
+        .test_id = 807,
+        .master_core_coord = {0, 0},
+        .subordinate_core_coord = {1, 0},
+        .num_packets = 4,
+        .packet_size_bytes = page_size_bytes,
+        .read = false,
+    };
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 
 }  // namespace tt::tt_metal

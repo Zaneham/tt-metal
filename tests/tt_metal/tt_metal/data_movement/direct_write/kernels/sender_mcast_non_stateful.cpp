@@ -6,8 +6,6 @@
 #include "hw/inc/api/debug/dprint.h"
 
 void kernel_main() {
-#ifdef ARCH_QUASAR
-    // Quasar: use named compile-time args (Metal 2.0 API)
     constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
     constexpr uint32_t num_writes = get_named_compile_time_arg_val("num_writes");
     constexpr uint32_t sub_base_addr = get_named_compile_time_arg_val("sub_base_addr");
@@ -20,21 +18,6 @@ void kernel_main() {
     constexpr uint32_t start_y = get_named_compile_time_arg_val("start_y");
     constexpr uint32_t end_x = get_named_compile_time_arg_val("end_x");
     constexpr uint32_t end_y = get_named_compile_time_arg_val("end_y");
-#else
-    // WH/BH: use indexed compile-time args (legacy API)
-    constexpr uint32_t test_id = get_compile_time_arg_val(0);
-    constexpr uint32_t num_writes = get_compile_time_arg_val(1);
-    constexpr uint32_t sub_base_addr = get_compile_time_arg_val(2);
-    constexpr uint32_t write_value_base = get_compile_time_arg_val(3);
-    constexpr uint32_t same_destination = get_compile_time_arg_val(4);
-    constexpr uint32_t addr_stride = get_compile_time_arg_val(5);
-    constexpr uint32_t noc_index = get_compile_time_arg_val(6);
-    constexpr uint32_t num_subordinates = get_compile_time_arg_val(7);
-    constexpr uint32_t start_x = get_compile_time_arg_val(8);
-    constexpr uint32_t start_y = get_compile_time_arg_val(9);
-    constexpr uint32_t end_x = get_compile_time_arg_val(10);
-    constexpr uint32_t end_y = get_compile_time_arg_val(11);
-#endif
 
     {
         DeviceZoneScopedN("RISCV0");

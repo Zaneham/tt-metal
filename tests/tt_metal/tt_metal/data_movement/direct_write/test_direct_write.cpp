@@ -4,6 +4,7 @@
 
 #include <tt-logger/tt-logger.hpp>
 #include "multi_device_fixture.hpp"
+#include "device_fixture.hpp"
 #include "dm_common.hpp"
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
@@ -73,7 +74,7 @@ bool run_dm(
     uint32_t l1_base_address = sender_l1_info.base_address;
 
     // Compile-time arguments for sender kernel
-    vector<uint32_t> sender_compile_args;
+    std::unordered_map<std::string, uint32_t> sender_compile_args;
 
     if (test_config.use_multicast) {
         CoreCoord sub_worker_start_coord = device->worker_core_from_logical_core(test_config.receiver_core_coords[0]);
@@ -81,19 +82,18 @@ bool run_dm(
             device->worker_core_from_logical_core(test_config.receiver_core_coords[test_config.num_subordinates - 1]);
 
         sender_compile_args = {
-            test_config.test_id,
-            test_config.num_writes,
-            l1_base_address,
-            test_config.write_value_base,
-            test_config.same_destination ? 1u : 0u,
-            test_config.addr_stride,
-            static_cast<uint32_t>(test_config.noc_id),
-            test_config.num_subordinates,
-            (uint32_t)sub_worker_start_coord.x,  // start_x
-            (uint32_t)sub_worker_start_coord.y,  // start_y
-            (uint32_t)sub_worker_end_coord.x,    // end_x
-            (uint32_t)sub_worker_end_coord.y     // end_y
-        };
+            {"test_id", test_config.test_id},
+            {"num_writes", test_config.num_writes},
+            {"sub_base_addr", l1_base_address},
+            {"write_val_base", test_config.write_value_base},
+            {"same_dest", test_config.same_destination ? 1u : 0u},
+            {"addr_stride", test_config.addr_stride},
+            {"noc_index", static_cast<uint32_t>(test_config.noc_id)},
+            {"num_subordinates", test_config.num_subordinates},
+            {"start_x", (uint32_t)sub_worker_start_coord.x},
+            {"start_y", (uint32_t)sub_worker_start_coord.y},
+            {"end_x", (uint32_t)sub_worker_end_coord.x},
+            {"end_y", (uint32_t)sub_worker_end_coord.y}};
 
     } else {
         // Physical Core Coordinates
@@ -102,16 +102,16 @@ bool run_dm(
             physical_receiver_core.x << 16 | (physical_receiver_core.y & 0xFFFF);
 
         sender_compile_args = {
-            test_config.test_id,
-            test_config.num_writes,
-            test_config.write_value_base,
-            test_config.use_posted_writes ? 1u : 0u,
-            test_config.same_destination ? 1u : 0u,
-            test_config.same_value ? 1u : 0u,
-            l1_base_address,
-            test_config.addr_stride,
-            packed_receiver_core_coordinates,
-            static_cast<uint32_t>(test_config.noc_id)};
+            {"test_id", test_config.test_id},
+            {"num_writes", test_config.num_writes},
+            {"write_val_base", test_config.write_value_base},
+            {"use_posted", test_config.use_posted_writes ? 1u : 0u},
+            {"same_dest", test_config.same_destination ? 1u : 0u},
+            {"same_value", test_config.same_value ? 1u : 0u},
+            {"dest_l1_addr", l1_base_address},
+            {"addr_stride", test_config.addr_stride},
+            {"receiver_coords", packed_receiver_core_coordinates},
+            {"noc_id", static_cast<uint32_t>(test_config.noc_id)}};
     }
 
     // Choose kernel based on approach
@@ -138,7 +138,7 @@ bool run_dm(
             sender_kernel_path,
             test_config.sender_core_coord,
             experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .compile_args = sender_compile_args});
+                .num_threads_per_cluster = 1, .named_compile_args = sender_compile_args});
     } else {
         // WH/BH path: Use legacy API with processor selection
         CreateKernel(
@@ -148,7 +148,7 @@ bool run_dm(
             DataMovementConfig{
                 .processor = DataMovementProcessor::RISCV_0,
                 .noc = test_config.noc_id,
-                .compile_args = sender_compile_args});
+                .named_compile_args = sender_compile_args});
     }
 
     // Assign unique id
@@ -349,6 +349,36 @@ TEST_F(GenericMeshDeviceFixture, TensixDirectWriteAddressPatterns) {
 TEST_F(GenericMeshDeviceFixture, TensixDirectWriteMulticast) {
     uint32_t test_id = 507;
     unit_tests::dm::direct_write::multicast_test(get_mesh_device(), test_id);
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWritePerformanceComparison) {
+    GTEST_SKIP() << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
+    uint32_t test_id = 808;
+    // Single run on same core to validate Quasar direct-write path on emulator
+    unit_tests::dm::direct_write::DirectWriteConfig test_config = {
+        .test_id = test_id,
+        .sender_core_coord = {0, 0},
+        .receiver_core_coords = {{0, 0}},
+        .num_writes = 4,
+        .use_posted_writes = true,
+        .same_destination = true,
+        .use_stateful_approach = false};
+    EXPECT_TRUE(run_dm(devices_[0], test_config));
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWriteAddressPatterns) {
+    GTEST_SKIP() << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
+    uint32_t test_id = 809;
+    // Single run on same core to validate Quasar stateful direct-write path on emulator
+    unit_tests::dm::direct_write::DirectWriteConfig test_config = {
+        .test_id = test_id,
+        .sender_core_coord = {0, 0},
+        .receiver_core_coords = {{0, 0}},
+        .num_writes = 4,
+        .use_posted_writes = true,
+        .same_destination = true,
+        .use_stateful_approach = true};
+    EXPECT_TRUE(run_dm(devices_[0], test_config));
 }
 
 }  // namespace tt::tt_metal

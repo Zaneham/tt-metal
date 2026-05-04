@@ -6,8 +6,8 @@
 #include "api/dataflow/endpoints.h"
 
 void kernel_main() {
-#ifdef ARCH_QUASAR
-    // Quasar: use named compile-time args (Metal 2.0 API)
+#ifdef KERNEL_COMPILE_TIME_ARG_MAP
+    // Metal 2.0 API: use named compile-time args (all architectures)
     constexpr uint32_t l1_local_addr = get_named_compile_time_arg_val("l1_addr");
     constexpr uint32_t num_transactions = get_named_compile_time_arg_val("num_tx");
     constexpr uint32_t transaction_size = get_named_compile_time_arg_val("tx_size");
@@ -17,7 +17,7 @@ void kernel_main() {
     constexpr uint32_t loopback = get_named_compile_time_arg_val("loopback");
     constexpr uint32_t num_dests = get_named_compile_time_arg_val("num_cores");
 #else
-    // WH/BH: use indexed compile-time args (legacy API)
+    // Legacy API: use indexed compile-time args
     constexpr uint32_t l1_local_addr = get_compile_time_arg_val(0);
     constexpr uint32_t num_transactions = get_compile_time_arg_val(1);
     constexpr uint32_t transaction_size = get_compile_time_arg_val(2);

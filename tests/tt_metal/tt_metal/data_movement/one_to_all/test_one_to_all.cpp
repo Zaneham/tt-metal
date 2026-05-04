@@ -6,6 +6,7 @@
 // num_of_transactions times
 
 #include "multi_device_fixture.hpp"
+#include "device_fixture.hpp"
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
@@ -187,48 +188,86 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToA
     }
     sender_kernel_path += ".cpp";
 
+    // Build named compile-time args for sender kernel (shared by all architectures)
+    std::unordered_map<std::string, uint32_t> sender_named_args = {
+        {"mst_base_addr", (uint32_t)mst_l1_base_address},
+        {"sub_base_addr", (uint32_t)sub_l1_base_address},
+        {"num_transactions", (uint32_t)test_config.num_of_transactions},
+        {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
+        {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+        {"test_id", (uint32_t)test_config.test_id},
+        {"num_subordinates", (uint32_t)num_subordinates}};
+
+    if (test_config.is_multicast) {
+        sender_named_args["is_linked"] = (uint32_t)test_config.is_linked;
+        sender_named_args["loopback"] = (uint32_t)test_config.loopback;
+        sender_named_args["start_x"] = (uint32_t)sub_worker_start_coord.x;
+        sender_named_args["start_y"] = (uint32_t)sub_worker_start_coord.y;
+        sender_named_args["end_x"] = (uint32_t)sub_worker_end_coord.x;
+        sender_named_args["end_y"] = (uint32_t)sub_worker_end_coord.y;
+        sender_named_args["mcast_scheme_type"] = (uint32_t)test_config.multicast_scheme_type;
+        sender_named_args["sub_grid_size_x"] = (uint32_t)test_config.sub_grid_size.x;
+        sender_named_args["sub_grid_size_y"] = (uint32_t)test_config.sub_grid_size.y;
+
+        if (test_config.use_semaphore) {
+            sender_named_args["sender_sem_id"] = (uint32_t)sender_sem_id;
+            sender_named_args["sender_valid_sem_id"] = (uint32_t)sender_valid_sem_id;
+            sender_named_args["receiver_sem_id"] = (uint32_t)receiver_sem_id;
+        }
+    } else {
+        sender_named_args["num_vc"] = (uint32_t)test_config.num_virtual_channels;
+    }
+
     // Create sender kernel - branch by architecture
     KernelHandle sender_kernel;
     if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        // Quasar path: Use experimental API
         sender_kernel = experimental::quasar::CreateKernel(
             program,
             sender_kernel_path,
             mst_logical_core_set,
             experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .compile_args = sender_compile_args});
+                .num_threads_per_cluster = 1, .named_compile_args = sender_named_args});
     } else {
-        // WH/BH path: Use legacy API
         DataMovementProcessor data_movement_processor = DataMovementProcessor::RISCV_0;
         sender_kernel = CreateKernel(
             program,
             sender_kernel_path,
             mst_logical_core_set,
             DataMovementConfig{
-                .processor = data_movement_processor, .noc = test_config.noc_id, .compile_args = sender_compile_args});
+                .processor = data_movement_processor,
+                .noc = test_config.noc_id,
+                .named_compile_args = sender_named_args});
     }
 
     if (test_config.use_semaphore) {
-        vector<uint32_t> receiver_compile_args = {
-            (uint32_t)test_config.num_of_transactions,
-            (uint32_t)test_config.pages_per_transaction,
-            (uint32_t)test_config.bytes_per_page,
-            (uint32_t)test_config.test_id,
-            (uint32_t)sender_sem_id,
-            (uint32_t)receiver_sem_id,
-            (uint32_t)mst_core_coord_packed,
+        std::unordered_map<std::string, uint32_t> receiver_compile_args = {
+            {"num_transactions", (uint32_t)test_config.num_of_transactions},
+            {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
+            {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+            {"test_id", (uint32_t)test_config.test_id},
+            {"sender_sem_id", (uint32_t)sender_sem_id},
+            {"receiver_sem_id", (uint32_t)receiver_sem_id},
+            {"sender_coords", (uint32_t)mst_core_coord_packed},
         };
         string receiver_kernel_path = "tests/tt_metal/tt_metal/data_movement/one_to_all/kernels/receiver_sem.cpp";
         // Create receiver kernel - branch by architecture
         KernelHandle receiver_kernel;
         if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-            // Quasar path: Use experimental API
+            // Quasar path: Use experimental API with named compile-time args
             receiver_kernel = experimental::quasar::CreateKernel(
                 program,
                 receiver_kernel_path,
                 sub_logical_core_set,
                 experimental::quasar::QuasarDataMovementConfig{
-                    .num_threads_per_cluster = 1, .compile_args = receiver_compile_args});
+                    .num_threads_per_cluster = 1,
+                    .named_compile_args = {
+                        {"num_transactions", (uint32_t)test_config.num_of_transactions},
+                        {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
+                        {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+                        {"test_id", (uint32_t)test_config.test_id},
+                        {"sender_sem_id", (uint32_t)sender_sem_id},
+                        {"receiver_sem_id", (uint32_t)receiver_sem_id},
+                        {"sender_coords", (uint32_t)mst_core_coord_packed}}});
         } else {
             // WH/BH path: Use legacy API
             receiver_kernel = CreateKernel(
@@ -238,7 +277,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToA
                 DataMovementConfig{
                     .processor = DataMovementProcessor::RISCV_1,
                     .noc = test_config.noc_id == NOC::NOC_0 ? NOC::NOC_1 : NOC::NOC_0,
-                    .compile_args = receiver_compile_args});
+                    .named_compile_args = receiver_compile_args});
         }
         SetRuntimeArgs(program, receiver_kernel, sub_logical_core_set, {});
     }
@@ -1202,5 +1241,25 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastLinkedDirect
         noc_id,
         0,  // multicast_scheme_type (not used here)
         true);
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneToAllUnicastDirectedIdeal) {
+    auto mesh_device = devices_[0];
+    uint32_t test_case_id = 812;
+    // Single run with small params to fit emulator timeout
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+    unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+        .test_id = test_case_id,
+        .mst_core_coord = {0, 0},
+        .sub_start_core_coord = {0, 0},
+        .sub_grid_size = {2, 1},
+        .num_of_transactions = 4,
+        .pages_per_transaction = 1,
+        .bytes_per_page = bytes_per_page,
+        .l1_data_format = DataFormat::Float16_b,
+        .loopback = true,
+        .is_multicast = false};
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 }  // namespace tt::tt_metal

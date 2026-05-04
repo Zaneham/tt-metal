@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "multi_device_fixture.hpp"
+#include "device_fixture.hpp"
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
@@ -70,13 +71,13 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const Loopba
         master_l1_info.base_address + transaction_size_bytes;  // Offset for subordinate data
 
     // Compile-time arguments for kernels
-    vector<uint32_t> sender_compile_args = {
-        (uint32_t)master_l1_byte_address,
-        (uint32_t)subordinate_l1_byte_address,
-        (uint32_t)test_config.num_of_transactions,
-        (uint32_t)test_config.transaction_size_pages,
-        (uint32_t)test_config.page_size_bytes,
-        (uint32_t)test_config.test_id};
+    std::unordered_map<std::string, uint32_t> sender_compile_args = {
+        {"src_addr", (uint32_t)master_l1_byte_address},
+        {"dst_addr", (uint32_t)subordinate_l1_byte_address},
+        {"num_transactions", (uint32_t)test_config.num_of_transactions},
+        {"tx_num_pages", (uint32_t)test_config.transaction_size_pages},
+        {"page_size", (uint32_t)test_config.page_size_bytes},
+        {"test_id", (uint32_t)test_config.test_id}};
 
     // Kernels
     KernelHandle sender_kernel;
@@ -86,7 +87,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const Loopba
             "tests/tt_metal/tt_metal/data_movement/loopback/kernels/sender.cpp",
             master_core_set,
             experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .compile_args = sender_compile_args});
+                .num_threads_per_cluster = 1, .named_compile_args = sender_compile_args});
     } else {
         sender_kernel = CreateKernel(
             program,
@@ -95,7 +96,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const Loopba
             DataMovementConfig{
                 .processor = DataMovementProcessor::RISCV_0,
                 .noc = test_config.noc_id,
-                .compile_args = sender_compile_args});
+                .named_compile_args = sender_compile_args});
     }
 
     // Semaphores
@@ -212,6 +213,49 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementLoopbackDirectedIdeal) {
         .noc_id = noc_id};
 
     // Run
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackPacketSizes) {
+    auto mesh_device = devices_[0];
+
+    // Single run to validate the Quasar code path within emulator 3-min timeout
+    uint32_t page_size_bytes = 64;  // Quasar flit size
+    unit_tests::dm::core_loopback::LoopbackConfig test_config = {
+        .test_id = unit_tests::dm::core_loopback::START_ID + 0,
+        .master_core_coord = {0, 0},
+        .num_of_transactions = 4,
+        .transaction_size_pages = 4,
+        .page_size_bytes = page_size_bytes,
+        .l1_data_format = DataFormat::Float16_b,
+        .noc_id = NOC::NOC_0,
+    };
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackDirectedIdeal) {
+    auto mesh_device = devices_[0];
+
+    uint32_t test_id = 55;
+
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    uint32_t num_of_transactions = 128;
+    uint32_t transaction_size_pages = max_transmittable_pages / (num_of_transactions * 2);
+
+    CoreCoord master_core_coord = {0, 0};
+    NOC noc_id = NOC::NOC_0;
+
+    unit_tests::dm::core_loopback::LoopbackConfig test_config = {
+        .test_id = test_id,
+        .master_core_coord = master_core_coord,
+        .num_of_transactions = num_of_transactions,
+        .transaction_size_pages = transaction_size_pages,
+        .page_size_bytes = page_size_bytes,
+        .l1_data_format = DataFormat::Float16_b,
+        .noc_id = noc_id};
+
     EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 

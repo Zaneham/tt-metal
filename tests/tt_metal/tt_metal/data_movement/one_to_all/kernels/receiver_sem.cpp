@@ -6,8 +6,6 @@
 
 // Receiver semaphore kernel
 void kernel_main() {
-#ifdef ARCH_QUASAR
-    // Quasar: use named compile-time args (Metal 2.0 API)
     constexpr uint32_t num_of_transactions = get_named_compile_time_arg_val("num_transactions");
     constexpr uint32_t pages_per_transaction = get_named_compile_time_arg_val("pages_per_tx");
     constexpr uint32_t bytes_per_page = get_named_compile_time_arg_val("bytes_per_page");
@@ -15,16 +13,6 @@ void kernel_main() {
     constexpr uint32_t sender_sem_id = get_named_compile_time_arg_val("sender_sem_id");
     constexpr uint32_t receiver_sem_id = get_named_compile_time_arg_val("receiver_sem_id");
     constexpr uint32_t sender_core_coordinates = get_named_compile_time_arg_val("sender_coords");
-#else
-    // WH/BH: use indexed compile-time args (legacy API)
-    constexpr uint32_t num_of_transactions = get_compile_time_arg_val(0);
-    constexpr uint32_t pages_per_transaction = get_compile_time_arg_val(1);
-    constexpr uint32_t bytes_per_page = get_compile_time_arg_val(2);
-    constexpr uint32_t test_id = get_compile_time_arg_val(3);
-    constexpr uint32_t sender_sem_id = get_compile_time_arg_val(4);
-    constexpr uint32_t receiver_sem_id = get_compile_time_arg_val(5);
-    constexpr uint32_t sender_core_coordinates = get_compile_time_arg_val(6);
-#endif
 
     constexpr uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
 

@@ -9,8 +9,6 @@
 
 // L1 to DRAM write
 void kernel_main() {
-#ifdef ARCH_QUASAR
-    // Quasar: use named compile-time args (Metal 2.0 API)
     constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
     constexpr uint32_t num_of_transactions = get_named_compile_time_arg_val("num_transactions");
     constexpr uint32_t pages_per_transaction = get_named_compile_time_arg_val("pages_per_tx");
@@ -20,18 +18,6 @@ void kernel_main() {
     constexpr uint32_t local_l1_addr = get_named_compile_time_arg_val("l1_addr");
     constexpr uint32_t sem_id = get_named_compile_time_arg_val("sem_id");
     constexpr uint32_t virtual_channel = get_named_compile_time_arg_val("vc");
-#else
-    // WH/BH: use indexed compile-time args (legacy API)
-    constexpr uint32_t test_id = get_compile_time_arg_val(0);
-    constexpr uint32_t num_of_transactions = get_compile_time_arg_val(1);
-    constexpr uint32_t pages_per_transaction = get_compile_time_arg_val(2);
-    constexpr uint32_t bytes_per_page = get_compile_time_arg_val(3);
-    constexpr uint32_t dram_addr = get_compile_time_arg_val(4);
-    constexpr uint32_t dram_channel = get_compile_time_arg_val(5);
-    constexpr uint32_t local_l1_addr = get_compile_time_arg_val(6);
-    constexpr uint32_t sem_id = get_compile_time_arg_val(7);
-    constexpr uint32_t virtual_channel = get_compile_time_arg_val(8);
-#endif
 
     constexpr uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
 
