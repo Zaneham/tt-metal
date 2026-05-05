@@ -72,30 +72,6 @@ void expect_bh_halfpod_tray_pairing_for_graph_nodes(
         << format_uint_set(trays) << "]";
 }
 
-// Test diagnostics (Fabric logger). Per-ASIC output uses AdjacencyGraph::print_adjacency_map (tt-logger).
-void print_physical_multimesh_graph_debug(const char* label, const PhysicalMultiMeshGraph& g) {
-    log_info(
-        tt::LogFabric,
-        "========== {} (PhysicalMultiMeshGraph): mesh-level nodes={}; per-mesh internal graphs={} mesh(es) ==========",
-        label,
-        g.mesh_level_graph_.get_nodes().size(),
-        g.mesh_adjacency_graphs_.size());
-    g.mesh_level_graph_.print_adjacency_map(
-        std::string("[") + label + "] Physical mesh-level (MeshId <-> MeshId)", false);
-    std::vector<MeshId> mesh_ids;
-    mesh_ids.reserve(g.mesh_adjacency_graphs_.size());
-    for (const auto& [k, _] : g.mesh_adjacency_graphs_) {
-        mesh_ids.push_back(k);
-    }
-    std::sort(mesh_ids.begin(), mesh_ids.end(), [](const MeshId& a, const MeshId& b) { return a.get() < b.get(); });
-    for (const MeshId& mid : mesh_ids) {
-        const auto& adj = g.mesh_adjacency_graphs_.at(mid);
-        adj.print_adjacency_map(
-            "[" + std::string(label) + "] Physical internal mesh " + std::to_string(mid.get()) + " (AsicID <-> AsicID)",
-            false);
-    }
-}
-
 // =============================================================================
 // Test Fixture with Helper Methods
 // =============================================================================
@@ -4001,7 +3977,7 @@ TEST_F(TopologyMapperUtilsTest, MapMultiMeshToPhysical_PartialRankBinding_OneHos
 // Tier 2: build_physical_multi_mesh_adjacency_graph with PGD and PSD Tests
 // =============================================================================
 // Tests for build_physical_multi_mesh_adjacency_graph using PhysicalGroupingDescriptor
-// and PhysicalSystemDescriptor. SP4 GLX variants (BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_*)
+// and PhysicalSystemDescriptor. SP4 GLX variants (MockClusterSP4_*)
 // use tt-run with sp4_glx_cluster_desc_mapping + bh_galaxy_sp4_rank_bindings; counts scale vs triple 16x8 (12 ranks).
 // =============================================================================
 
@@ -4020,7 +3996,7 @@ static tt::tt_metal::PhysicalSystemDescriptor create_psd_from_mock_cluster() {
         *cluster.get_cluster_desc(), distributed_context, rtoptions.get_target_device());
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_SingleBHGalaxy) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_SingleBHGalaxy) {
     // Test build_physical_multi_mesh_adjacency_graph using PGD and PSD
     // Uses single_bh_galaxy MGD with matching PGD (SP4 GLX mock: 16 hosts vs 12 on triple 16x8)
     using namespace ::tt::tt_fabric;
@@ -4083,7 +4059,7 @@ TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx
     }
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_Quad32x4BhGalaxyTorus) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_Quad32x4BhGalaxyTorus) {
     // Test build_physical_multi_mesh_adjacency_graph using PGD and PSD
     // Uses 32x4 quad BH galaxy torus (single M0, 32x4 devices, 4 hosts) + SP4 GLX mock PSD
     using namespace ::tt::tt_fabric;
@@ -4147,7 +4123,7 @@ TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx
 
 // Single 16×4 (LINE×LINE) mesh — PGD/PSD physical multi-mesh build must include a 64-ASIC partition spanning at
 // most two SP4 hosts (32 ASICs per BH Galaxy host).
-TEST_F(TopologyMapperUtilsTest, MockCluster3Pod16x8_2GalMaxTwoHosts) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_2GalMaxTwoHosts) {
     using namespace ::tt::tt_fabric;
 
     const char* tt_metal_home = std::getenv("TT_METAL_HOME");
@@ -4249,7 +4225,7 @@ TEST_F(
     EXPECT_EQ(physical_multi_mesh_graph.mesh_adjacency_graphs_.size(), 49u);
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_Blitz2x4) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_Blitz2x4) {
     // Test build_physical_multi_mesh_adjacency_graph using PGD and PSD
     // Blitz 4x2 pipeline MGD (SP4 GLX mock: 64 physical meshes vs 48 on triple 16x8 / 12 ranks)
     using namespace ::tt::tt_fabric;
@@ -4386,7 +4362,7 @@ TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx
         << "Mapped Blitz pipeline: at most one host per logical 4×2 mesh (10 stages)";
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_Blitz2x4_11Stage) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_Blitz2x4_11Stage) {
     // Same as BuildPhysicalMultiMeshGraph_WithPGDAndPSD_ThreePod16x8_Blitz2x4 but 11 pipeline stages
     // (bh_glx_11stage_4x2_pipeline.textproto).
     using namespace ::tt::tt_fabric;
@@ -4516,7 +4492,7 @@ TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx
         << "Mapped Blitz pipeline: at most one host per logical 4×2 mesh (11 stages)";
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_BHGalaxy4x4Z) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_BHGalaxy4x4Z) {
     // Test build_physical_multi_mesh_adjacency_graph using PGD and PSD
     // Uses bh_galaxy_4x4_z_mesh_graph_descriptor with 2 meshes of 4x4 (16 nodes each)
     using namespace ::tt::tt_fabric;
@@ -4579,7 +4555,7 @@ TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx
     }
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_Dual8x2) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_Dual8x2) {
     // Test build_physical_multi_mesh_adjacency_graph using PGD and PSD
     // Uses dual_8x2_mesh_graph_descriptor with 2 meshes of 8x2 (16 nodes each)
     using namespace ::tt::tt_fabric;
@@ -4642,7 +4618,7 @@ TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx
     }
 }
 
-TEST_F(TopologyMapperUtilsTest, BuildPhysicalMultiMeshGraph_WithPGDAndPSD_Sp4Glx_Galaxy1x32) {
+TEST_F(TopologyMapperUtilsTest, MockClusterSP4_Galaxy1x32) {
     // Test build_physical_multi_mesh_adjacency_graph using PGD and PSD
     // Uses galaxy_1x32_mesh_graph_descriptor with 1 mesh of 1x32 (32 nodes)
     using namespace ::tt::tt_fabric;
