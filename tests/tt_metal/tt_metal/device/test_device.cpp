@@ -390,34 +390,39 @@ TEST_F(BlackholeSingleCardFixture, TensixL1DataCache) {
     // Create program using Metal 2.0 API - no architecture branching needed
     ProgramSpec spec{
         .program_id = "l1_data_cache_test",
-        .kernels = {
-            KernelSpec{
-                .unique_id = "poll_l1_kernel",
-                .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/poll_l1.cpp",
-                .target_nodes = NodeCoord{static_cast<uint32_t>(core.x), static_cast<uint32_t>(core.y)},
-                .num_threads = 1,
-                .config_spec =
-                    DataMovementConfiguration{
-                        .gen1_data_movement_config =
-                            DataMovementConfiguration::Gen1DataMovementConfig{
-                                .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                                .noc = tt_metal::NOC::NOC_0,
-                                .noc_mode = tt_metal::NOC_MODE::DM_DEDICATED_NOC},
-                        .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{}}},
-            KernelSpec{
-                .unique_id = "write_to_break_poll_kernel",
-                .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/write_to_break_poll.cpp",
-                .target_nodes = NodeCoord{static_cast<uint32_t>(core.x), static_cast<uint32_t>(core.y)},
-                .num_threads = 1,
-                .config_spec = DataMovementConfiguration{
-                    .gen1_data_movement_config =
-                        DataMovementConfiguration::Gen1DataMovementConfig{
-                            .processor = tt_metal::DataMovementProcessor::RISCV_1,
-                            .noc = tt_metal::NOC::NOC_1,
-                            .noc_mode = tt_metal::NOC_MODE::DM_DEDICATED_NOC},
-                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{}}}}};
+        .kernels =
+            {KernelSpec{
+                 .unique_id = "poll_l1_kernel",
+                 .source = KernelSpec::SourceFilePath{"tests/tt_metal/tt_metal/test_kernels/dataflow/poll_l1.cpp"},
+                 .num_threads = 1,
+                 .config_spec =
+                     DataMovementConfiguration{
+                         .gen1_data_movement_config =
+                             DataMovementConfiguration::Gen1DataMovementConfig{
+                                 .processor = tt_metal::DataMovementProcessor::RISCV_0,
+                                 .noc = tt_metal::NOC::NOC_0,
+                                 .noc_mode = tt_metal::NOC_MODE::DM_DEDICATED_NOC},
+                         .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{}}},
+             KernelSpec{
+                 .unique_id = "write_to_break_poll_kernel",
+                 .source =
+                     KernelSpec::SourceFilePath{
+                         "tests/tt_metal/tt_metal/test_kernels/dataflow/write_to_break_poll.cpp"},
+                 .num_threads = 1,
+                 .config_spec =
+                     DataMovementConfiguration{
+                         .gen1_data_movement_config =
+                             DataMovementConfiguration::Gen1DataMovementConfig{
+                                 .processor = tt_metal::DataMovementProcessor::RISCV_1,
+                                 .noc = tt_metal::NOC::NOC_1,
+                                 .noc_mode = tt_metal::NOC_MODE::DM_DEDICATED_NOC},
+                         .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{}}}},
+        .work_units = {WorkUnitSpec{
+            .unique_id = "l1_cache_work_unit",
+            .kernels = {"poll_l1_kernel", "write_to_break_poll_kernel"},
+            .target_nodes = NodeCoord{static_cast<uint32_t>(core.x), static_cast<uint32_t>(core.y)}}}};
 
-    tt_metal::Program program = MakeProgramFromSpec(spec);
+    tt_metal::Program program = MakeProgramFromSpec(*mesh_device, spec);
 
     // Create semaphore (still use old API for now)
     uint32_t sem0_id = tt_metal::CreateSemaphore(program, core, 0);

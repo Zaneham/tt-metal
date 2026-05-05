@@ -139,33 +139,36 @@ bool run_noc_api_latency_test(
 
     // Add optional args based on kernel type
     if (compile_args.size() > 5) {
-        named_compile_args["dest_coords_end"] = packed_dest_core_end_coordinates;
+        named_compile_args.push_back({"dest_coords_end", packed_dest_core_end_coordinates});
     }
     if (compile_args.size() > 6) {
-        named_compile_args["loopback"] = test_config.loopback;
+        named_compile_args.push_back({"loopback", test_config.loopback});
     }
     if (compile_args.size() > 7) {
-        named_compile_args["num_cores"] = sub_logical_core_set.num_cores();
+        named_compile_args.push_back({"num_cores", sub_logical_core_set.num_cores()});
     }
 
     ProgramSpec spec{
         .program_id = "noc_api_latency_test",
         .kernels = {KernelSpec{
             .unique_id = "noc_kernel",
-            .source = kernel_path,
-            .target_nodes =
-                NodeCoord{
-                    static_cast<uint32_t>(test_config.source_core_coord.x),
-                    static_cast<uint32_t>(test_config.source_core_coord.y)},
+            .source = KernelSpec::SourceFilePath{kernel_path},
             .num_threads = 1,
             .compile_time_arg_bindings = named_compile_args,
-            .config_spec = DataMovementConfiguration{
-                .gen1_data_movement_config =
-                    DataMovementConfiguration::Gen1DataMovementConfig{
-                        .processor = riscv, .noc = test_config.noc_id, .noc_mode = NOC_MODE::DM_DEDICATED_NOC},
-                .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{}}}}};
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = riscv, .noc = test_config.noc_id, .noc_mode = NOC_MODE::DM_DEDICATED_NOC},
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{}}}},
+        .work_units = {WorkUnitSpec{
+            .unique_id = "noc_work_unit",
+            .kernels = {"noc_kernel"},
+            .target_nodes = NodeCoord{
+                static_cast<uint32_t>(test_config.source_core_coord.x),
+                static_cast<uint32_t>(test_config.source_core_coord.y)}}}};
 
-    program = MakeProgramFromSpec(spec);
+    program = MakeProgramFromSpec(*mesh_device, spec);
 
     // Assign unique id
     log_info(LogTest, "Running Test ID: {}, Run ID: {}", test_config.test_id, unit_tests::dm::runtime_host_id);
