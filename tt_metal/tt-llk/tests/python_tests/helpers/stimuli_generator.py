@@ -6,7 +6,10 @@ import math
 import torch
 
 from .bfp_format_utils import bfp4b_to_float16b
+<<<<<<< HEAD
 from .deprecation import deprecated
+=======
+>>>>>>> 623e30a6050 (Changed MX_FORMAT_MIN_MAGNITUDE into a map.)
 from .format_config import MX_FORMAT_MAX_NORMAL, MX_FORMAT_MIN_MAGNITUDE, DataFormat
 from .llk_params import format_dict
 from .tile_constants import (
