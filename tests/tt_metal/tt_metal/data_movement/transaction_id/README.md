@@ -72,3 +72,8 @@ The test uses five different kernel implementations:
 - **reader_writer_one_packet_stateful.cpp**: Further optimized implementation using stateful one-packet APIs (`noc_async_read_one_packet_with_state_with_trid` and `noc_async_write_one_packet_with_state`) that reduce per-transaction overhead for smaller transactions
 
 All kernels implement the same read-after-write or write-after-read pattern but with different NOC API optimizations suited for different transaction size ranges and performance requirements.
+
+## Quasar Tests
+These tests run on the Quasar architecture via `QuasarMeshDeviceSingleCardFixture` and require the Quasar simulator.
+
+1. **TensixDataMovementTransactionIdReadAfterWrite** (Test ID: 927) - Quasar variant of Transaction ID Read After Write. Skipped at runtime when the emulator grid is smaller than 3 cores.

@@ -57,3 +57,10 @@ This test suite now includes tests using the new device 2.0 NOC API. These tests
 ### Device 2.0 Kernels:
 - `writer_unary_2_0.cpp`: Implements the writer functionality using the NOC API
 - `reader_unary_2_0.cpp`: Implements the reader functionality using the NOC API
+
+Both API versions run the same test cases but use different underlying implementations. The device 2.0 tests serve as a validation and performance comparison for the new API.
+
+## Quasar Tests
+These tests run on the Quasar architecture via `GenericMeshDeviceFixture` and require the Quasar simulator.
+
+1. **TensixDataMovementDRAMDirectedIdeal** (Test ID: 925) - Quasar variant of DRAM Unary Directed Ideal.

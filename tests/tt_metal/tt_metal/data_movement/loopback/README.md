@@ -39,3 +39,9 @@ Each test case has multiple runs, and each run has a unique runtime host id, ass
 
 1. Loopback Packet Sizes: Tests loopback
 2. Loopback Directed Ideal: Tests the most optimal data movement setup on the core itself that reduces the number of transactions while maximizing transaction size to minimize the effects of initialization overhead.
+
+## Quasar Tests
+These tests run on the Quasar architecture via `QuasarMeshDeviceSingleCardFixture` and require the Quasar simulator.
+
+1. **TensixDataMovementLoopbackPacketSizes** (Test ID: 912) - Quasar variant of Loopback Packet Sizes.
+2. **TensixDataMovementLoopbackDirectedIdeal** (Test ID: 913) - Quasar variant of Loopback Directed Ideal.

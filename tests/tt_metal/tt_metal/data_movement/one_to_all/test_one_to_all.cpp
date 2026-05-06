@@ -1245,7 +1245,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastLinkedDirect
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneToAllUnicastDirectedIdeal) {
     auto mesh_device = devices_[0];
-    uint32_t test_case_id = 812;
+    uint32_t test_case_id = 926;
     // Single run with small params to fit emulator timeout
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
         unit_tests::dm::compute_physical_constraints(mesh_device);

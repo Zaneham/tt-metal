@@ -353,7 +353,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDirectWriteMulticast) {
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWritePerformanceComparison) {
     GTEST_SKIP() << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
-    uint32_t test_id = 808;
+    uint32_t test_id = 922;
     // Single run on same core to validate Quasar direct-write path on emulator
     unit_tests::dm::direct_write::DirectWriteConfig test_config = {
         .test_id = test_id,
@@ -368,7 +368,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWritePerformanceComparison
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWriteAddressPatterns) {
     GTEST_SKIP() << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
-    uint32_t test_id = 809;
+    uint32_t test_id = 923;
     // Single run on same core to validate Quasar stateful direct-write path on emulator
     unit_tests::dm::direct_write::DirectWriteConfig test_config = {
         .test_id = test_id,

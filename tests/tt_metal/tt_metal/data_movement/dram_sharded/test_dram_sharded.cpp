@@ -362,7 +362,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementDRAMShardedReadDirec
     CoreRangeSet core_range_set({core_range});
 
     unit_tests::dm::dram_sharded::DramShardedConfig test_config = {
-        .test_id = 810,
+        .test_id = 924,
         .num_of_transactions = num_of_transactions,
         .num_banks = mesh_device->num_dram_channels(),
         .pages_per_bank = 32,

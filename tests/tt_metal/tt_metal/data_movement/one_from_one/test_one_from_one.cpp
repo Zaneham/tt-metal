@@ -374,7 +374,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOnePacketSizes2_0) {
 }
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneFromOnePacketSizes) {
-    uint32_t test_id = 802;
+    uint32_t test_id = 916;
     // Single run to validate the Quasar code path within emulator timeout
     auto mesh_device = devices_[0];
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
@@ -391,7 +391,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneFromOnePacketSize
 }
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneFromOneDirectedIdeal) {
-    uint32_t test_id = 803;
+    uint32_t test_id = 917;
     // Use reduced params to fit emulator 3-min timeout
     auto mesh_device = devices_[0];
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =

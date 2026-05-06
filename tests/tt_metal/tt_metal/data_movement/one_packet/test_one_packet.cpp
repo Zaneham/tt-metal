@@ -417,7 +417,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOnePacketReadSizes) 
 
     // Single run to validate the Quasar code path within emulator timeout
     unit_tests::dm::one_packet::OnePacketConfig test_config = {
-        .test_id = 806,
+        .test_id = 920,
         .master_core_coord = {0, 0},
         .subordinate_core_coord = {1, 0},
         .num_packets = 4,
@@ -434,7 +434,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOnePacketWriteSizes)
 
     // Single run to validate the Quasar code path within emulator timeout
     unit_tests::dm::one_packet::OnePacketConfig test_config = {
-        .test_id = 807,
+        .test_id = 921,
         .master_core_coord = {0, 0},
         .subordinate_core_coord = {1, 0},
         .num_packets = 4,

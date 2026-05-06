@@ -321,7 +321,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMPacketSizes2_0) {
 }
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementDRAMDirectedIdeal) {
-    uint32_t test_id = 811;
+    uint32_t test_id = 925;
     // Single run with small params to fit emulator timeout
     auto mesh_device = devices_[0];
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =

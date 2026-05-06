@@ -461,7 +461,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdWriteAfterReadOn
 }
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementTransactionIdReadAfterWrite) {
-    uint32_t test_id = 813;
+    uint32_t test_id = 927;
 
     auto mesh_device = devices_[0];
     auto* device = mesh_device->impl().get_device(0);

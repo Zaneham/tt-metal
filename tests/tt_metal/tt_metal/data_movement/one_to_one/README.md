@@ -60,3 +60,9 @@ This test suite now includes tests using the new device 2.0 NOC API. These tests
 - `sender.cpp`: Original sender kernel for comparison
 
 Both API versions run the same test cases but use different underlying implementations. The device 2.0 tests serve as a validation and performance comparison for the new API.
+
+## Quasar Tests
+These tests run on the Quasar architecture via `GenericMeshDeviceFixture` and require the Quasar simulator.
+
+1. **TensixDataMovementOneToOnePacketSizes** (Test ID: 914) - Quasar variant of One to One Packet Sizes.
+2. **TensixDataMovementOneToOneDirectedIdeal** (Test ID: 915) - Quasar variant of One to One Directed Ideal.

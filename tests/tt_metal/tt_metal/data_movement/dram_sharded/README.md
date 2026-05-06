@@ -44,3 +44,8 @@ Each test case has multiple runs, and each run has a unique runtime host id, ass
 2. DRAM Sharded Read Tile Numbers: Tests reading over varying number of pages per DRAM bank.
 3. DRAM Sharded Read Bank Numbers: Tests reading over varying numbers of DRAM banks.
 4. DRAM Sharded Read Trid Directed Ideal: Tests reading from DRAM sharded with transaction IDs.
+
+## Quasar Tests
+These tests run on the Quasar architecture via `QuasarMeshDeviceSingleCardFixture` and require the Quasar simulator.
+
+1. **TensixDataMovementDRAMShardedReadDirectedIdeal** (Test ID: 924) - Quasar variant of DRAM Sharded Read Directed Ideal.

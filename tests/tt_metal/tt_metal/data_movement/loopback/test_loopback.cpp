@@ -222,7 +222,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackPacketSizes)
     // Single run to validate the Quasar code path within emulator 3-min timeout
     uint32_t page_size_bytes = 64;  // Quasar flit size
     unit_tests::dm::core_loopback::LoopbackConfig test_config = {
-        .test_id = unit_tests::dm::core_loopback::START_ID + 0,
+        .test_id = 912,
         .master_core_coord = {0, 0},
         .num_of_transactions = 4,
         .transaction_size_pages = 4,
@@ -236,7 +236,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackPacketSizes)
 TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackDirectedIdeal) {
     auto mesh_device = devices_[0];
 
-    uint32_t test_id = 55;
+    uint32_t test_id = 913;
 
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);

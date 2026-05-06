@@ -14,6 +14,10 @@ Some test suites use slow dispatch mode for reliable program execution. These te
 - **Conv Hardcoded** (IDs 21-23)
 - **Reshard Hardcoded** (IDs 17-20)
 
+### Quasar Simulator
+Quasar tests use `QuasarMeshDeviceSingleCardFixture`, which inherits from `MeshDeviceSingleCardFixture` and requires `TT_METAL_SLOW_DISPATCH_MODE=1`. This is incompatible with `GenericMeshDeviceFixture`, which skips when slow dispatch is enabled. The fixture is transitional — once Quasar hardware ships with fast dispatch support, these tests can be migrated to `GenericMeshDeviceFixture`. Tests using this fixture include:
+- **Quasar DM Tests** (IDs 912-927)
+
 ## Device 2.0 API Support
 This test suite now includes tests using the new device 2.0 NOC API alongside the original implementations. These tests provide validation and performance comparison for the updated API design:
 
@@ -61,6 +65,7 @@ Both API versions run the same test cases but use different underlying implement
 | NOC Estimator               | 800-817                         | Comprehensive bandwidth sweeps for NOC estimation across all patterns and mechanisms.    |
 | Quasar Addrgen              | 900-909                         | Quasar-only: example kernels exercising the hardware address generator (1D/2D/face/interleaved). Requires Quasar simulator. |
 | Quasar IDMA                 | 910-911                         | Quasar-only: example kernels exercising the IDMA engine (basic linear copy and 1D strided). Requires Quasar simulator. |
+| Quasar DM Tests             | 912-927                         | Quasar-only: loopback (912-913), one_to_one (914-915), one_from_one (916-917), one_from_all (918-919), one_packet (920-921), direct_write (922-923), dram_sharded (924), dram_unary (925), one_to_all (926), transaction_id (927). Requires Quasar simulator. |
 
 
 ## Running Tests
@@ -98,6 +103,7 @@ Follow these steps to add new tests to this test suite.
 1. **Choose dispatch mode:** Decide whether your test should use fast dispatch (Mesh Device API) or slow dispatch:
     - **Fast Dispatch (recommended)**: Use `GenericMeshDeviceFixture` for new performance tests
     - **Slow Dispatch**: Use `MeshDeviceFixture` only if fast dispatch APIs don't work for your specific test case
+    - **Quasar Simulator**: Use `QuasarMeshDeviceSingleCardFixture` for Quasar-specific tests (see [Quasar Simulator](#quasar-simulator) above for why a separate fixture is required)
 2. Create a new directory with a descriptive name for the test.
     - **Example:** `./dram_unary`
 3. In this directory, create the c++ test file with a filename that starts with "test_".
