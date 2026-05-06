@@ -7,8 +7,8 @@
 // L1 to L1 send
 void kernel_main() {
     constexpr uint32_t l1_local_addr = get_named_compile_time_arg_val("l1_addr");
-    constexpr uint32_t num_of_trids =
-        get_named_compile_time_arg_val("num_trids") < 16 ? get_named_compile_time_arg_val("num_trids") : 15;
+    constexpr uint32_t num_trids_ct = get_named_compile_time_arg_val("num_transactions");
+    constexpr uint32_t num_of_trids = num_trids_ct < 16 ? num_trids_ct : 15;
     constexpr uint32_t bytes_per_transaction = get_named_compile_time_arg_val("bytes_per_tx");
     constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
     constexpr uint32_t packed_sub0_core_coordinates = get_named_compile_time_arg_val("sub0_coords");
