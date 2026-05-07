@@ -337,11 +337,19 @@ void multicast_test(
 }  // namespace unit_tests::dm::direct_write
 
 TEST_F(GenericMeshDeviceFixture, TensixDirectWritePerformanceComparison) {
+    if (get_mesh_device()->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        GTEST_SKIP()
+            << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
+    }
     uint32_t test_id = 500;
     unit_tests::dm::direct_write::performance_comparison_test(get_mesh_device(), test_id);
 }
 
 TEST_F(GenericMeshDeviceFixture, TensixDirectWriteAddressPatterns) {
+    if (get_mesh_device()->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        GTEST_SKIP()
+            << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
+    }
     uint32_t test_id = 501;
     unit_tests::dm::direct_write::address_pattern_test(get_mesh_device(), test_id);
 }
@@ -349,36 +357,6 @@ TEST_F(GenericMeshDeviceFixture, TensixDirectWriteAddressPatterns) {
 TEST_F(GenericMeshDeviceFixture, TensixDirectWriteMulticast) {
     uint32_t test_id = 507;
     unit_tests::dm::direct_write::multicast_test(get_mesh_device(), test_id);
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWritePerformanceComparison) {
-    GTEST_SKIP() << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
-    uint32_t test_id = 922;
-    // Single run on same core to validate Quasar direct-write path on emulator
-    unit_tests::dm::direct_write::DirectWriteConfig test_config = {
-        .test_id = test_id,
-        .sender_core_coord = {0, 0},
-        .receiver_core_coords = {{0, 0}},
-        .num_writes = 4,
-        .use_posted_writes = true,
-        .same_destination = true,
-        .use_stateful_approach = false};
-    EXPECT_TRUE(run_dm(devices_[0], test_config));
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDirectWriteAddressPatterns) {
-    GTEST_SKIP() << "Skipping on Quasar emulator: direct-write kernel executes but destination L1 remains unchanged";
-    uint32_t test_id = 923;
-    // Single run on same core to validate Quasar stateful direct-write path on emulator
-    unit_tests::dm::direct_write::DirectWriteConfig test_config = {
-        .test_id = test_id,
-        .sender_core_coord = {0, 0},
-        .receiver_core_coords = {{0, 0}},
-        .num_writes = 4,
-        .use_posted_writes = true,
-        .same_destination = true,
-        .use_stateful_approach = true};
-    EXPECT_TRUE(run_dm(devices_[0], test_config));
 }
 
 }  // namespace tt::tt_metal

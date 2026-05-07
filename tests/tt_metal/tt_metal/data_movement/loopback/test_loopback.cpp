@@ -160,6 +160,21 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementLoopbackPacketSizes) {
     auto mesh_device = get_mesh_device();
     auto arch_ = mesh_device->impl().get_device(0)->arch();
 
+    if (arch_ == ARCH::QUASAR) {
+        // Single run to validate the Quasar code path within emulator 3-min timeout
+        unit_tests::dm::core_loopback::LoopbackConfig test_config = {
+            .test_id = unit_tests::dm::core_loopback::START_ID + 0,
+            .master_core_coord = {0, 0},
+            .num_of_transactions = 4,
+            .transaction_size_pages = 4,
+            .page_size_bytes = 64,  // Quasar flit size
+            .l1_data_format = DataFormat::Float16_b,
+            .noc_id = NOC::NOC_0,
+        };
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
+
     // Parameters
     uint32_t max_transactions = 256;
     uint32_t max_transaction_size_pages =
@@ -190,13 +205,15 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementLoopbackPacketSizes) {
 
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementLoopbackDirectedIdeal) {
     auto mesh_device = get_mesh_device();
+    auto arch_ = mesh_device->impl().get_device(0)->arch();
 
     uint32_t test_id = 55;
 
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
 
-    uint32_t num_of_transactions = 128;
+    // Use reduced params for Quasar emulator to fit within 3-min timeout
+    uint32_t num_of_transactions = arch_ == ARCH::QUASAR ? 4 : 128;
     uint32_t transaction_size_pages =
         max_transmittable_pages / (num_of_transactions * 2);  // Since we need to fit 2 buffers, we divide by 2
 
@@ -213,49 +230,6 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementLoopbackDirectedIdeal) {
         .noc_id = noc_id};
 
     // Run
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackPacketSizes) {
-    auto mesh_device = devices_[0];
-
-    // Single run to validate the Quasar code path within emulator 3-min timeout
-    uint32_t page_size_bytes = 64;  // Quasar flit size
-    unit_tests::dm::core_loopback::LoopbackConfig test_config = {
-        .test_id = 912,
-        .master_core_coord = {0, 0},
-        .num_of_transactions = 4,
-        .transaction_size_pages = 4,
-        .page_size_bytes = page_size_bytes,
-        .l1_data_format = DataFormat::Float16_b,
-        .noc_id = NOC::NOC_0,
-    };
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementLoopbackDirectedIdeal) {
-    auto mesh_device = devices_[0];
-
-    uint32_t test_id = 913;
-
-    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
-        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
-
-    uint32_t num_of_transactions = 128;
-    uint32_t transaction_size_pages = max_transmittable_pages / (num_of_transactions * 2);
-
-    CoreCoord master_core_coord = {0, 0};
-    NOC noc_id = NOC::NOC_0;
-
-    unit_tests::dm::core_loopback::LoopbackConfig test_config = {
-        .test_id = test_id,
-        .master_core_coord = master_core_coord,
-        .num_of_transactions = num_of_transactions,
-        .transaction_size_pages = transaction_size_pages,
-        .page_size_bytes = page_size_bytes,
-        .l1_data_format = DataFormat::Float16_b,
-        .noc_id = noc_id};
-
     EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 

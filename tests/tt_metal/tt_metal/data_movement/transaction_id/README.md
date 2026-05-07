@@ -73,7 +73,5 @@ The test uses five different kernel implementations:
 
 All kernels implement the same read-after-write or write-after-read pattern but with different NOC API optimizations suited for different transaction size ranges and performance requirements.
 
-## Quasar Tests
-These tests run on the Quasar architecture via `QuasarMeshDeviceSingleCardFixture` and require the Quasar simulator.
-
-1. **TensixDataMovementTransactionIdReadAfterWrite** (Test ID: 927) - Quasar variant of Transaction ID Read After Write. Skipped at runtime when the emulator grid is smaller than 3 cores.
+## Quasar Notes
+`TensixDataMovementTransactionIdReadAfterWrite` includes a Quasar-specific code path inside `GenericMeshDeviceFixture`. Requires `TT_METAL_SLOW_DISPATCH_MODE=1` and the Quasar simulator. Skipped at runtime when the emulator grid has fewer than 3 cores.

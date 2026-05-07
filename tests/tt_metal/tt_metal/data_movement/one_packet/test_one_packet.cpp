@@ -210,6 +210,25 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketReadSizes) {
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
 
+    if (device->arch() == ARCH::QUASAR) {
+        // subordinate_core_coord {1, 0} requires at least 2 columns in the compute grid
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: subordinate core {1, 0} requires >= 2 columns, but grid has "
+                         << device->compute_with_storage_grid_size().x << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        // Single run to validate the Quasar code path within emulator timeout
+        unit_tests::dm::one_packet::OnePacketConfig test_config = {
+            .test_id = 80,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = {1, 0},
+            .num_packets = 4,
+            .packet_size_bytes = page_size_bytes,
+            .read = true,
+        };
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
+
     // Parameters
     uint32_t max_packet_size_bytes =
         device->arch() == tt::ARCH::BLACKHOLE ? 16 * 1024 : 8 * 1024;  // 16 kB for BH, 8 kB for WH
@@ -246,6 +265,25 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteSizes) {
     // Physical Constraints
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    if (device->arch() == ARCH::QUASAR) {
+        // subordinate_core_coord {1, 0} requires at least 2 columns in the compute grid
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: subordinate core {1, 0} requires >= 2 columns, but grid has "
+                         << device->compute_with_storage_grid_size().x << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        // Single run to validate the Quasar code path within emulator timeout
+        unit_tests::dm::one_packet::OnePacketConfig test_config = {
+            .test_id = 81,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = {1, 0},
+            .num_packets = 4,
+            .packet_size_bytes = page_size_bytes,
+            .read = false,
+        };
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
 
     // Parameters
     uint32_t max_packet_size_bytes =
@@ -408,40 +446,6 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteSizes_2_0) {
             EXPECT_TRUE(run_dm(mesh_device, test_config));
         }
     }
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOnePacketReadSizes) {
-    auto mesh_device = devices_[0];
-    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
-        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
-
-    // Single run to validate the Quasar code path within emulator timeout
-    unit_tests::dm::one_packet::OnePacketConfig test_config = {
-        .test_id = 920,
-        .master_core_coord = {0, 0},
-        .subordinate_core_coord = {1, 0},
-        .num_packets = 4,
-        .packet_size_bytes = page_size_bytes,
-        .read = true,
-    };
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOnePacketWriteSizes) {
-    auto mesh_device = devices_[0];
-    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
-        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
-
-    // Single run to validate the Quasar code path within emulator timeout
-    unit_tests::dm::one_packet::OnePacketConfig test_config = {
-        .test_id = 921,
-        .master_core_coord = {0, 0},
-        .subordinate_core_coord = {1, 0},
-        .num_packets = 4,
-        .packet_size_bytes = page_size_bytes,
-        .read = false,
-    };
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 
 }  // namespace tt::tt_metal

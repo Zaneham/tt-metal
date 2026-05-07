@@ -116,11 +116,14 @@ protected:
     void SetUp() override {
         auto* slow_dispatch = getenv("TT_METAL_SLOW_DISPATCH_MODE");
         auto* emulated = getenv("TT_METAL_EMULE_MODE");
-        if (slow_dispatch && !emulated) {
+        const auto arch = tt::get_arch_from_string(tt::test_utils::get_umd_arch_name());
+        if (slow_dispatch && !emulated && arch != tt::ARCH::QUASAR) {
             GTEST_SKIP() << "Skipping Mesh-Device test suite, since it can only be run in Fast Dispatch Mode.";
         }
-
-        const auto arch = tt::get_arch_from_string(tt::test_utils::get_umd_arch_name());
+        if (!slow_dispatch && arch == tt::ARCH::QUASAR) {
+            GTEST_SKIP() << "Skipping Mesh-Device test suite on Quasar: fast dispatch is not supported. "
+                            "Set TT_METAL_SLOW_DISPATCH_MODE=1.";
+        }
         if (config_.arch.has_value() && *config_.arch != arch) {
             GTEST_SKIP() << fmt::format(
                 "Skipping MeshDevice test suite on a machine with architecture {} that does not match the requested "

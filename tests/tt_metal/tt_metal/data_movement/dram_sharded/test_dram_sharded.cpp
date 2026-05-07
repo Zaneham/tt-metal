@@ -169,6 +169,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramSh
 /* ========== Directed Ideal Test Case; Test id = 84 ========== */
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadDirectedIdeal) {
     auto mesh_device = get_mesh_device();
+    const uint32_t test_id = 84;
 
     // Parameters
     DataFormat l1_data_format = DataFormat::Float16_b;
@@ -181,7 +182,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadDirectedIdeal)
 
     // Test config
     unit_tests::dm::dram_sharded::DramShardedConfig test_config = {
-        .test_id = 84,
+        .test_id = test_id,
         .num_of_transactions = num_of_transactions,
         .num_banks = mesh_device->num_dram_channels(),
         .pages_per_bank = 32,
@@ -347,29 +348,6 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadTridDirectedId
         .use_2_0 = true};
 
     // Run
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementDRAMShardedReadDirectedIdeal) {
-    auto mesh_device = devices_[0];
-
-    // Parameters
-    DataFormat l1_data_format = DataFormat::Float16_b;
-    uint32_t page_size_bytes = tt::tile_size(l1_data_format);
-    uint32_t num_of_transactions = 256;
-
-    CoreRange core_range({0, 0}, {0, 0});
-    CoreRangeSet core_range_set({core_range});
-
-    unit_tests::dm::dram_sharded::DramShardedConfig test_config = {
-        .test_id = 924,
-        .num_of_transactions = num_of_transactions,
-        .num_banks = mesh_device->num_dram_channels(),
-        .pages_per_bank = 32,
-        .page_size_bytes = page_size_bytes,
-        .l1_data_format = l1_data_format,
-        .cores = core_range_set};
-
     EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 

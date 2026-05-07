@@ -34,8 +34,5 @@ Each test case has multiple runs, and each run has a unique runtime host id, ass
 
 3. **Multicast Inline Direct Write (ID: 507)**: Tests multicast direct write functionality using the non-stateful NoC API to broadcast writes from a single sender core to multiple receiver cores simultaneously. The test validates different multicast rectangle configurations (1x1, 1x2, 2x2, 3x2) and address patterns (same destination vs different destinations with address stride). Each receiver core's memory is independently validated to ensure all multicast writes were delivered correctly with expected values. This test verifies the correctness and scalability of the multicast inline DW write primitive across varying numbers of subordinate cores.
 
-## Quasar Tests
-These tests run on the Quasar architecture via `QuasarMeshDeviceSingleCardFixture` and require the Quasar simulator. Both are skipped at runtime because `noc_inline_dw_write` writes do not land on the Quasar emulator (emulator limitation).
-
-1. **TensixDataMovementDirectWritePerformanceComparison** (Test ID: 922) - Quasar variant of Direct Write Performance Comparison.
-2. **TensixDataMovementDirectWriteAddressPatterns** (Test ID: 923) - Quasar variant of Direct Write Address Patterns.
+## Quasar Notes
+`TensixDirectWritePerformanceComparison` and `TensixDirectWriteAddressPatterns` skip at runtime on Quasar because `noc_inline_dw_write` writes do not land on the Quasar emulator (emulator limitation).

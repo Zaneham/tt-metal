@@ -313,22 +313,60 @@ void custom_test(
 /* ========== TEST CASES ========== */
 
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOnePacketSizes) {
+    auto mesh_device = get_mesh_device();
+    if (mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        // subordinate_core_coord {1, 0} requires at least 2 columns in the compute grid
+        if (mesh_device->impl().get_device(0)->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: subordinate core {1, 0} requires >= 2 columns, but grid has "
+                         << mesh_device->impl().get_device(0)->compute_with_storage_grid_size().x
+                         << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_from_core::OneFromOneConfig test_config = {
+            .test_id = 5,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = {1, 0},
+            .num_of_transactions = 4,
+            .transaction_size_pages = 4,
+            .page_size_bytes = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b};
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
     uint32_t test_id = 5;
     CoreCoord master_core_coord = {0, 0};
     CoreCoord subordinate_core_coord = {1, 1};
-
-    unit_tests::dm::core_from_core::packet_sizes_test(
-        get_mesh_device(), test_id, master_core_coord, subordinate_core_coord);
+    unit_tests::dm::core_from_core::packet_sizes_test(mesh_device, test_id, master_core_coord, subordinate_core_coord);
 }
 
-/* ========== Test case for one from one data movement; Test id = 51 ========== */
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOneDirectedIdeal) {
+    auto mesh_device = get_mesh_device();
+    if (mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        // subordinate_core_coord {1, 0} requires at least 2 columns in the compute grid
+        if (mesh_device->impl().get_device(0)->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: subordinate core {1, 0} requires >= 2 columns, but grid has "
+                         << mesh_device->impl().get_device(0)->compute_with_storage_grid_size().x
+                         << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_from_core::OneFromOneConfig test_config = {
+            .test_id = 51,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = {1, 0},
+            .num_of_transactions = 4,
+            .transaction_size_pages = 1,
+            .page_size_bytes = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b};
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
     uint32_t test_id = 51;
     CoreCoord master_core_coord = {0, 0};
     CoreCoord subordinate_core_coord = {0, 1};
-
     unit_tests::dm::core_from_core::directed_ideal_test(
-        get_mesh_device(), test_id, master_core_coord, subordinate_core_coord);
+        mesh_device, test_id, master_core_coord, subordinate_core_coord);
 }
 
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOneVirtualChannels) {
@@ -373,37 +411,4 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOnePacketSizes2_0) {
         get_mesh_device(), test_id, master_core_coord, subordinate_core_coord, use_2_0_api);
 }
 
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneFromOnePacketSizes) {
-    uint32_t test_id = 916;
-    // Single run to validate the Quasar code path within emulator timeout
-    auto mesh_device = devices_[0];
-    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
-        unit_tests::dm::compute_physical_constraints(mesh_device);
-    unit_tests::dm::core_from_core::OneFromOneConfig test_config = {
-        .test_id = test_id,
-        .master_core_coord = {0, 0},
-        .subordinate_core_coord = {1, 0},
-        .num_of_transactions = 4,
-        .transaction_size_pages = 4,
-        .page_size_bytes = bytes_per_page,
-        .l1_data_format = DataFormat::Float16_b};
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneFromOneDirectedIdeal) {
-    uint32_t test_id = 917;
-    // Use reduced params to fit emulator 3-min timeout
-    auto mesh_device = devices_[0];
-    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
-        unit_tests::dm::compute_physical_constraints(mesh_device);
-    unit_tests::dm::core_from_core::OneFromOneConfig test_config = {
-        .test_id = test_id,
-        .master_core_coord = {0, 0},
-        .subordinate_core_coord = {1, 0},
-        .num_of_transactions = 4,
-        .transaction_size_pages = 1,
-        .page_size_bytes = bytes_per_page,
-        .l1_data_format = DataFormat::Float16_b};
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
 }  // namespace tt::tt_metal

@@ -843,11 +843,34 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastLinkedSemaph
 
 /* ========== UNICAST ========== */
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllUnicastDirectedIdeal) {
-    // Parameters
-    uint32_t test_case_id = 52;  // Arbitrary test id
-
     auto mesh_device = get_mesh_device();
     auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        // sub_grid_size {2, 1} requires at least 2 columns in the compute grid
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: sub_grid_size {2, 1} requires >= 2 columns, but grid has "
+                         << device->compute_with_storage_grid_size().x << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+            .test_id = 52,
+            .mst_core_coord = {0, 0},
+            .sub_start_core_coord = {0, 0},
+            .sub_grid_size = {2, 1},
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .loopback = true,
+            .is_multicast = false};
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
+
+    // Parameters
+    uint32_t test_case_id = 52;  // Arbitrary test id
 
     bool loopback = true;
     NOC noc_id = NOC::NOC_0;
@@ -1243,23 +1266,4 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastLinkedDirect
         true);
 }
 
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementOneToAllUnicastDirectedIdeal) {
-    auto mesh_device = devices_[0];
-    uint32_t test_case_id = 926;
-    // Single run with small params to fit emulator timeout
-    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
-        unit_tests::dm::compute_physical_constraints(mesh_device);
-    unit_tests::dm::core_to_all::OneToAllConfig test_config = {
-        .test_id = test_case_id,
-        .mst_core_coord = {0, 0},
-        .sub_start_core_coord = {0, 0},
-        .sub_grid_size = {2, 1},
-        .num_of_transactions = 4,
-        .pages_per_transaction = 1,
-        .bytes_per_page = bytes_per_page,
-        .l1_data_format = DataFormat::Float16_b,
-        .loopback = true,
-        .is_multicast = false};
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
-}
 }  // namespace tt::tt_metal

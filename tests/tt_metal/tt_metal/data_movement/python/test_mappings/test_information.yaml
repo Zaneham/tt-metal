@@ -856,54 +856,6 @@ tests:
   911:
     name: "Quasar IDMA - 1D Strided"
 
-  912:
-    name: "Quasar Loopback - Packet Sizes"
-
-  913:
-    name: "Quasar Loopback - Directed Ideal"
-
-  914:
-    name: "Quasar One to One - Packet Sizes"
-
-  915:
-    name: "Quasar One to One - Directed Ideal"
-
-  916:
-    name: "Quasar One from One - Read Sizes"
-
-  917:
-    name: "Quasar One from One - Read Directed Ideal"
-
-  918:
-    name: "Quasar One from All - Packet Sizes"
-
-  919:
-    name: "Quasar One from All - Directed Ideal"
-
-  920:
-    name: "Quasar One Packet - Read Sizes"
-
-  921:
-    name: "Quasar One Packet - Write Sizes"
-
-  922:
-    name: "Quasar Direct Write - Performance Comparison"
-
-  923:
-    name: "Quasar Direct Write - Address Patterns"
-
-  924:
-    name: "Quasar DRAM Sharded - Read Directed Ideal"
-
-  925:
-    name: "Quasar DRAM Unary - DRAM Directed Ideal"
-
-  926:
-    name: "Quasar One to All - Unicast Directed Ideal"
-
-  927:
-    name: "Quasar Transaction ID - Read After Write"
-
   1012:
     name: "1D Matmul Test 1012 - 2x2 K=2 Subblock K Sweep"
     bandwidth_mode: "combined"

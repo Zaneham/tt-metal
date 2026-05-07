@@ -61,8 +61,5 @@ This test suite now includes tests using the new device 2.0 NOC API. These tests
 
 Both API versions run the same test cases but use different underlying implementations. The device 2.0 tests serve as a validation and performance comparison for the new API.
 
-## Quasar Tests
-These tests run on the Quasar architecture via `GenericMeshDeviceFixture` and require the Quasar simulator.
-
-1. **TensixDataMovementOneToOnePacketSizes** (Test ID: 914) - Quasar variant of One to One Packet Sizes.
-2. **TensixDataMovementOneToOneDirectedIdeal** (Test ID: 915) - Quasar variant of One to One Directed Ideal.
+## Quasar Notes
+`TensixDataMovementOneToOnePacketSizes` and `TensixDataMovementOneToOneDirectedIdeal` include Quasar-specific code paths inside `GenericMeshDeviceFixture`. Requires `TT_METAL_SLOW_DISPATCH_MODE=1`, the Quasar simulator, and a grid with at least 2 columns (e.g. `emu-quasar-2x3`).

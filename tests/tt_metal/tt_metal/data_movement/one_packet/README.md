@@ -43,8 +43,5 @@ Each test case has multiple runs, and each run has a unique runtime host id, ass
 3. One Packet Read Directed Ideal: Tests the most optimal transactions for reading packets by maximizing the number of packets and packet size to amortize initialization overhead and saturate the bandwidth.
 4. One Packet Write Directed Ideal: Tests the most optimal transactions for writing packets by maximizing the number of packets and packet size to amortize initialization overhead and saturate the bandwidth.
 
-## Quasar Tests
-These tests run on the Quasar architecture via `QuasarMeshDeviceSingleCardFixture` and require the Quasar simulator.
-
-1. **TensixDataMovementOnePacketReadSizes** (Test ID: 920) - Quasar variant of One Packet Read Sizes.
-2. **TensixDataMovementOnePacketWriteSizes** (Test ID: 921) - Quasar variant of One Packet Write Sizes.
+## Quasar Notes
+`TensixDataMovementOnePacketReadSizes` and `TensixDataMovementOnePacketWriteSizes` include Quasar-specific code paths inside `GenericMeshDeviceFixture`. Requires `TT_METAL_SLOW_DISPATCH_MODE=1`, the Quasar simulator, and a grid with at least 2 columns (e.g. `emu-quasar-2x3`).

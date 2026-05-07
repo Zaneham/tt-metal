@@ -303,10 +303,24 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMChannels) {
 
 /* ========== Directed ideal test case; Test id = 3 ========== */
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMDirectedIdeal) {
+    auto mesh_device = get_mesh_device();
+    if (mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::dram::DramConfig test_config = {
+            .test_id = 3,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 4,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .core_coord = {0, 0},
+            .dram_channel = 0};
+        EXPECT_TRUE(run_dm(mesh_device, test_config));
+        return;
+    }
     // Test ID (Arbitrary)
     uint32_t test_id = 3;
-
-    unit_tests::dm::dram::directed_ideal_test(get_mesh_device(), test_id);
+    unit_tests::dm::dram::directed_ideal_test(mesh_device, test_id);
 }
 
 /* ========== Test case for varying transaction numbers and sizes with 2.0 API; Test id = 40 ========== */
@@ -318,23 +332,6 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMPacketSizes2_0) {
         0,       // DRAM channel (default)
         true     // Use 2.0 API
     );
-}
-
-TEST_F(QuasarMeshDeviceSingleCardFixture, TensixDataMovementDRAMDirectedIdeal) {
-    uint32_t test_id = 925;
-    // Single run with small params to fit emulator timeout
-    auto mesh_device = devices_[0];
-    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
-        unit_tests::dm::compute_physical_constraints(mesh_device);
-    unit_tests::dm::dram::DramConfig test_config = {
-        .test_id = test_id,
-        .num_of_transactions = 4,
-        .pages_per_transaction = 4,
-        .bytes_per_page = bytes_per_page,
-        .l1_data_format = DataFormat::Float16_b,
-        .core_coord = {0, 0},
-        .dram_channel = 0};
-    EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 
 }  // namespace tt::tt_metal
