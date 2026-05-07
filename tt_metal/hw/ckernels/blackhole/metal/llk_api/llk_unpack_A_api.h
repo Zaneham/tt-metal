@@ -46,6 +46,7 @@ inline void llk_unpack_A_init(
         llk_unpack_dbg_feature_disable();
     }
 
+    DEVICE_PRINT("llk_unpack_A_init operand_id: {}\n", operand_id);
     LLK_ASSERT_BLOCK(is_unpacker_A_configured_correctly<UnpackerProgramType::ProgramByTile>(
         operand_unpack_src_format, operand_unpack_dst_format, face_r_dim, num_faces));
 

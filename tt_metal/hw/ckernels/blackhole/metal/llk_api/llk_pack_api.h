@@ -226,8 +226,8 @@ inline void llk_pack_untilize(
             (block_c_index * ((num_faces > 2) ? num_faces / 2 : num_faces) * block_ct_dim * FACE_C_DIM)) /
             16;
 
-    LLK_ASSERT_BLOCK(are_packers_configured_correctly<PackerProgramType::ProgramByFace>(
-        pack_src_format[output_id], pack_dst_format[output_id], face_r_dim));
+    LLK_ASSERT_BLOCK(are_packers_configured_correctly<PackerProgramType::ProgramByTile>(
+        pack_src_format[output_id], pack_dst_format[output_id]));
 
     for (std::uint32_t block_rt = 0; block_rt < block_rt_dim; block_rt++) {
         _llk_pack_untilize_<block_ct_dim, full_ct_dim, narrow_row, tile_dst_ct_offset, dense>(

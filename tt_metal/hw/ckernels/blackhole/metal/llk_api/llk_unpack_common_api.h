@@ -43,6 +43,7 @@ inline void llk_unpack_hw_configure(
     const std::uint32_t unpB_operand,
     const std::uint32_t unpA_face_r_dim,
     const std::uint32_t unpA_num_faces) {
+    DEVICE_PRINT("llk_unpack_hw_configure unpA_operand: {}, unpB_operand: {}\n", unpA_operand, unpB_operand);
     // In0 -> unpA
     // In1 -> unpB
     const uint32_t unpA_operand_id = get_operand_id(unpA_operand);
@@ -180,6 +181,10 @@ template <
     p_dim_stride_target dim_stride_target = p_dim_stride_target::IGNORE>
 inline void llk_unpack_reconfig_data_format(
     const std::uint32_t srca_new_operand, const std::uint32_t srcb_new_operand) {
+    DEVICE_PRINT(
+        "llk_unpack_reconfig_data_format srca_new_operand: {}, srcb_new_operand: {}\n",
+        srca_new_operand,
+        srcb_new_operand);
     llk_unpack_reconfig_data_format_srca<is_fp32_dest_acc_en, to_from_int8, dim_stride_target>(srca_new_operand);
     llk_unpack_reconfig_data_format_srcb<is_fp32_dest_acc_en, to_from_int8, dim_stride_target>(srcb_new_operand);
 }
@@ -194,6 +199,13 @@ inline void llk_unpack_reconfig_data_format(
     const std::uint32_t srca_new_operand,
     const std::uint32_t srcb_old_operand,
     const std::uint32_t srcb_new_operand) {
+    DEVICE_PRINT(
+        "llk_unpack_reconfig_data_format srca_old_operand: {}, srca_new_operand: {}, srcb_old_operand: {}, "
+        "srcb_new_operand: {}\n",
+        srca_old_operand,
+        srca_new_operand,
+        srcb_old_operand,
+        srcb_new_operand);
     llk_unpack_reconfig_data_format_srca<is_fp32_dest_acc_en, to_from_int8, dim_stride_target>(
         srca_old_operand, srca_new_operand);
     llk_unpack_reconfig_data_format_srcb<is_fp32_dest_acc_en, to_from_int8, dim_stride_target>(

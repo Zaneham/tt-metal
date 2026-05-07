@@ -33,6 +33,12 @@ ALWI void reconfig_data_format(
     const uint32_t srca_new_operand,
     const uint32_t srcb_old_operand,
     const uint32_t srcb_new_operand) {
+    DEVICE_PRINT(
+        "reconfig_data_format srca_old_operand: {}, srca_new_operand: {}, srcb_old_operand: {}, srcb_new_operand: {}\n",
+        srca_old_operand,
+        srca_new_operand,
+        srcb_old_operand,
+        srcb_new_operand);
 #ifndef ARCH_QUASAR
     // If is_tile_dim_reconfig_en is enabled, modify the dimension and stride according to enum; else, ignore them
     UNPACK((llk_unpack_reconfig_data_format<

@@ -210,8 +210,9 @@ inline void _llk_pack_untilize_(
     static_assert(!dense || (!narrow_row), "narrow_row must be false when dense");
     LLK_ASSERT(num_faces == 1 || num_faces == 2 || num_faces == 4, "num_faces must be 1, 2, or 4");
     LLK_ASSERT(!dense || (num_faces == 2), "num_faces must be 2 when dense");
-    // Demo 2: Set invalid face_r_dim to trigger LLK_ASSERT
-    // LLK_ASSERT(face_r_dim == FACE_R_DIM, "face_r_dim must be FACE_R_DIM");
+
+    DEVICE_PRINT("_llk_pack_untilize_ face_r_dim: {}\n", face_r_dim);
+    LLK_ASSERT(face_r_dim == FACE_R_DIM, "face_r_dim is unused parameter, therefore setting it to the value other than FACE_R_DIM will make no change here.");
 
     /*
     full_ct_dim represents the number of input tiles.

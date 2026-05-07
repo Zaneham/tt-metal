@@ -578,6 +578,8 @@ inline void configure_pack(
     const std::uint32_t relu_config         = 0)
 {
     LLK_ASSERT(num_faces == 1 || num_faces == 2 || num_faces == 4, "num_faces must be 1, 2, or 4");
+    DEVICE_PRINT("configure_pack face_r_dim: {}\n", face_r_dim);
+    LLK_ASSERT(face_r_dim == 1 || face_r_dim == 2 || face_r_dim == 4 || face_r_dim == 8 || face_r_dim == 16, "face_r_dim must be 1, 2, 4, 8, or 16");
     LLK_ASSERT(!narrow_tile, "narrow_tile: this parameter is unused");
     LLK_ASSERT(
         is_packer_to_L1_conversion_supported(static_cast<DataFormat>(pack_src_format & 0xF), static_cast<DataFormat>(pack_dst_format & 0xF)),

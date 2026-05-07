@@ -62,7 +62,11 @@ void kernel_main() {
     constexpr uint32_t num_faces_in_output_tile = 2;
     constexpr uint32_t num_faces_in_last_output_tile = last_tile_is_partial && in_c % TILE_WIDTH <= FACE_WIDTH ? 1 : 2;
     constexpr uint32_t num_out_sticks = 1;
-
+#ifdef ARCH_BLACKHOLE
+    constexpr uint32_t num_out_sticks_tile = 16;
+#else
+    constexpr uint32_t num_out_sticks_tile = num_out_sticks;
+#endif
     constexpr bool is_avg_pool = REDUCE_OP == PoolType::AVG;
     // average pool with large kernels requires fp32 accumulation so we can only reduce 4 tiles at a time,
     // otherwise we can reduce 8 tiles at a time.
@@ -168,13 +172,13 @@ void kernel_main() {
                 // TILED output: accumulate sticks and perform tilization when needed
                 if (last_c_block) {
                     pack_untilize_dest<partial_iter_output_tiles>(
-                        pre_tilize_cb_id, 1, 0, num_out_sticks, num_faces_in_output_tile);
+                        pre_tilize_cb_id, 1, 0, num_out_sticks_tile /*face_r_dim*/, num_faces_in_output_tile);
                     pre_tilize_cb.push_back(partial_iter_output_tiles);
                     tilize_stick_counter++;
                     tilize_stick_total++;
                 } else {
                     pack_untilize_dest<max_tiles_per_iter>(
-                        pre_tilize_cb_id, 1, 0, num_out_sticks, num_faces_in_output_tile);
+                        pre_tilize_cb_id, 1, 0, num_out_sticks_tile /*face_r_dim*/, num_faces_in_output_tile);
                     pre_tilize_cb.push_back(max_tiles_per_iter);
                 }
                 tile_regs_release();
@@ -230,9 +234,10 @@ void kernel_main() {
                 // ROW_MAJOR output: pack directly to output CB
                 if (last_c_block) {
                     pack_untilize_dest<partial_iter_output_tiles>(
-                        out_cb_id, 1, 0, num_out_sticks, num_faces_in_output_tile);
+                        out_cb_id, 1, 0, num_out_sticks_tile /*face_r_dim*/, num_faces_in_output_tile);
                 } else {
-                    pack_untilize_dest<max_tiles_per_iter>(out_cb_id, 1, 0, num_out_sticks, num_faces_in_output_tile);
+                    pack_untilize_dest<max_tiles_per_iter>(
+                        out_cb_id, 1, 0, num_out_sticks_tile /*face_r_dim*/, num_faces_in_output_tile);
                 }
                 out_cb.push_back(output_faces);
                 tile_regs_release();

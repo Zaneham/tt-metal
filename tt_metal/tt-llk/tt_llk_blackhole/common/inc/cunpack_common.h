@@ -1073,7 +1073,7 @@ __attribute__((noinline)) void is_unpacker_A_configured_correctly(
     const std::uint32_t actual_unpA_src_format   = masked_data_format(td_word0);
     if (expected_unpA_src_format != actual_unpA_src_format)
     {
-        // DEVICE_PRINT("#1001 unp_A_src_format mismatch. expected: {}, actual: {}\n", expected_unpA_src_format, actual_unpA_src_format);
+        DEVICE_PRINT("#1001 unp_A_src_format mismatch. expected: {}, actual: {}\n", expected_unpA_src_format, actual_unpA_src_format);
         LLK_ASSERT((expected_unpA_src_format == actual_unpA_src_format), "unp_A_src_format mismatch. Uncomment DEVICE_PRINT #1001 to inspect expected/actual.");
     }
 

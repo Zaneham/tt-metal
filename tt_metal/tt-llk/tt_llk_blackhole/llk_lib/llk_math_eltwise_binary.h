@@ -545,6 +545,7 @@ template <
     EltwiseBinaryReuseDestType binary_reuse_dest = EltwiseBinaryReuseDestType::NONE>
 inline void _llk_math_eltwise_binary_init_(const ckernel::TensorShape &tensor_shape, const std::uint32_t acc_to_dest)
 {
+    DEVICE_PRINT("_llk_math_eltwise_binary_init_ called\n");
     if constexpr (binary_reuse_dest == EltwiseBinaryReuseDestType::NONE)
     {
         _llk_math_eltwise_binary_standard_init_<eltwise_binary_type, src_b_bcast_type, math_fidelity>(tensor_shape, acc_to_dest);

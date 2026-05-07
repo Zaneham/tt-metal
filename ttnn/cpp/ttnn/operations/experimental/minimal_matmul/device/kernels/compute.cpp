@@ -46,13 +46,13 @@ void copy_block(uint32_t in_cb, uint32_t out_cb, uint32_t M_block_tiles, uint32_
  *   - false: Pushes all tiles at end (for final output)
  */
 void add_bias_block(uint32_t in_cb, uint32_t bias_cb, uint32_t out_cb, uint32_t M_block_tiles, uint32_t N_block_tiles) {
-    add_bcast_rows_init_short(in_cb, bias_cb);
     reconfig_data_format(in_cb, bias_cb);
     pack_reconfig_data_format(out_cb);
+    add_bcast_rows_init_short(in_cb, bias_cb);
     uint32_t fused_act_dst_id = 0;
 
     // Demo 4: Set invalid tile_id to trigger LLK_ASSERT
-    uint32_t tile_id = 0;
+    uint32_t tile_id = 10;
     for (uint32_t m = 0; m < M_block_tiles; m++) {
         for (uint32_t n = 0; n < N_block_tiles; n++) {
             acquire_dst();
@@ -383,7 +383,7 @@ void kernel_main() {
             uint32_t n_tile_end = std::min(n_tile + N_block_tiles, N_end_tile);
             current_N_block_tiles = n_tile_end - n_tile;
             current_subblock_w = std::min(current_N_block_tiles, subblock_w);
-
+            reconfig_data_format(in1_cb, in0_cb);
             mm_block_init_short(
                 in0_cb,
                 in1_cb,
@@ -391,9 +391,9 @@ void kernel_main() {
                 current_subblock_w /*ct_dim*/,
                 current_subblock_h /*rt_dim*/,
                 K_block_tiles /*kt_dim*/);
-            reconfig_data_format(in1_cb, in0_cb);
-            pack_reconfig_data_format(intermediate_cb);
+
             // Accumulation buffer
+            pack_reconfig_data_format(intermediate_cb);
             cb_reserve_back(intermediate_cb, out_block_num_tiles);
             for (uint32_t k_block = 0; k_block < K_num_blocks; k_block++) {
                 cb_wait_front(in0_cb, in0_block_num_tiles);

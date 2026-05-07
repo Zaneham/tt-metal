@@ -89,8 +89,19 @@ __attribute__((noinline)) bool validate_tensor_shape_tile_dependent_ops_(const T
     const std::uint8_t num_faces  = tensor_shape.total_num_faces();
     const std::uint8_t face_r_dim = tensor_shape.face_r_dim;
     const std::uint8_t face_c_dim = tensor_shape.face_c_dim;
-    return (num_faces == 1 || num_faces == 2 || num_faces == 4) &&
-           (face_r_dim == 1 || face_r_dim == 2 || face_r_dim == 4 || face_r_dim == 8 || face_r_dim == 16) && (face_c_dim == 16);
+    if ((num_faces == 1 || num_faces == 2 || num_faces == 4) &&
+        (face_r_dim == 1 || face_r_dim == 2 || face_r_dim == 4 || face_r_dim == 8 || face_r_dim == 16) && (face_c_dim == 16))
+    {
+        return true;
+    }
+    else
+    {
+        DEVICE_PRINT("num_faces: {}\n", num_faces);
+        DEVICE_PRINT("face_r_dim: {}\n", face_r_dim);
+        DEVICE_PRINT("face_c_dim: {}\n", face_c_dim);
+        DEVICE_PRINT("validate_tensor_shape_tile_dependent_ops_ failed\n");
+        return false;
+    }
 }
 
 } // namespace ckernel
