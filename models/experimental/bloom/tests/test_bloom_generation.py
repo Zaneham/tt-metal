@@ -5,7 +5,7 @@
 import torch
 import ttnn
 
-from transformers import BloomForCausalLM, BloomTokenizerFast
+from transformers import AutoTokenizer, BloomForCausalLM
 from transformers.generation.configuration_utils import GenerationConfig
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import (
     comp_pcc,
@@ -21,8 +21,6 @@ from transformers.generation.logits_process import (
     ExponentialDecayLengthPenalty,
     ForcedBOSTokenLogitsProcessor,
     ForcedEOSTokenLogitsProcessor,
-    ForceTokensLogitsProcessor,
-    HammingDiversityLogitsProcessor,
     InfNanRemoveLogitsProcessor,
     LogitNormalization,
     LogitsProcessorList,
@@ -35,6 +33,9 @@ from transformers.generation.logits_process import (
     SuppressTokensAtBeginLogitsProcessor,
     SuppressTokensLogitsProcessor,
 )
+from transformers.generation.stopping_criteria import StoppingCriteria
+
+from models.common.generation_utils import ForceTokensLogitsProcessor, HammingDiversityLogitsProcessor
 
 
 def _merge_criteria_processor_list(
@@ -98,7 +99,7 @@ def _get_logits_processor(
         generation_config.encoder_no_repeat_ngram_size is not None
         and generation_config.encoder_no_repeat_ngram_size > 0
     ):
-        if self.config.is_encoder_decoder:
+        if len(encoder_input_ids.shape) == 2:
             processors.append(
                 EncoderNoRepeatNGramLogitsProcessor(generation_config.encoder_no_repeat_ngram_size, encoder_input_ids)
             )
@@ -185,7 +186,7 @@ def get_logits_processor(input_ids, config):
 
 
 def run_generate(input_sentance, run_tt_model, device):
-    tokenizer = BloomTokenizerFast.from_pretrained("bigscience/bloom-560m")
+    tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
     hf_reference_model = BloomForCausalLM.from_pretrained("bigscience/bloom-560m", torchscript=False)
     hf_reference_model.eval()
 
