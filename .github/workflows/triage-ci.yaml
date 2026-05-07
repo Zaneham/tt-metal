@@ -46,4 +46,4 @@ jobs:
       GITHUB_READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       ISSUE_WRITE_TOKEN: ${{ secrets.EVAN_PAT }}
       CURSOR_API_KEY: ${{ secrets.EVAN_CURSOR_API_KEY }}
-      COPILOT_API_KEY: ${{ secrets.GITHUB_TOKEN }}
+      COPILOT_API_KEY: ${{ secrets.EVAN_PAT }}
