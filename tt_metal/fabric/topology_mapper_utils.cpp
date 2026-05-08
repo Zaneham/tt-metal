@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -33,61 +32,6 @@
 #include <tt-metalium/experimental/fabric/physical_grouping_descriptor.hpp>
 #include "tt_metal/impl/context/metal_context.hpp"
 #include <llrt/tt_cluster.hpp>
-
-namespace {
-
-using ::tt::tt_fabric::GroupingInfo;
-using ::tt::tt_fabric::ValidGroupingsMap;
-
-// Builds the vector find_all_in_psd expects: merged map buckets are untouched (same keys / GroupingInfo). Order is one
-// grouping from mgd 0, then mgd 1, … repeating until all queues are empty (queues = each mgd's keys sorted, then each
-// key's vector in map order).
-std::vector<GroupingInfo> mesh_groupings_vector_mgd_round_robin(const ValidGroupingsMap& merged_mgds, size_t n_mgd) {
-    const auto& mesh_by_key = merged_mgds.at("MESH");
-    std::vector<std::deque<GroupingInfo>> slots(n_mgd);
-    size_t reserve_hint = 0;
-
-    for (size_t mgd_i = 0; mgd_i < n_mgd; ++mgd_i) {
-        const std::string prefix = "mgd" + std::to_string(mgd_i) + "_";
-        std::vector<std::string> keys_for_mgd;
-        keys_for_mgd.reserve(mesh_by_key.size());
-        for (const auto& [k, _] : mesh_by_key) {
-            if (k.size() > prefix.size() && k.compare(0, prefix.size(), prefix) == 0) {
-                keys_for_mgd.push_back(k);
-            }
-        }
-        std::sort(keys_for_mgd.begin(), keys_for_mgd.end());
-        for (const std::string& key : keys_for_mgd) {
-            auto it = mesh_by_key.find(key);
-            if (it == mesh_by_key.end()) {
-                continue;
-            }
-            reserve_hint += it->second.size();
-            for (const GroupingInfo& g : it->second) {
-                slots[mgd_i].push_back(g);
-            }
-        }
-    }
-
-    std::vector<GroupingInfo> out;
-    out.reserve(reserve_hint);
-    while (true) {
-        bool progressed = false;
-        for (size_t mgd_i = 0; mgd_i < n_mgd; ++mgd_i) {
-            if (!slots[mgd_i].empty()) {
-                out.push_back(std::move(slots[mgd_i].front()));
-                slots[mgd_i].pop_front();
-                progressed = true;
-            }
-        }
-        if (!progressed) {
-            break;
-        }
-    }
-    return out;
-}
-
-}  // namespace
 
 namespace tt::tt_metal::experimental::tt_fabric {
 
@@ -766,7 +710,7 @@ PhysicalAdjacencyMap build_flat_adjacency_map_from_psd(
 PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     const tt::tt_metal::PhysicalSystemDescriptor& physical_system_descriptor,
     const tt::tt_fabric::PhysicalGroupingDescriptor& physical_grouping_descriptor,
-    const tt::tt_fabric::MeshGraphDescriptor& mesh_graph_descriptor) {
+    const std::vector<tt::tt_fabric::MeshGraphDescriptor>& mesh_graph_descriptors) {
     using namespace ::tt::tt_fabric;
 
     log_info(tt::LogFabric, "Building flat adjacency map from PSD");
@@ -791,7 +735,7 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
 
     // Get valid groupings map from MGD and PGD
     auto valid_groupings_map =
-        physical_grouping_descriptor.get_valid_groupings_for_mgd(mesh_graph_descriptor, physical_system_descriptor);
+        physical_grouping_descriptor.get_valid_groupings_for_mgds(mesh_graph_descriptors, physical_system_descriptor);
 
     log_info(tt::LogFabric, "Got {} valid groupings map from MGD and PGD", valid_groupings_map.size());
 
@@ -817,7 +761,10 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
             physical_grouping_descriptor.find_all_in_psd(groupings, physical_system_descriptor);
 
         // Count the number of instances of this mesh
-        mesh_type_num_instances[mesh_name] = mesh_graph_descriptor.instances_by_name(mesh_name).size();
+        mesh_type_num_instances[mesh_name] = 0;
+        for (const auto& mesh_graph_descriptor : mesh_graph_descriptors) {
+            mesh_type_num_instances[mesh_name] += mesh_graph_descriptor.instances_by_name(mesh_name).size();
+        }
 
         // Add the groupings to the index
         for (const auto& placed_grouping : placed_groupings) {
@@ -829,12 +776,14 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
         // Build a physical multi-mesh graph for this mesh; keep the same per-mesh-instance ASIC sets keyed by logical
         // MeshId (instance local_id) for later lookups without mesh descriptor name.
         mesh_type_to_physical_graph[mesh_name] = build_hierarchical_from_flat_graph(flat_graph, placed_groupings);
-        for (::tt::tt_fabric::GlobalNodeId gid : mesh_graph_descriptor.instances_by_name(mesh_name)) {
-            const auto& inst = mesh_graph_descriptor.get_instance(gid);
-            if (inst.kind != ::tt::tt_fabric::NodeKind::Mesh) {
-                continue;
+        for (const auto& mesh_graph_descriptor : mesh_graph_descriptors) {
+            for (::tt::tt_fabric::GlobalNodeId gid : mesh_graph_descriptor.instances_by_name(mesh_name)) {
+                const auto& inst = mesh_graph_descriptor.get_instance(gid);
+                if (inst.kind != ::tt::tt_fabric::NodeKind::Mesh) {
+                    continue;
+                }
+                mesh_id_to_placed_groupings[MeshId(inst.local_id)] = placed_groupings;
             }
-            mesh_id_to_placed_groupings[MeshId(inst.local_id)] = placed_groupings;
         }
     }
 
@@ -855,7 +804,6 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     }
 
     // For each mesh shape that's in the MGD
-    const auto [mgd_intermesh_mesh_level, _] = get_requested_intermesh_from_mgd(mesh_graph_descriptor);
     std::unordered_map<std::string, AdjacencyGraph<MeshId>> mesh_to_logical_graph;
     // Per-mesh-descriptor lazy enumeration state. Solutions are pulled one at a time via session.next() and cached
     // here so the round-robin diagonal search below can revisit them without redoing solver work.
@@ -886,23 +834,18 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     // solution's dense ASIC set span every placement row for that descriptor; that is correct for packing one shape
     // (e.g. single BH galaxy → N meshes) but makes dense sets overlap the entire PSD for each descriptor, so pairwise-
     // disjoint packing across multiple mesh types becomes impossible.
-    std::size_t mesh_descriptor_names_with_psd_mesh = 0;
-    for (const auto& mn : mesh_graph_descriptor.get_all_mesh_names()) {
-        if (mesh_type_to_physical_graph.contains(mn)) {
-            ++mesh_descriptor_names_with_psd_mesh;
+    std::unordered_set<std::string> mesh_names_with_psd_mesh_set;
+    for (const auto& mesh_graph_descriptor : mesh_graph_descriptors) {
+        for (const auto& mn : mesh_graph_descriptor.get_all_mesh_names()) {
+            if (mesh_type_to_physical_graph.contains(mn)) {
+                mesh_names_with_psd_mesh_set.insert(mn);
+            }
         }
     }
+    const std::size_t mesh_descriptor_names_with_psd_mesh = mesh_names_with_psd_mesh_set.size();
 
-    for (const auto& mesh_name : mesh_graph_descriptor.get_all_mesh_names()) {
-        const auto physical_it = mesh_type_to_physical_graph.find(mesh_name);
-        if (physical_it == mesh_type_to_physical_graph.end()) {
-            log_warning(
-                tt::LogFabric,
-                "No PSD-derived PhysicalMultiMeshGraph for mesh descriptor '{}'; skipping mesh-level topology solve",
-                mesh_name);
-            continue;
-        }
-        const AdjacencyGraph<MeshId>& physical_mesh_level = physical_it->second.mesh_level_graph_;
+    for (const auto& mesh_graph_descriptor : mesh_graph_descriptors) {
+        const auto [mgd_intermesh_mesh_level, _] = get_requested_intermesh_from_mgd(mesh_graph_descriptor);
 
         // Mesh-level subgraph from MGD intermesh edges (nodes = mesh instance local_ids in the descriptor).
         AdjacencyGraph<MeshId> mgd_mesh_level_graph = build_mgd_mesh_level_subgraph_for_mesh_descriptor_name(
@@ -1337,63 +1280,13 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
 PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     const tt::tt_metal::PhysicalSystemDescriptor& physical_system_descriptor,
     const tt::tt_fabric::PhysicalGroupingDescriptor& physical_grouping_descriptor,
-    const std::vector<tt::tt_fabric::MeshGraphDescriptor>& mesh_graph_descriptors) {
+    const tt::tt_fabric::MeshGraphDescriptor& mesh_graph_descriptor) {
     using namespace ::tt::tt_fabric;
 
-    TT_FATAL(
-        !mesh_graph_descriptors.empty(),
-        "build_physical_multi_mesh_adjacency_graph: at least one MeshGraphDescriptor is required");
-
-    log_info(tt::LogFabric, "Building flat adjacency map from PSD (multi-MGD)");
-
-    AdjacencyGraph<tt::tt_metal::AsicID> flat_graph(build_flat_adjacency_map_from_psd(physical_system_descriptor));
-
-    log_info(
-        tt::LogFabric,
-        "Getting valid groupings for {} MGD(s) and PGD (merged via get_valid_groupings_for_mgds)",
-        mesh_graph_descriptors.size());
-
-    const size_t n_mgd = mesh_graph_descriptors.size();
-
-    ValidGroupingsMap merged_groupings =
-        physical_grouping_descriptor.get_valid_groupings_for_mgds(mesh_graph_descriptors, physical_system_descriptor);
-
-    log_info(tt::LogFabric, "Merged valid groupings map has {} preset type slot(s)", merged_groupings.size());
-
-    TT_FATAL(
-        merged_groupings.contains("MESH"), "Internal error: MESH grouping not found in merged valid groupings map");
-    TT_FATAL(
-        !merged_groupings.at("MESH").empty(),
-        "Internal error: Physical grouping descriptor produced no merged MESH groupings");
-
-    for (const auto& [instance_key, groupings] : merged_groupings.at("MESH")) {
-        for (const auto& grouping : groupings) {
-            log_info(tt::LogFabric, "Merged mesh grouping from PGD: {} (instance {})", grouping.name, instance_key);
-        }
-    }
-
-    std::vector<GroupingInfo> all_mesh_grouping_infos = mesh_groupings_vector_mgd_round_robin(merged_groupings, n_mgd);
-
-    log_info(tt::LogFabric, "Total mesh groupings collected for find_all_in_psd: {}", all_mesh_grouping_infos.size());
-
-    std::vector<std::string> errors;
-    auto all_mesh_groupings = physical_grouping_descriptor.find_all_in_psd(
-        all_mesh_grouping_infos, physical_system_descriptor, flat_graph, errors);
-
-    log_info(
-        tt::LogFabric,
-        "Found {} mesh grouping mapping(s) in PSD (errors: {})",
-        all_mesh_groupings.size(),
-        errors.size());
-
-    PhysicalMultiMeshGraph result;
-    if (all_mesh_groupings.empty()) {
-        log_warning(tt::LogFabric, "No mesh groupings found in PSD (multi-MGD) - returning empty graph");
-        return result;
-    }
-
-    result = build_hierarchical_from_flat_graph(flat_graph, all_mesh_groupings);
-    return result;
+    return build_physical_multi_mesh_adjacency_graph(
+        physical_system_descriptor,
+        physical_grouping_descriptor,
+        std::vector<tt::tt_fabric::MeshGraphDescriptor>{mesh_graph_descriptor});
 }
 
 PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(

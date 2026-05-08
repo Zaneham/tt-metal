@@ -900,10 +900,9 @@ ValidGroupingsMap PhysicalGroupingDescriptor::get_valid_groupings_for_mgds(
     ValidGroupingsMap out;
     for (size_t i = 0; i < mesh_graph_descriptors.size(); ++i) {
         auto one = get_valid_groupings_for_mgd(mesh_graph_descriptors[i], physical_system_descriptor);
-        const std::string prefix = "mgd" + std::to_string(i) + "_";
         for (const auto& [type, by_name] : one) {
             for (const auto& [name, gvec] : by_name) {
-                auto& dest = out[type][prefix + name];
+                auto& dest = out[type][name];
                 dest.insert(dest.end(), gvec.begin(), gvec.end());
             }
         }

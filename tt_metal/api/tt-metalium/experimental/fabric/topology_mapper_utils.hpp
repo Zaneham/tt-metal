@@ -412,10 +412,9 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
 /**
  * @brief Build a physical multi-mesh adjacency graph using multiple MGDs (one PSD, one PGD)
  *
- * For each MGD, collects valid MESH groupings (same as the single-MGD build), then runs a
- * single find_all_in_psd over the concatenation so mesh partitions are found jointly on the PSD.
- * MGD order is the vector order. Within each MGD, MESH instance keys are processed in sorted order
- * for deterministic groupings ordering.
+ * For each MGD, collects valid MESH groupings (same as the single-MGD build), then merges results.
+ * With multiple MGD files in one process, ensure PGD/MGD keys remain consistent (each descriptor may need distinct
+ * instance names when \c DistributedContext::subcontext_id() uniquifies names per split rank).
  *
  * @param mesh_graph_descriptors  Const reference to the caller's `std::vector` (the container is not copied;
  *                                only a reference is passed). Elements are the loaded MGDs in order.
