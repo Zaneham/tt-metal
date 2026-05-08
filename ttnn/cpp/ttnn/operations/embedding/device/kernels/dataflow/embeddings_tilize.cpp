@@ -22,8 +22,9 @@ void kernel_main() {
     constexpr uint32_t tiles_per_chunk = get_compile_time_arg_val(6);
     constexpr uint32_t input_block_size_bytes = get_compile_time_arg_val(7);
     constexpr uint32_t num_chunks = get_compile_time_arg_val(8);
+    constexpr uint32_t last_chunk_tiles = get_compile_time_arg_val(9);
 
-    constexpr auto input_args = TensorAccessorArgs<9>();
+    constexpr auto input_args = TensorAccessorArgs<10>();
     constexpr auto weights_args = TensorAccessorArgs<input_args.next_compile_time_args_offset()>();
     auto input = TensorAccessor(input_args, input_buffer_src_addr);
     auto weights = TensorAccessor(weights_args, weight_buffer_src_addr + weight_offset);
@@ -35,6 +36,12 @@ void kernel_main() {
 
     volatile tt_l1_ptr input_token_t* input_l1_ptr = reinterpret_cast<volatile tt_l1_ptr input_token_t*>(input_l1_addr);
 
+    // Per-row byte counts for the full and (possibly partial) last chunk.
+    constexpr uint32_t num_tiles_per_block = (num_chunks - 1) * tiles_per_chunk + last_chunk_tiles;
+    constexpr uint32_t bytes_per_tile_row = weight_block_size / num_tiles_per_block;
+    constexpr uint32_t full_chunk_bytes = tiles_per_chunk * bytes_per_tile_row;
+    constexpr uint32_t last_chunk_bytes = last_chunk_tiles * bytes_per_tile_row;
+
     uint32_t curr_row = input_start_id;
     uint32_t offset = input_start_offset;
     for (uint32_t i = 0; i < num_blocks; ++i) {
@@ -43,12 +50,13 @@ void kernel_main() {
         noc_async_read_barrier();
 
         for (uint32_t chunk = 0; chunk < num_chunks; ++chunk) {
-            cb_reserve_back(cb_id_in0, tiles_per_chunk);
-            uint32_t l1_write_addr = get_write_ptr(cb_id_in0);
+            const bool is_last = (chunk + 1 == num_chunks);
+            const uint32_t this_chunk_tiles = is_last ? last_chunk_tiles : tiles_per_chunk;
+            const uint32_t weight_chunk_size = is_last ? last_chunk_bytes : full_chunk_bytes;
+            const uint32_t weight_chunk_offset = chunk * full_chunk_bytes;
 
-            // Calculate the chunk size and offset within the embedding vector
-            uint32_t weight_chunk_size = weight_block_size / num_chunks;
-            uint32_t weight_chunk_offset = chunk * weight_chunk_size;
+            cb_reserve_back(cb_id_in0, this_chunk_tiles);
+            uint32_t l1_write_addr = get_write_ptr(cb_id_in0);
 
             for (uint32_t k = 0; k < tile_height; ++k) {
                 input_token_t token = input_l1_ptr[k];
@@ -58,7 +66,7 @@ void kernel_main() {
                 l1_write_addr += weight_chunk_size;
             }
             noc_async_read_barrier();
-            cb_push_back(cb_id_in0, tiles_per_chunk);
+            cb_push_back(cb_id_in0, this_chunk_tiles);
         }
 
         offset += input_block_size_bytes;
