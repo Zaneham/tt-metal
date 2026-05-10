@@ -102,6 +102,12 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreWProgramFa
     const bool use_post_mul = operation_attributes.post_mul_scaler != 1.0f;
     uint32_t post_mul_scaler_bits = std::bit_cast<uint32_t>(operation_attributes.post_mul_scaler);
 
+    // Int32 max/min uses reduce_sfpu (GMPOOL is invalid for Int32 on device; issue #26726).
+    // MIN is lowered to MAX + negate before launch; math_op here is always MAX for that path.
+    const bool use_sfpu_int32_path = a.dtype() == DataType::INT32 && operation_attributes.math_op == ReduceOpMath::MAX;
+    // GMPOOL reduce_w_neg (not reduce_sfpu): acc/ineg scratch CBs when negating.
+    const bool use_fpu_negate = operation_attributes.negate && !use_sfpu_int32_path;
+
     tt_metal::Buffer* src_buffer = a.buffer();
     std::vector<uint32_t> reader_compile_time_args = {std::bit_cast<uint32_t>(operation_attributes.scaler)};
     TensorAccessorArgs(*src_buffer).append_to(reader_compile_time_args);
@@ -109,18 +115,7 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreWProgramFa
     std::vector<uint32_t> writer_compile_time_args = {static_cast<uint32_t>(output_cb_index)};
     TensorAccessorArgs(*dst_buffer).append_to(writer_compile_time_args);
 
-    // INT32 inputs go through the SFPU compute kernel because the FPU's GMPOOL primitive
-    // (used by reduce.cpp / reduce_w_neg.cpp) silently produces zeros for INT32 -- see
-    // issue #26726.  Phase 1 of #43736 covers MAX (negate=false) and MIN (lowered to
-    // MAX with negate=true at the prim layer); both go through reduce_sfpu.cpp.  The
-    // device-op validation rejects every other INT32 combination before reaching here.
-    const bool use_sfpu_int32_path = a.dtype() == DataType::INT32 && operation_attributes.math_op == ReduceOpMath::MAX;
-
-    if (operation_attributes.negate && !use_sfpu_int32_path) {
-        // FPU's reduce_w_neg.cpp uses cb_acc / cb_ineg as scratch CBs to stage the
-        // negated input and the running reduction.  The SFPU INT32 path keeps the
-        // accumulator in the DST register across the cross-tile fold and does the
-        // negate in-place via negative_tile_int32, so it does not need these CBs.
+    if (use_fpu_negate) {
         uint32_t acc_cb_index = tt::CBIndex::c_4;
         uint32_t num_acc_tiles = 1;
         desc.cbs.push_back(CBDescriptor{
@@ -153,19 +148,8 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreWProgramFa
     }
 
     if (use_sfpu_int32_path) {
-        // The SFPU kernel is parametrised by REDUCE_FORMAT (the input dtype) in addition to
-        // the existing REDUCE_OP / REDUCE_DIM defines, so the same source file scales to the
-        // other dtypes the LLK supports (UInt32, UInt16, Float32, Float16_b) when those phases
-        // are wired in.
-        // Note: `DataFormat` lives at global scope (defined in tensix_types.h, no namespace),
-        // unlike `ckernel::PoolType` and `ckernel::ReduceDim`.  Functions in `namespace ckernel`
-        // and `namespace compute_kernel_lib` find it via standard unqualified lookup.
         reduce_defines["REDUCE_FORMAT"] = "DataFormat::Int32";
         if (operation_attributes.negate) {
-            // INT32 MIN is lowered to MAX with negate=true (the -MAX(-x) trick).  The
-            // SFPU helper does the input/output negate in DST via negative_tile_int32
-            // when REDUCE_NEGATE is set, mirroring the FPU's reduce_w_neg.cpp pattern
-            // without needing the cb_acc / cb_ineg scratch CBs.
             reduce_defines["REDUCE_NEGATE"] = "1";
         }
     }
@@ -196,10 +180,6 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreWProgramFa
         post_mul_scaler_bits,       // packed fp32 user scalar (only used if REDUCE_POST_MUL is set)
     };
 
-    // Pick the compute kernel: SFPU sibling for INT32 (Phase 1 of #43736 -- handles
-    // both negate=false MAX and negate=true MIN-as-negated-MAX via REDUCE_NEGATE),
-    // FPU GMPOOL path (with optional _w_neg negate-twice variant for signed
-    // MIN-as-MAX-of-negated-input on float dtypes) otherwise.
     const std::string compute_kernel =
         use_sfpu_int32_path
             ? std::string("ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/reduce_sfpu.cpp")

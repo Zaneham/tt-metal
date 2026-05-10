@@ -11,56 +11,40 @@
 
 /**
  * @file reduce_sfpu_helpers_compute.hpp
- * @brief SFPU-based reduce parametrised by op x dim x format.
+ * @brief SFPU reduce for tile MAX/MIN when the FPU reduce path cannot be used
  *
- * This is the SFPU sibling of `compute_kernel_lib::reduce` (in
- * reduce_helpers_compute.hpp), which targets the FPU's GMPOOL primitive via
- * `reduce_tile`. GMPOOL silently produces zeros for INT32 inputs (issue
- * #26726), so this helper instead routes through the SFPU primitives
- *  - `sfpu_reduce<OP, FMT, DIM>(...)` for the within-tile reduction
- *    (32 lanes -> 1 lane along the chosen axis), and
- *  - `binary_max_int32_tile` / `binary_min_int32_tile` for the cross-tile
- *    accumulator fold (Wt or Ht tiles -> 1 tile of element-wise max/min).
+ * Provides one entry point, `reduce_sfpu`, symmetric to `compute_kernel_lib::reduce` in
+ * reduce_helpers_compute.hpp for the streaming WaitAndPopPerTile-style flow:
+ * - Row reduction (REDUCE_ROW): reduces W, outputs Ht tiles per batch
+ * - Column reduction (REDUCE_COL): reduces H, outputs Wt tiles per batch
  *
- * Phase 1 of issue #43736 (SUM and MAX on Int32, REDUCE_W and REDUCE_H)
- * implements:
- *   - pool_type in {MAX, MIN}, format = Int32, reduce_dim in {REDUCE_ROW,
- *     REDUCE_COL}
+ * Difference from `reduce()`:
+ * - `reduce()` uses the FPU GMPOOL path (`reduce_tile`). That path does not produce correct
+ *   integer MAX/MIN for Int32 on device.
+ * - `reduce_sfpu()` uses SFPU `sfpu_reduce` for within-tile reduction and
+ *   `binary_max_int32_tile` / `binary_min_int32_tile` for cross-tile folds along the reduce axis.
  *
- * LLK gap (statically rejected): `sfpu_reduce<MIN, *, REDUCE_ROW>` is not in
- * the LLK, so MIN with REDUCE_ROW is rejected at compile time and the host
- * dispatch must gate it before reaching this helper.  The host can still
- * compute MIN via the negate-trick (`-MAX(-x)`) by passing `negate=true`
- * and `pool_type=MAX` -- the negate path mirrors the FPU's reduce_w_neg /
- * reduce_h_neg kernels.
+ * Supported today:
+ * - `pool_type`: MAX or MIN (MIN over W uses host lowering to MAX with `negate=true`)
+ * - `format`: Int32 only
+ * - `reduce_dim`: REDUCE_ROW or REDUCE_COL (no REDUCE_SCALAR here; HW uses two passes)
  *
- * Out of Phase 1 scope (reserved for follow-up phases):
- *   - SUM (cross-tile accumulator would need INT32 add tile; the path here
- *     uses binary max/min only).
- *   - UInt32, UInt16, Float32, Float16_b formats.
+ * Library responsibilities (same spirit as reduce_helpers_compute.hpp):
+ * - DST tile_regs acquire/commit/wait/release
+ * - CB wait/pop/reserve/push for input and output
+ * - pack_tile to write reduced tiles
+ * - Packer reduce mask (sfpu_reduce does not configure it; this helper does)
  *
- * Pre-conditions identical to compute_kernel_lib::reduce:
- *   - `compute_kernel_hw_startup` and `init_sfpu` must NOT be called by the
- *     caller -- this helper does its own SFPU-specific init.
- *   - The scaler CB must contain a tile pushed by the reader (we don't use
- *     it because sfpu_reduce takes no scaler, but we wait/pop it so the
- *     dataflow kernels can be shared with the FPU path unchanged).
+ * IMPORTANT: Do not call `compute_kernel_hw_startup()` before `reduce_sfpu`; this helper runs
+ * on the SFPU path and calls `init_sfpu` / `copy_tile_to_dst_init_short` itself.
  *
- * Tile arrival order:
- *   - REDUCE_ROW (W reduce): row-major (NC * Ht rows, each of Wt tiles).
- *   - REDUCE_COL (H reduce): the H reader is run with row_chunk=1 so tiles
- *     arrive one tile-column at a time (Ht tiles per output, contiguous
- *     along H).  The host program factory is responsible for setting up
- *     the reader that way.
+ * IMPORTANT: The scaler CB must contain one tile before entry (same contract as `reduce()`).
+ * `sfpu_reduce` does not use it; the helper waits and pops it so dataflow matches the FPU kernel.
  *
- * Usage (mirrors the FPU helper):
+ * Basic usage:
  *   #include "ttnn/cpp/ttnn/kernel_lib/reduce_sfpu_helpers_compute.hpp"
  *
- *   compute_kernel_lib::reduce_sfpu<
- *       PoolType::MAX,
- *       ReduceDim::REDUCE_ROW,
- *       DataFormat::Int32,
- *       false>(  // negate -- pass true to lower MIN to -MAX(-x)
+ *   compute_kernel_lib::reduce_sfpu<ckernel::PoolType::MAX, ckernel::ReduceDim::REDUCE_ROW, DataFormat::Int32, false>(
  *       cb_in, cb_scaler, cb_out,
  *       compute_kernel_lib::ReduceInputBlockShape::of(Ht, Wt, NC));
  */
@@ -68,30 +52,20 @@
 namespace compute_kernel_lib {
 
 /**
- * @brief SFPU-based reduce parameterised by op x dim x format.
+ * @brief SFPU reduce for Int32 MAX/MIN along one tile axis
  *
- * @tparam pool_type   PoolType::MAX or PoolType::MIN.  SUM/AVG are reserved
- *                     for a later phase and statically rejected here.
- * @tparam reduce_dim  ReduceDim::REDUCE_ROW (W axis) or REDUCE_COL (H axis).
- *                     Note: pool_type MIN with REDUCE_ROW is not in the LLK
- *                     and is statically rejected.
- * @tparam format      Currently only DataFormat::Int32 is implemented.
- * @tparam negate      When true the helper computes `-pool_type(-x)` -- input
- *                     tiles are negated in DST before the cross-tile fold and
- *                     the within-tile sfpu_reduce, and the result is negated
- *                     before pack.  The host uses this to lower MIN to MAX
- *                     (mirrors the FPU reduce_w_neg / reduce_h_neg path).
+ * @tparam pool_type   PoolType::MAX or PoolType::MIN (MIN + REDUCE_ROW is rejected at compile time;
+ *                     host uses MAX + negate for W-axis MIN).
+ * @tparam reduce_dim  ReduceDim::REDUCE_ROW (W) or ReduceDim::REDUCE_COL (H).
+ * @tparam format      DataFormat::Int32 (only supported format).
+ * @tparam negate      If true, negate tiles in DST before fold/reduce and negate result before pack
+ *                     (host lowers MIN to -MAX(-x), same idea as FPU reduce_*_neg kernels).
  *
- * @param input_cb_id    Input CB containing the tiles to reduce.
- * @param scaler_cb_id   Scaler CB pushed by the reader (drained but unused).
- * @param output_cb_id   Output CB that receives the reduced tiles.
- * @param input_block_shape Input tile-grid shape (Ht, Wt, NC).  Output count
- *                       is Ht*NC for REDUCE_ROW and Wt*NC for REDUCE_COL.
+ * @param input_cb_id    Tiles to reduce (streaming order matches `reduce()` for same dim).
+ * @param scaler_cb_id   Scaler tile CB (waited/popped; not passed into sfpu_reduce).
+ * @param output_cb_id   Reduced output tiles.
+ * @param input_block_shape  Tile grid (Ht, Wt, NC); uses ReduceInputBlockShape from reduce_helpers_compute.hpp.
  */
-// Note on namespacing: `PoolType` and `ReduceDim` live in `namespace ckernel`, but
-// `DataFormat` is at global scope (defined in tensix_types.h with no enclosing
-// namespace).  We use the unqualified spellings here since the function template
-// parameters resolve via standard unqualified lookup.
 template <ckernel::PoolType pool_type, ckernel::ReduceDim reduce_dim, DataFormat format, bool negate = false>
 ALWI void reduce_sfpu(
     uint32_t input_cb_id, uint32_t scaler_cb_id, uint32_t output_cb_id, ReduceInputBlockShape input_block_shape);

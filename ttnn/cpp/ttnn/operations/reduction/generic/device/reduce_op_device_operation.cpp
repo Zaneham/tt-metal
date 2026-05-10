@@ -36,41 +36,18 @@ void ReduceDeviceOperation::validate_on_program_cache_miss(
         tensor_args.storage_type());
     TT_FATAL(tensor_args.buffer() != nullptr, "Operands to reduce need to be allocated in buffers on device!");
     TT_FATAL((tensor_args.layout() == Layout::TILE), "Inputs to reduce must be tilized");
-    // INT32 is supported via a dedicated SFPU compute kernel (reduce_sfpu.cpp + the
-    // compute_kernel_lib::reduce_sfpu helper) for the combinations enabled in Phase 1 of
-    // issue #43736; everything else for INT32 routes through the FPU GMPOOL path which
-    // only accepts {Float32, BFLOAT16, BFLOAT8_B, UINT32} and would silently produce zeros
-    // for INT32 (issue #26726).
-    //
-    // Phase 1 (SFPU INT32) supports:
-    //   - MAX along H or W.  The repro from issue #21071 lives here.
-    //   - MIN along H or W, lowered to MAX via the -MAX(-x) negate trick at the
-    //     SFPU compute kernel level (reduce_sfpu.cpp's REDUCE_NEGATE define), so
-    //     ttnn::reduction::common.cpp's existing negate=true path for reduce_min
-    //     also goes through the SFPU INT32 kernel instead of GMPOOL.
-    //   - HW for both MAX and MIN: decomposed at the prim layer in reduce_op.cpp
-    //     into a W reduce followed by an H reduce, both INT32, so they reach
-    //     this validator with dim ∈ {H, W} after the split.
-    //
-    // Out of Phase 1 scope (rejected here so they fail fast with a helpful message rather
-    // than silently going through the GMPOOL zero-producing path):
-    //   - SUM/AVG on INT32 (would need an INT32 binary-add tile in the cross-tile fold).
-    const bool is_int32 = tensor_args.dtype() == DataType::INT32;
-    const bool is_int32_max_phase1 = is_int32 && operation_attributes.math_op == tt::tt_metal::ReduceOpMath::MAX &&
-                                     (operation_attributes.dim == tt::tt_metal::ReduceOpDim::H ||
-                                      operation_attributes.dim == tt::tt_metal::ReduceOpDim::W);
+    // INT32 MIN/MAX is supported via a dedicated SFPU compute kernel (reduce_sfpu.cpp +
+    // compute_kernel_lib::reduce_sfpu); the generic FPU GMPOOL path only accepts
+    // {FLOAT32, BFLOAT16, BFLOAT8_B, UINT32} and is wrong for INT32 MIN/MAX.
+    const bool is_int32_max_or_min =
+        tensor_args.dtype() == DataType::INT32 && operation_attributes.math_op == ReduceOpMath::MAX;
     TT_FATAL(
         tensor_args.dtype() == DataType::BFLOAT16 || tensor_args.dtype() == DataType::FLOAT32 ||
             tensor_args.dtype() == DataType::BFLOAT8_B || tensor_args.dtype() == DataType::UINT32 ||
-            is_int32_max_phase1,
+            is_int32_max_or_min,
         "Only FLOAT32, BFLOAT16, BFLOAT8_B, and UINT32 are supported for generic reduction "
-        "(plus INT32 for MAX/MIN along H or W in Phase 1 of issue #43736; INT32 MIN reaches this "
-        "validator as MAX with negate=true, and INT32 HW is split at the prim layer into a "
-        "W-then-H sequence). Got dtype={}, math_op={}, dim={}, negate={}.",
-        tensor_args.dtype(),
-        operation_attributes.math_op,
-        operation_attributes.dim,
-        operation_attributes.negate);
+        "(INT32 is supported for MAX/MIN) - got {}.",
+        tensor_args.dtype());
     validate_reduce_sharded_buffer_types(tensor_args.memory_config(), operation_attributes.output_mem_config, "reduce");
     const auto device_grid_size = tensor_args.device()->compute_with_storage_grid_size();
     TT_FATAL(
