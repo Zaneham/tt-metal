@@ -72,6 +72,7 @@ template <bool APPROXIMATION_MODE, BinaryOp BINOP, bool is_fp32_dest_acc_en = fa
 inline void _calculate_sfpu_binary_div_(
     const int iterations, const std::uint32_t dst_index_in0, const std::uint32_t dst_index_in1, const std::uint32_t dst_index_out)
 {
+    static_assert(BINOP == BinaryOp::DIV, "_calculate_sfpu_binary_div_ is the dedicated DIV path");
     // size of each tile in Dest is 64/SFP_DESTREG_STRIDE = 32 rows when using sfpi to load/store
     constexpr std::uint32_t dst_tile_size_sfpi = 32;
 #pragma GCC unroll 8
