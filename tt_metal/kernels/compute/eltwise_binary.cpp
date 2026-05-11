@@ -8,6 +8,9 @@
 
 #include "api/compute/eltwise_unary/sfpu_split_includes.h"
 #include "api/compute/tile_move_copy.h"
+#ifdef SFPU_BINARY_OP
+#include "api/compute/eltwise_unary/eltwise_unary.h"
+#endif
 
 #ifdef ARCH_QUASAR
 #include "api/dataflow/dataflow_buffer.h"
@@ -71,7 +74,44 @@ void kernel_main() {
             cb_wait_front(cb_inp1, per_core_block_size);
             cb_reserve_back(cb_out0, per_core_block_size);
         #endif
-        tile_regs_acquire();
+
+#ifdef SFPU_BINARY_OP
+            // SFPU binary path (e.g. div_binary). Each pair is its own
+            // acquire/release: bring LHS into DST[0], RHS into DST[1], run the op
+            // (SFPU_OP_CHAIN_0 expands to e.g. div_binary_tile(0, 1, 0)) so the
+            // result lands at DST[0], then pack DST[0]. Two DST slots suffice
+            // regardless of per_core_block_size.
+            // Re-init copy_tile_to_dst before each copy_tile call so the unpacker
+            // is pointed at the right input CB/DFB; copy_tile_to_dst_init_short
+            // configures unpacker state for a single source.
+            for (uint32_t i = 0; i < per_core_block_size; ++i) {
+                tile_regs_acquire();
+#ifdef ARCH_QUASAR
+                copy_tile_to_dst_init_short(dfb_in0.get_id());
+                copy_tile(dfb_in0.get_id(), i, 0);
+                copy_tile_to_dst_init_short(dfb_in1.get_id());
+                copy_tile(dfb_in1.get_id(), i, 1);
+#else
+                copy_tile_to_dst_init_short(cb_inp0);
+                copy_tile(cb_inp0, i, 0);
+                copy_tile_to_dst_init_short(cb_inp1);
+                copy_tile(cb_inp1, i, 1);
+#endif
+#ifdef SFPU_OP_CHAIN_0
+                SFPU_OP_CHAIN_0
+#endif
+                tile_regs_commit();
+
+                tile_regs_wait();
+#ifdef ARCH_QUASAR
+                pack_tile(0, dfb_out.get_id());
+#else
+                pack_tile(0, cb_out0);
+#endif
+                tile_regs_release();
+            }
+#else
+            tile_regs_acquire();
 
 #if defined(DST_ACCUM_MODE) || defined(ACC_TO_DEST) || defined(ELTWISE_DEST_REUSE_TYPE)
 #ifdef ARCH_QUASAR
@@ -146,15 +186,16 @@ void kernel_main() {
         #endif
         }
         tile_regs_release();
+#endif  // SFPU_BINARY_OP
 
-        #ifdef ARCH_QUASAR
+#ifdef ARCH_QUASAR
             dfb_in0.pop_front(per_core_block_size);
             dfb_in1.pop_front(per_core_block_size);
             dfb_out.push_back(per_core_block_size);
-        #else
-            cb_pop_front(cb_inp0, per_core_block_size);
-            cb_pop_front(cb_inp1, per_core_block_size);
-            cb_push_back(cb_out0, per_core_block_size);
-        #endif
+#else
+        cb_pop_front(cb_inp0, per_core_block_size);
+        cb_pop_front(cb_inp1, per_core_block_size);
+        cb_push_back(cb_out0, per_core_block_size);
+#endif
     }
 }
