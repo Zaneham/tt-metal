@@ -67,6 +67,13 @@ const map<std::string, std::map<std::string, std::string>> sfpu_op_to_op_name = 
     {"sign", {{"SFPU_OP_CHAIN_0", "sign_tile_init(); sign_tile(0);"}}},
 };
 
+// Binary SFPU ops driven by `run_sfpu_binary_two_input_buffer`. Each pair is
+// processed in its own acquire/release with LHS at DST[0] and RHS at DST[1];
+// result is written back to DST[0]. SFPU_OP_INIT_0 fires once before the loop.
+const map<std::string, std::map<std::string, std::string>> sfpu_binary_op_to_op_name = {
+    {"div_binary", {{"SFPU_OP_INIT_0", "div_binary_tile_init();"}, {"SFPU_OP_CHAIN_0", "div_binary_tile(0, 1, 0);"}}},
+};
+
 bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
     if (op_name == "relu") {
         return bfloat16(fmaxf(static_cast<float>(input), 0.0f));
@@ -110,6 +117,13 @@ bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
     }
     TT_THROW("Unsupported op_name in test");
 }
+
+bfloat16 sfpu_binary_function(const std::string& op_name, const bfloat16& lhs, const bfloat16& rhs) {
+    if (op_name == "div_binary") {
+        return bfloat16(static_cast<float>(lhs) / static_cast<float>(rhs));
+    }
+    TT_THROW("Unsupported binary op_name in test");
+}
 vector<uint32_t> generate_packed_sfpu_input(const unsigned int numel, const std::string& op_name, const int seed) {
     if ((op_name == "sqrt") or (op_name == "log")) {
         return generate_packed_uniform_random_vector<uint32_t, bfloat16>(0.0001f, 4.0f, numel, seed);
@@ -119,6 +133,37 @@ vector<uint32_t> generate_packed_sfpu_input(const unsigned int numel, const std:
         return generate_packed_random_vector_from_vector<uint32_t, bfloat16>(possible_values, numel, seed);
     }
     return generate_packed_uniform_random_vector<uint32_t, bfloat16>(-1.0f, 1.0f, numel, seed);
+}
+
+// Mirror the LLK `_prepare_div_inputs` helper: uniform in [-4, 4], then snap
+// |x| < 0.25 to ±0.25 keeping the sign. Every element ends up in
+// [-4, -0.25] ∪ [0.25, 4]. This exercises both halves of the sfpi `setsgn`
+// path and avoids sub-normal divisors / spurious 0/0 -> NaN.
+static vector<uint32_t> generate_div_operand(const unsigned int numel, const int seed) {
+    auto packed = generate_packed_uniform_random_vector<uint32_t, bfloat16>(-4.0f, 4.0f, numel, seed);
+    auto unpacked = unpack_vector<bfloat16, uint32_t>(packed);
+    for (auto& v : unpacked) {
+        float f = static_cast<float>(v);
+        float sign = (f >= 0.0f) ? 1.0f : -1.0f;
+        float magnitude = std::fabs(f);
+        if (magnitude < 0.25f) {
+            magnitude = 0.25f;
+        }
+        v = bfloat16(sign * magnitude);
+    }
+    return pack_vector<uint32_t, bfloat16>(unpacked);
+}
+
+// Per-operand stimuli for binary SFPU ops. LHS and RHS use independent seeds so
+// their signs and magnitudes vary independently.
+std::pair<vector<uint32_t>, vector<uint32_t>> generate_packed_sfpu_binary_inputs(
+    const unsigned int numel, const std::string& op_name, const int seed) {
+    if (op_name == "div_binary") {
+        auto lhs = generate_div_operand(numel, seed);
+        auto rhs = generate_div_operand(numel, seed + 1);
+        return {lhs, rhs};
+    }
+    TT_THROW("Unsupported binary op_name in test");
 }
 
 bool is_close_packed_sfpu_output(
@@ -420,6 +465,199 @@ bool run_sfpu_all_same_buffer(
     return sfpu_util::is_close_packed_sfpu_output(dest_buffer_data, packed_golden, test_config.sfpu_op);
 }
 
+/// @brief Single-buffer binary-SFPU variant. Both operands live in one contiguous
+/// DRAM buffer (LHS tiles followed by RHS tiles), so the unpacker never needs to
+/// switch buffer descriptors mid-stream — matching the Quasar LLK div pattern.
+/// Layout: [LHS_0 .. LHS_{n-1}, RHS_0 .. RHS_{n-1}] -> Reader -> CB/DFB (2n tiles)
+///         -> SFPU Compute -> CB/DFB (n tiles) -> Writer -> Dram.
+bool run_sfpu_binary_two_input_buffer(
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device, const SfpuConfig& test_config) {
+    const size_t per_input_byte_size = test_config.num_tiles * test_config.tile_byte_size;
+    const size_t combined_byte_size = 2 * per_input_byte_size;
+    auto& cq = mesh_device->mesh_command_queue();
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+    auto device_range = distributed::MeshCoordinateRange(zero_coord, zero_coord);
+    distributed::MeshWorkload workload;
+    tt_metal::Program program = tt_metal::CreateProgram();
+    workload.add_program(device_range, std::move(program));
+    auto& program_ = workload.get_programs().at(device_range);
+    auto* device = mesh_device->get_devices()[0];
+
+    tt::tt_metal::InterleavedBufferConfig combined_input_dram_config{
+        .device = device,
+        .size = combined_byte_size,
+        .page_size = combined_byte_size,
+        .buffer_type = tt::tt_metal::BufferType::DRAM};
+    tt::tt_metal::InterleavedBufferConfig output_dram_config{
+        .device = device,
+        .size = per_input_byte_size,
+        .page_size = per_input_byte_size,
+        .buffer_type = tt::tt_metal::BufferType::DRAM};
+
+    auto input_dram_buffer = CreateBuffer(combined_input_dram_config);
+    uint32_t input_dram_byte_address = input_dram_buffer->address();
+    auto output_dram_buffer = CreateBuffer(output_dram_config);
+    uint32_t output_dram_byte_address = output_dram_buffer->address();
+
+    const uint32_t numel = per_input_byte_size / sizeof(bfloat16);
+    const int seed = std::chrono::system_clock::now().time_since_epoch().count();
+    auto [packed_lhs, packed_rhs] = sfpu_util::generate_packed_sfpu_binary_inputs(numel, test_config.sfpu_op, seed);
+
+    // Interleave LHS and RHS tile-by-tile so pair `i` sits at CB indices 2*i, 2*i+1.
+    const size_t uint32_per_tile = test_config.tile_byte_size / sizeof(uint32_t);
+    std::vector<uint32_t> packed_combined;
+    packed_combined.reserve(packed_lhs.size() + packed_rhs.size());
+    for (size_t t = 0; t < test_config.num_tiles; ++t) {
+        const size_t off = t * uint32_per_tile;
+        packed_combined.insert(
+            packed_combined.end(), packed_lhs.begin() + off, packed_lhs.begin() + off + uint32_per_tile);
+        packed_combined.insert(
+            packed_combined.end(), packed_rhs.begin() + off, packed_rhs.begin() + off + uint32_per_tile);
+    }
+
+    auto lhs = unpack_vector<bfloat16, uint32_t>(packed_lhs);
+    auto rhs = unpack_vector<bfloat16, uint32_t>(packed_rhs);
+    std::vector<bfloat16> golden(lhs.size());
+    std::transform(lhs.begin(), lhs.end(), rhs.begin(), golden.begin(), [&](const bfloat16& a, const bfloat16& b) {
+        return sfpu_util::sfpu_binary_function(test_config.sfpu_op, a, b);
+    });
+    std::vector<uint32_t> packed_golden = pack_vector<uint32_t, bfloat16>(golden);
+
+    vector<uint32_t> writer_rt_args = {
+        (uint32_t)output_dram_byte_address,
+        (uint32_t)0,
+        (uint32_t)test_config.num_tiles,
+    };
+
+    // Reader reads 2*num_tiles tiles total from one DRAM source.
+    vector<uint32_t> reader_rt_args = {
+        (uint32_t)input_dram_byte_address,
+        (uint32_t)0,
+        (uint32_t)(2 * test_config.num_tiles),
+    };
+
+    for (const CoreRange& core_range : test_config.cores.ranges()) {
+        uint32_t in_dfb = 0;
+        uint32_t out_dfb = 0;
+        KernelHandle reader_kernel;
+        KernelHandle writer_kernel;
+        KernelHandle compute_kernel;
+
+        if (device->arch() == ARCH::QUASAR) {
+            tt_metal::experimental::dfb::DataflowBufferConfig in_dfb_config = {
+                .entry_size = test_config.tile_byte_size,
+                .num_entries = 2 * test_config.num_tiles,
+                .num_producers = 1,
+                .num_consumers = 1,
+                .enable_implicit_sync = false,
+                .data_format = test_config.l1_input_data_format};
+
+            tt_metal::experimental::dfb::DataflowBufferConfig out_dfb_config = {
+                .entry_size = test_config.tile_byte_size,
+                .num_entries = test_config.num_tiles,
+                .num_producers = 1,
+                .num_consumers = 1,
+                .enable_implicit_sync = false,
+                .data_format = test_config.l1_output_data_format};
+
+            in_dfb = tt_metal::experimental::dfb::CreateDataflowBuffer(program_, core_range, in_dfb_config);
+            out_dfb = tt_metal::experimental::dfb::CreateDataflowBuffer(program_, core_range, out_dfb_config);
+
+            reader_kernel = tt_metal::experimental::quasar::CreateKernel(
+                program_,
+                "tt_metal/kernels/dataflow/reader_unary.cpp",
+                test_config.cores,
+                tt_metal::experimental::quasar::QuasarDataMovementConfig{
+                    .num_threads_per_cluster = 1, .compile_args = {in_dfb}});
+
+            writer_kernel = tt_metal::experimental::quasar::CreateKernel(
+                program_,
+                "tt_metal/kernels/dataflow/writer_unary.cpp",
+                test_config.cores,
+                tt_metal::experimental::quasar::QuasarDataMovementConfig{
+                    .num_threads_per_cluster = 1, .compile_args = {out_dfb}});
+        } else {
+            tt_metal::CircularBufferConfig l1_input_cb_config =
+                tt_metal::CircularBufferConfig(
+                    combined_byte_size, {{tt::CBIndex::c_0, test_config.l1_input_data_format}})
+                    .set_page_size(tt::CBIndex::c_0, test_config.tile_byte_size);
+            tt_metal::CreateCircularBuffer(program_, core_range, l1_input_cb_config);
+
+            tt_metal::CircularBufferConfig l1_output_cb_config =
+                tt_metal::CircularBufferConfig(
+                    per_input_byte_size, {{tt::CBIndex::c_16, test_config.l1_output_data_format}})
+                    .set_page_size(tt::CBIndex::c_16, test_config.tile_byte_size);
+            tt_metal::CreateCircularBuffer(program_, core_range, l1_output_cb_config);
+
+            reader_kernel = tt_metal::CreateKernel(
+                program_,
+                "tt_metal/kernels/dataflow/reader_unary.cpp",
+                test_config.cores,
+                tt_metal::DataMovementConfig{
+                    .processor = tt_metal::DataMovementProcessor::RISCV_1, .noc = tt_metal::NOC::RISCV_1_default});
+
+            writer_kernel = tt_metal::CreateKernel(
+                program_,
+                "tt_metal/kernels/dataflow/writer_unary.cpp",
+                test_config.cores,
+                tt_metal::DataMovementConfig{
+                    .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default});
+        }
+
+        std::map<std::string, std::string> sfpu_defines = sfpu_util::sfpu_binary_op_to_op_name.at(test_config.sfpu_op);
+        sfpu_defines["SFPU_OP_BINARY_DIV_INCLUDE"] = "1";
+
+        // Single block, all tiles in one acquire/release. Uses 2*num_tiles DST slots
+        // (DST is 16 tiles), so num_tiles must stay <= 8.
+        vector<uint32_t> compute_kernel_args = {
+            1,                                // per_core_block_cnt
+            uint32_t(test_config.num_tiles),  // per_core_block_dim
+        };
+
+        if (device->arch() == ARCH::QUASAR) {
+            compute_kernel_args.push_back(in_dfb);
+            compute_kernel_args.push_back(out_dfb);
+            compute_kernel = tt_metal::experimental::quasar::CreateKernel(
+                program_,
+                "tt_metal/kernels/compute/eltwise_binary_sfpu.cpp",
+                test_config.cores,
+                tt_metal::experimental::quasar::QuasarComputeConfig{
+                    .num_threads_per_cluster = 1,
+                    .dst_full_sync_en = true,
+                    .math_approx_mode = test_config.approx_mode,
+                    .compile_args = compute_kernel_args,
+                    .defines = sfpu_defines});
+            tt_metal::experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
+                program_, in_dfb, reader_kernel, compute_kernel);
+            tt_metal::experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
+                program_, out_dfb, compute_kernel, writer_kernel);
+        } else {
+            compute_kernel = tt_metal::CreateKernel(
+                program_,
+                "tt_metal/kernels/compute/eltwise_binary_sfpu.cpp",
+                test_config.cores,
+                tt_metal::ComputeConfig{
+                    .dst_full_sync_en = true,
+                    .math_approx_mode = test_config.approx_mode,
+                    .compile_args = compute_kernel_args,
+                    .defines = sfpu_defines});
+        }
+
+        for (const CoreCoord& core_coord : core_range) {
+            SetRuntimeArgs(program_, writer_kernel, core_coord, writer_rt_args);
+            SetRuntimeArgs(program_, reader_kernel, core_coord, reader_rt_args);
+        }
+    }
+
+    std::vector<uint32_t> dest_buffer_data;
+    tt_metal::detail::WriteToBuffer(input_dram_buffer, packed_combined);
+    distributed::EnqueueMeshWorkload(cq, workload, false);
+    distributed::Finish(cq);
+    tt_metal::detail::ReadFromBuffer(output_dram_buffer, dest_buffer_data);
+
+    return sfpu_util::is_close_packed_sfpu_output(dest_buffer_data, packed_golden, test_config.sfpu_op);
+}
+
 }  // namespace unit_tests::compute::sfpu
 class SingleCoreSingleMeshDeviceSfpuParameterizedFixture
     : public LLKMeshDeviceFixture,
@@ -521,5 +759,34 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(4, "log"),
         std::make_tuple(4, "tanh"),
         std::make_tuple(4, "sign")));
+
+class SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture
+    : public LLKMeshDeviceFixture,
+      public testing::WithParamInterface<std::tuple<size_t, std::string>> {};
+
+TEST_P(SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture, TensixSfpuBinaryCompute) {
+    size_t num_tiles = std::get<0>(GetParam());
+    std::string sfpu_op = std::get<1>(GetParam());
+
+    CoreRange core_range({0, 0}, {0, 0});
+    CoreRangeSet core_range_set({core_range});
+    unit_tests::compute::sfpu::SfpuConfig test_config = {
+        .num_tiles = num_tiles,
+        .tile_byte_size = 2 * 32 * 32,
+        .l1_input_data_format = tt::DataFormat::Float16_b,
+        .l1_output_data_format = tt::DataFormat::Float16_b,
+        .cores = core_range_set,
+        .sfpu_op = sfpu_op,
+        .approx_mode = false};
+    log_info(tt::LogTest, "Testing binary SFPU_OP={} num_tiles={}", sfpu_op, num_tiles);
+    for (unsigned int id = 0; id < num_devices_; id++) {
+        EXPECT_TRUE(unit_tests::compute::sfpu::run_sfpu_binary_two_input_buffer(devices_.at(id), test_config));
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SingleCoreSfpuBinaryCompute,
+    SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture,
+    ::testing::Values(std::make_tuple(1, "div_binary"), std::make_tuple(4, "div_binary")));
 
 }  // namespace tt::tt_metal
