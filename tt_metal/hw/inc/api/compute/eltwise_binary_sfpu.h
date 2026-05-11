@@ -34,6 +34,10 @@ namespace ckernel {
  * | odst           | The index of the tile in DST register buffer to use as output         | uint32_t | Must be less than the size of the DST register buffer | True     |
  */
 // clang-format on
+ALWI void div_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
+    MATH((llk_math_eltwise_binary_sfpu_binop_div<APPROX, ckernel::BinaryOp::DIV, DST_ACCUM_MODE>(idst0, idst1, odst)));
+}
+
 #ifndef ARCH_QUASAR
 ALWI void add_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
     MATH((llk_math_eltwise_binary_sfpu_binop<APPROX, ckernel::BinaryOp::ADD>(idst0, idst1, odst)));
@@ -46,13 +50,7 @@ ALWI void sub_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
 ALWI void mul_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
     MATH((llk_math_eltwise_binary_sfpu_binop_mul<APPROX, ckernel::BinaryOp::MUL, DST_ACCUM_MODE>(idst0, idst1, odst)));
 }
-#endif
 
-ALWI void div_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
-    MATH((llk_math_eltwise_binary_sfpu_binop_div<APPROX, ckernel::BinaryOp::DIV, DST_ACCUM_MODE>(idst0, idst1, odst)));
-}
-
-#ifndef ARCH_QUASAR
 ALWI void rsub_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
     MATH((llk_math_eltwise_binary_sfpu_binop<APPROX, ckernel::BinaryOp::RSUB>(idst0, idst1, odst)));
 }
@@ -84,20 +82,20 @@ ALWI void le_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
 ALWI void ge_binary_tile(uint32_t idst0, uint32_t idst1, uint32_t odst) {
     MATH((llk_math_eltwise_binary_sfpu_ge_fp32<APPROX>(idst0, idst1, odst)));
 }
+#endif
 
 /**
  * Please refer to documentation for any_init.
  */
+ALWI void div_binary_tile_init() { MATH((llk_math_eltwise_binary_sfpu_binop_init<APPROX, ckernel::BinaryOp::DIV>())); }
+
+#ifndef ARCH_QUASAR
 ALWI void add_binary_tile_init() { MATH((llk_math_eltwise_binary_sfpu_binop_init<APPROX, ckernel::BinaryOp::ADD>())); }
 
 ALWI void sub_binary_tile_init() { MATH((llk_math_eltwise_binary_sfpu_binop_init<APPROX, ckernel::BinaryOp::SUB>())); }
 
 ALWI void mul_binary_tile_init() { MATH((llk_math_eltwise_binary_sfpu_binop_init<APPROX, ckernel::BinaryOp::MUL>())); }
-#endif
 
-ALWI void div_binary_tile_init() { MATH((llk_math_eltwise_binary_sfpu_binop_init<APPROX, ckernel::BinaryOp::DIV>())); }
-
-#ifndef ARCH_QUASAR
 ALWI void rsub_binary_tile_init() {
     MATH((llk_math_eltwise_binary_sfpu_binop_init<APPROX, ckernel::BinaryOp::RSUB>()));
 }

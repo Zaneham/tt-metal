@@ -159,9 +159,7 @@ static vector<uint32_t> generate_div_operand(const unsigned int numel, const int
         float f = static_cast<float>(v);
         float sign = (f >= 0.0f) ? 1.0f : -1.0f;
         float magnitude = std::fabs(f);
-        if (magnitude < 0.25f) {
-            magnitude = 0.25f;
-        }
+        magnitude = std::max(magnitude, 0.25f);
         v = bfloat16(sign * magnitude);
     }
     return pack_vector<uint32_t, bfloat16>(unpacked);
