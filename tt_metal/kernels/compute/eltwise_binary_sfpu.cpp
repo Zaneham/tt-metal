@@ -37,9 +37,17 @@
 //   SFPU_OP_CHAIN_0 - per pair inside the loop. LHS is at DST[0], RHS at
 //                     DST[1], result written back to DST[0].
 void kernel_main() {
+    // Compile-time args set by the host:
+    //   0: per_core_block_cnt — number of outer blocks. The current test uses
+    //      1 block and lets the inner loop handle every tile pair.
+    //   1: per_core_block_dim — number of (LHS, RHS) PAIRS per block. The
+    //      reader is expected to push 2 * per_core_block_dim tiles.
     uint32_t per_core_block_cnt = get_compile_time_arg_val(0);
     uint32_t per_core_block_dim = get_compile_time_arg_val(1);
 
+    // Open the input/output staging surface. Pre-Quasar uses CircularBuffers
+    // (CBs c_0/c_16); Quasar uses DataflowBuffers whose IDs come in as extra
+    // compile-time args. From here on the loop body is identical.
 #ifdef ARCH_QUASAR
     constexpr uint32_t dfb_in_id = get_compile_time_arg_val(2);
     constexpr uint32_t dfb_out_id = get_compile_time_arg_val(3);
@@ -54,6 +62,8 @@ void kernel_main() {
     const uint32_t out_id = tt::CBIndex::c_16;
 #endif
 
+    // One-time SFPU setup. SFPU_OP_INIT_0 is the op-specific init (e.g.
+    // div_binary_tile_init) injected by the host via the kernel `defines` map.
     init_sfpu(in_id, out_id);
 #ifdef SFPU_OP_INIT_0
     SFPU_OP_INIT_0
@@ -61,13 +71,22 @@ void kernel_main() {
     copy_tile_to_dst_init_short(in_id);
 
     for (uint32_t block_index = 0; block_index < per_core_block_cnt; block_index++) {
+        // Reserve enough output slots for this block up-front, so the packer
+        // can push results as soon as each pair is done.
         buff_out.reserve_back(per_core_block_dim);
 
         for (uint32_t i = 0; i < per_core_block_dim; ++i) {
+            // Pair-level pipeline:
+            //   acquire DST -> wait for 2 input tiles -> copy into DST[0]/DST[1]
+            //   -> run SFPU op (result lands in DST[0]) -> commit -> pack
+            //   -> pop the consumed pair -> release DST.
             tile_regs_acquire();
             // Wait for one (LHS, RHS) pair to land in the input buffer.
             buff_in.wait_front(2);
 
+            // Bring the two operands into the math DST register file.
+            // LHS at DST[0], RHS at DST[1] — the convention SFPU_OP_CHAIN_0
+            // (e.g. div_binary_tile(0, 1, 0)) reads from.
             copy_tile(in_id, 0, 0);
             copy_tile(in_id, 1, 1);
 #ifdef SFPU_OP_CHAIN_0
@@ -75,12 +94,15 @@ void kernel_main() {
 #endif
             tile_regs_commit();
 
+            // Hand DST off to the packer thread, then emit DST[0] (the result)
+            // into the output buffer.
             tile_regs_wait();
             pack_tile(0, out_id);
             buff_in.pop_front(2);
             tile_regs_release();
         }
 
+        // Publish the whole block of results downstream.
         buff_out.push_back(per_core_block_dim);
     }
 }

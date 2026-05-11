@@ -67,9 +67,22 @@ const map<std::string, std::map<std::string, std::string>> sfpu_op_to_op_name = 
     {"sign", {{"SFPU_OP_CHAIN_0", "sign_tile_init(); sign_tile(0);"}}},
 };
 
-// Binary SFPU ops driven by `run_sfpu_binary_two_input_buffer`. Each pair is
-// processed in its own acquire/release with LHS at DST[0] and RHS at DST[1];
-// result is written back to DST[0]. SFPU_OP_INIT_0 fires once before the loop.
+// Binary SFPU ops driven by `run_sfpu_binary_two_input_buffer`.
+//
+// Each entry maps an op name (the test parameter) to the kernel-side macro
+// substitutions that the compute kernel (tt_metal/kernels/compute/
+// eltwise_binary_sfpu.cpp) will expand:
+//
+//   * SFPU_OP_INIT_0  — runs once before the per-pair loop. Used to set up
+//                       SFPU lookup tables / state (e.g. div reciprocal LUT).
+//   * SFPU_OP_CHAIN_0 — runs once per (LHS, RHS) pair, inside an
+//                       acquire/release section. By convention LHS lives at
+//                       DST[0] and RHS at DST[1]; the result is written back
+//                       to DST[0] so the packer reads from there.
+//
+// To add a new binary SFPU op: add an entry here, add a matching arm in
+// sfpu_binary_function() for the golden compute, and (if its valid input
+// range differs from div) add an arm in generate_packed_sfpu_binary_inputs().
 const map<std::string, std::map<std::string, std::string>> sfpu_binary_op_to_op_name = {
     {"div_binary", {{"SFPU_OP_INIT_0", "div_binary_tile_init();"}, {"SFPU_OP_CHAIN_0", "div_binary_tile(0, 1, 0);"}}},
 };
@@ -465,11 +478,32 @@ bool run_sfpu_all_same_buffer(
     return sfpu_util::is_close_packed_sfpu_output(dest_buffer_data, packed_golden, test_config.sfpu_op);
 }
 
-/// @brief Single-buffer binary-SFPU variant. Both operands live in one contiguous
-/// DRAM buffer (LHS tiles followed by RHS tiles), so the unpacker never needs to
-/// switch buffer descriptors mid-stream — matching the Quasar LLK div pattern.
-/// Layout: [LHS_0 .. LHS_{n-1}, RHS_0 .. RHS_{n-1}] -> Reader -> CB/DFB (2n tiles)
-///         -> SFPU Compute -> CB/DFB (n tiles) -> Writer -> Dram.
+/// @brief End-to-end test driver for binary SFPU ops on a single Tensix core.
+///
+/// High-level flow (Quasar and pre-Quasar share the same compute kernel):
+///
+///   1. Host generates two operand streams (LHS, RHS) and interleaves them
+///      tile-by-tile into ONE contiguous DRAM buffer:
+///        [LHS_0, RHS_0, LHS_1, RHS_1, ..., LHS_{n-1}, RHS_{n-1}]
+///      One buffer (instead of two) keeps the unpacker pointed at a single
+///      buffer descriptor for the whole stream — the configuration that the
+///      Quasar LLK div pattern was validated against.
+///   2. Reader kernel (reader_unary.cpp) pulls 2*num_tiles tiles into the
+///      input CB (Wormhole) / DataflowBuffer (Quasar).
+///   3. Compute kernel (eltwise_binary_sfpu.cpp) pops pairs of tiles, copies
+///      them into DST[0]/DST[1], runs SFPU_OP_CHAIN_0 (e.g. div_binary_tile),
+///      then packs DST[0] into the output CB/DFB.
+///   4. Writer kernel (writer_unary.cpp) drains the output CB/DFB back to a
+///      second DRAM buffer.
+///   5. Host reads the output, builds a golden via sfpu_binary_function(),
+///      and compares with is_close_packed_sfpu_output().
+///
+/// Pipeline diagram:
+///   DRAM (interleaved LHS/RHS)
+///     -> Reader -> input CB/DFB  (2*num_tiles tiles)
+///     -> SFPU Compute            (num_tiles results, LHS÷RHS)
+///     -> output CB/DFB -> Writer
+///     -> DRAM (results)
 bool run_sfpu_binary_two_input_buffer(
     const std::shared_ptr<distributed::MeshDevice>& mesh_device, const SfpuConfig& test_config) {
     const size_t per_input_byte_size = test_config.num_tiles * test_config.tile_byte_size;
@@ -499,11 +533,14 @@ bool run_sfpu_binary_two_input_buffer(
     auto output_dram_buffer = CreateBuffer(output_dram_config);
     uint32_t output_dram_byte_address = output_dram_buffer->address();
 
+    // ----- Step 1: host-side input + golden generation. -----
     const uint32_t numel = per_input_byte_size / sizeof(bfloat16);
     const int seed = std::chrono::system_clock::now().time_since_epoch().count();
     auto [packed_lhs, packed_rhs] = sfpu_util::generate_packed_sfpu_binary_inputs(numel, test_config.sfpu_op, seed);
 
     // Interleave LHS and RHS tile-by-tile so pair `i` sits at CB indices 2*i, 2*i+1.
+    // This is the layout the compute kernel relies on when issuing copy_tile(in,
+    // 0, 0) / copy_tile(in, 1, 1) after wait_front(2).
     const size_t uint32_per_tile = test_config.tile_byte_size / sizeof(uint32_t);
     std::vector<uint32_t> packed_combined;
     packed_combined.reserve(packed_lhs.size() + packed_rhs.size());
@@ -515,6 +552,8 @@ bool run_sfpu_binary_two_input_buffer(
             packed_combined.end(), packed_rhs.begin() + off, packed_rhs.begin() + off + uint32_per_tile);
     }
 
+    // Compute the reference (golden) output element-wise on the host so we can
+    // compare against the device result with op-specific tolerance.
     auto lhs = unpack_vector<bfloat16, uint32_t>(packed_lhs);
     auto rhs = unpack_vector<bfloat16, uint32_t>(packed_rhs);
     std::vector<bfloat16> golden(lhs.size());
@@ -523,6 +562,7 @@ bool run_sfpu_binary_two_input_buffer(
     });
     std::vector<uint32_t> packed_golden = pack_vector<uint32_t, bfloat16>(golden);
 
+    // ----- Step 2: reader/writer runtime args. -----
     vector<uint32_t> writer_rt_args = {
         (uint32_t)output_dram_byte_address,
         (uint32_t)0,
@@ -536,6 +576,11 @@ bool run_sfpu_binary_two_input_buffer(
         (uint32_t)(2 * test_config.num_tiles),
     };
 
+    // ----- Step 3: per-core program setup. -----
+    // Builds the input/output staging structures (CB on pre-Quasar, DataflowBuffer
+    // on Quasar) plus the three kernels (reader / compute / writer) that make
+    // up the pipeline. The two branches diverge only in plumbing; the compute
+    // kernel source is the same.
     for (const CoreRange& core_range : test_config.cores.ranges()) {
         uint32_t in_dfb = 0;
         uint32_t out_dfb = 0;
@@ -604,6 +649,8 @@ bool run_sfpu_binary_two_input_buffer(
                     .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default});
         }
 
+        // Pull the op-specific kernel macros (SFPU_OP_INIT_0 / SFPU_OP_CHAIN_0)
+        // and turn on the binary-SFPU header include path inside the kernel.
         std::map<std::string, std::string> sfpu_defines = sfpu_util::sfpu_binary_op_to_op_name.at(test_config.sfpu_op);
         sfpu_defines["SFPU_OP_BINARY_DIV_INCLUDE"] = "1";
 
@@ -649,6 +696,7 @@ bool run_sfpu_binary_two_input_buffer(
         }
     }
 
+    // ----- Step 4: run the pipeline and compare against the golden. -----
     std::vector<uint32_t> dest_buffer_data;
     tt_metal::detail::WriteToBuffer(input_dram_buffer, packed_combined);
     distributed::EnqueueMeshWorkload(cq, workload, false);
@@ -760,6 +808,12 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_tuple(4, "tanh"),
         std::make_tuple(4, "sign")));
 
+// Binary SFPU parameterized test fixture.
+//
+// Each test instance is identified by (num_tiles, op_name). The op_name picks
+// up macro substitutions from sfpu_binary_op_to_op_name and a host-side
+// reference from sfpu_binary_function. num_tiles must stay <= 8 because the
+// compute kernel uses 2 DST slots per tile pair and DST holds 16 tiles.
 class SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture
     : public LLKMeshDeviceFixture,
       public testing::WithParamInterface<std::tuple<size_t, std::string>> {};
