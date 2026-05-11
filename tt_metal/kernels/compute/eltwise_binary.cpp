@@ -13,34 +13,40 @@
 #endif
 
 #ifdef ARCH_QUASAR
-#include "api/dataflow/dataflow_buffer.h"
-#include "experimental/kernel_args.h"
+#include "experimental/dataflow_buffer.h"
 #else
-#include "api/dataflow/circular_buffer.h"
+#include "experimental/circular_buffer.h"
 #endif
 
 void kernel_main() {
-#ifdef ARCH_QUASAR
-    uint32_t per_core_block_cnt = get_arg(args::per_core_block_cnt);
-    uint32_t per_core_block_size = get_arg(args::per_core_block_size);
-    uint32_t acc_to_dst = get_arg(args::acc_to_dst);
-#else
     uint32_t per_core_block_cnt = get_arg_val<uint32_t>(0);
     uint32_t per_core_block_size = get_arg_val<uint32_t>(1);
     uint32_t acc_to_dst = get_arg_val<uint32_t>(2);
-#endif
 
-#ifdef ARCH_QUASAR
-    DataflowBuffer dfb_in0(dfb::in0);
-    DataflowBuffer dfb_in1(dfb::in1);
-    DataflowBuffer dfb_in2(dfb::in2);
-    DataflowBuffer dfb_out(dfb::out);
-    binary_op_init_common(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
+
+    #ifdef ARCH_QUASAR
+        constexpr uint32_t dfb_in0_id = get_compile_time_arg_val(0);
+        constexpr uint32_t dfb_in1_id = get_compile_time_arg_val(1);
+        constexpr uint32_t dfb_in2_id = get_compile_time_arg_val(2);
+        constexpr uint32_t dfb_out_id = get_compile_time_arg_val(3);
+        experimental::DataflowBuffer dfb_in0(dfb_in0_id);
+        experimental::DataflowBuffer dfb_in1(dfb_in1_id);
+        experimental::DataflowBuffer dfb_in2(dfb_in2_id);
+        experimental::DataflowBuffer dfb_out(dfb_out_id);
+#ifdef SFPU_BINARY_OP
+        init_sfpu(dfb_in0.get_id(), dfb_out.get_id());
+        copy_tile_to_dst_init_short(dfb_in0.get_id());
+#ifdef SFPU_OP_INIT_0
+        SFPU_OP_INIT_0
+#endif
+#else
+        binary_op_init_common(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
 #if not defined ELTWISE_DEST_REUSE_TYPE
 #ifdef FULL_INIT
-    binary_tiles_init<true, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
+        binary_tiles_init<true, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
 #else
-    binary_tiles_init<false, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
+        binary_tiles_init<false, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
+#endif
 #endif
 #endif
 #else
@@ -50,12 +56,20 @@ void kernel_main() {
     constexpr auto cb_inp1 = cb_in1;
     constexpr auto cb_out0 = tt::CBIndex::c_16;
     constexpr auto cb_in2 = tt::CBIndex::c_2;
+#ifdef SFPU_BINARY_OP
+    init_sfpu(cb_inp0, cb_out0);
+    copy_tile_to_dst_init_short(cb_inp0);
+#ifdef SFPU_OP_INIT_0
+    SFPU_OP_INIT_0
+#endif
+#else
     binary_op_init_common(cb_inp0, cb_inp1, cb_out0);
 #if not defined ELTWISE_DEST_REUSE_TYPE
 #ifdef FULL_INIT
     binary_tiles_init<true, ELTWISE_OP_TYPE>(cb_in0, cb_in1);
 #else
     binary_tiles_init<false, ELTWISE_OP_TYPE>(cb_in0, cb_in1);
+#endif
 #endif
 #endif
 #endif
