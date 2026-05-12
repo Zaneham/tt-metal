@@ -1,12 +1,9 @@
 """
-ACE-Step v1.5 demo: official-style host preprocessing + TTNN DiT sampler + host VAE.
+ACE-Step v1.5 demo: local preprocessing + TTNN DiT sampler + host VAE.
 
-By default this matches ``torch_ref/run_prompt_to_wav.py --use-official-acestep`` for **Phase 1**
-(5 Hz LM / CoT, audio codes, handler ``preprocess_batch``, Qwen text encoder, and HF
-``prepare_condition`` with **precomputed LM hints**), emitting the same style of **loguru** / model
-logs as the official CLI. Only the diffusion loop runs on TTNN.
-
-``--use-official-lm`` runs full ``acestep.inference.generate_music`` (PyTorch DiT on host) with no TTNN.
+Runs entirely without the ACE-Step GitHub repo on ``sys.path``.  The 5 Hz LM,
+text encoder, and DiT conditioning are handled by local modules that load
+HuggingFace models directly.  Only the diffusion loop runs on TTNN.
 """
 
 from __future__ import annotations
@@ -15,12 +12,9 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    pass
 
 # Turbo discrete timesteps (aligned with ACE-Step turbo modeling).
 _VALID_TIMESTEPS = [
@@ -104,42 +98,7 @@ def _build_t_schedule(*, shift: float, infer_steps: int, timesteps: str | None, 
     return t
 
 
-_WELL_KNOWN_REPO_ROOTS = [
-    Path.home() / "proj_sdk" / "ACE-Step-1.5",
-    Path.home() / "ACE-Step-1.5",
-    Path("/opt") / "ACE-Step-1.5",
-]
-
-
-def _resolve_ace_step_repo_root(*, ckpt_dir: str | None, ace_step_repo_root: str | None) -> Path | None:
-    candidates: list[Path] = []
-    if ace_step_repo_root:
-        candidates.append(Path(ace_step_repo_root).expanduser().resolve())
-    env = os.environ.get("ACE_STEP_REPO_ROOT")
-    if env:
-        candidates.append(Path(env).expanduser().resolve())
-    if ckpt_dir:
-        cur = Path(ckpt_dir).expanduser().resolve()
-        for _ in range(8):
-            candidates.append(cur)
-            if cur.parent == cur:
-                break
-            cur = cur.parent
-    candidates.extend(_WELL_KNOWN_REPO_ROOTS)
-    seen: set[str] = set()
-    for c in candidates:
-        key = str(c)
-        if key in seen:
-            continue
-        seen.add(key)
-        if (c / "acestep" / "__init__.py").is_file():
-            return c
-    return None
-
-
 def _save_wav_fallback(wav: Any, out_path: Path, sample_rate: int = 48000) -> None:
-    pass
-
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wav = wav.detach().float().cpu()
@@ -259,17 +218,6 @@ def main() -> None:
     )
     ap.add_argument("--out", type=str, default="ttnn_out.wav")
     ap.add_argument(
-        "--ace-step-repo-root",
-        type=str,
-        default=None,
-        help="ACE-Step-1.5 repo (contains acestep/). Defaults to env ACE_STEP_REPO_ROOT or walk from ckpt_dir.",
-    )
-    ap.add_argument(
-        "--use-official-lm",
-        action="store_true",
-        help="Run full official generate_music (LLM+handlers, CPU). Does not use TTNN; writes --out for A/B.",
-    )
-    ap.add_argument(
         "--no-ttnn-strict",
         action="store_true",
         help="Do not set throw_exception_on_fallback (may hide TTNN fallbacks).",
@@ -279,24 +227,18 @@ def main() -> None:
     import torch
 
     ckpt_dir = Path(args.ckpt_dir)
-    os.environ["ACESTEP_CHECKPOINTS_DIR"] = str(ckpt_dir)
-
     model_dir = _ensure_variant(args.variant, ckpt_dir)
     _ensure_variant("vae", ckpt_dir)
     _ensure_variant("Qwen3-Embedding-0.6B", ckpt_dir)
     _ensure_variant(args.lm_variant, ckpt_dir)
 
     safetensors_path = model_dir / "model.safetensors"
-    silence_latent_path = model_dir / "silence_latent.pt"
     vae_dir = ckpt_dir / "vae"
-    text_model_dir = ckpt_dir / "Qwen3-Embedding-0.6B"
 
     if not safetensors_path.is_file():
         safetensors_shards = sorted(model_dir.glob("model-*.safetensors"))
         if not safetensors_shards:
             raise FileNotFoundError(f"Missing checkpoint: {safetensors_path}")
-    if not silence_latent_path.is_file():
-        raise FileNotFoundError(f"Missing silence_latent: {silence_latent_path}")
 
     infer_steps = args.infer_steps
     if infer_steps is None:
@@ -316,162 +258,19 @@ def main() -> None:
 
     torch_dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def _ensure_acestep_on_path() -> Path:
-        root = _resolve_ace_step_repo_root(ckpt_dir=str(args.ckpt_dir), ace_step_repo_root=args.ace_step_repo_root)
-        if root is None:
-            raise RuntimeError(
-                "Could not find ACE-Step-1.5 repo (needed for acestep imports). "
-                "Pass --ace-step-repo-root or set ACE_STEP_REPO_ROOT."
-            )
-        from models.demos.ace_step_v1_5.tests.ref_decoder_compare import ensure_acestep_repo_on_path
+    # --- Local conditioning (no ACE repo) ---
+    from models.demos.ace_step_v1_5.demo.local_preprocess import prepare_conditioning
 
-        ensure_acestep_repo_on_path(root)
-        return root
-
-    # --- Optional: full official path (LLM), no TTNN ---
-    if args.use_official_lm:
-        from models.demos.ace_step_v1_5.demo.official_lm_preprocess import configure_acestep_logging
-
-        configure_acestep_logging()
-        ref_root = _ensure_acestep_on_path()
-        try:
-            from acestep.handler import AceStepHandler
-            from acestep.inference import GenerationConfig, GenerationParams, generate_music
-            from acestep.llm_inference import LLMHandler
-        except ModuleNotFoundError as e:
-            raise RuntimeError(
-                "--use-official-lm requires AceStepHandler and its deps "
-                f"(missing {e.name!r}). pip install torchaudio (match your PyTorch build)."
-            ) from e
-
-        import acestep.model_downloader as _mdl
-
-        _mdl.MAIN_MODEL_COMPONENTS = [args.variant, "vae", "Qwen3-Embedding-0.6B", args.lm_variant]
-
-        dit_handler = AceStepHandler()
-        llm_handler = LLMHandler()
-        device = "cpu"
-        status, ok = dit_handler.initialize_service(
-            project_root=str(ref_root),
-            config_path=args.variant,
-            device=device,
-            use_flash_attention=False,
-        )
-        print(status, flush=True)
-        if not ok:
-            raise RuntimeError("AceStepHandler.initialize_service failed")
-        _ensure_variant(args.lm_variant, ckpt_dir)
-        status, ok = llm_handler.initialize(
-            checkpoint_dir=str(ckpt_dir),
-            lm_model_path=args.lm_variant,
-            backend="pt",
-            device=device,
-        )
-        print(status, flush=True)
-        if not ok:
-            raise RuntimeError("LLMHandler.initialize failed")
-        params = GenerationParams(
-            task_type="text2music",
-            caption=args.prompt,
-            lyrics="[Instrumental]",
-            instrumental=True,
-            reference_audio=None,
-            duration=float(args.duration_sec),
-            inference_steps=int(infer_steps),
-            thinking=True,
-            use_constrained_decoding=True,
-            use_adg=use_adg,
-            guidance_scale=gs,
-            cfg_interval_start=float(args.cfg_interval_start),
-            cfg_interval_end=float(args.cfg_interval_end),
-            shift=float(args.shift),
-        )
-        config = GenerationConfig(batch_size=1, use_random_seed=False, seeds=[int(args.seed)], audio_format="wav")
-        out_dir = Path(args.out).resolve().parent
-        out_dir.mkdir(parents=True, exist_ok=True)
-        result = generate_music(dit_handler, llm_handler, params, config, save_dir=str(out_dir))
-        if not result.success:
-            raise RuntimeError(result.error or "generate_music failed")
-        first = Path(result.audios[0]["path"]).resolve()
-        dst = Path(args.out).resolve()
-        if first != dst:
-            dst.write_bytes(first.read_bytes())
-        print(f"Wrote (official LM, not TTNN): {dst}", flush=True)
-        return
-
-    # --- Official: 5 Hz LM + AceStepHandler batching + prepare_condition (precomputed LM hints) ---
-    ref_root = _ensure_acestep_on_path()
-
-    from models.demos.ace_step_v1_5.demo.official_lm_preprocess import (
-        build_filtered_dit_kwargs_for_handler,
-        configure_acestep_logging,
-        handler_prepare_condition_tensors,
-    )
-
-    configure_acestep_logging()
-    import acestep.model_downloader as _mdl
-    from acestep.handler import AceStepHandler
-    from acestep.llm_inference import LLMHandler
-
-    from models.demos.ace_step_v1_5.demo.acestep_preprocess_shim import GenerationConfig, GenerationParams
-
-    _mdl.MAIN_MODEL_COMPONENTS = [args.variant, "vae", "Qwen3-Embedding-0.6B", args.lm_variant]
-
-    dit_handler = AceStepHandler()
-    llm_handler = LLMHandler()
-    device = "cpu"
-    status, ok = dit_handler.initialize_service(
-        project_root=str(ref_root),
-        config_path=args.variant,
-        device=device,
-        use_flash_attention=False,
-    )
-    print(status, flush=True)
-    if not ok:
-        raise RuntimeError("AceStepHandler.initialize_service failed")
-    status, ok = llm_handler.initialize(
-        checkpoint_dir=str(ckpt_dir),
-        lm_model_path=args.lm_variant,
-        backend="pt",
-        device=device,
-    )
-    print(status, flush=True)
-    if not ok:
-        raise RuntimeError("LLMHandler.initialize failed")
-
-    ts_list = None
-    if args.timesteps:
-        raw_ts = [float(x.strip()) for x in args.timesteps.split(",") if x.strip()]
-        while raw_ts and raw_ts[-1] == 0.0:
-            raw_ts.pop()
-        ts_list = raw_ts or None
-
-    params = GenerationParams(
-        task_type="text2music",
-        caption=args.prompt,
+    enc_hs, enc_mask, ctx_lat, frames, null_emb, _metadata = prepare_conditioning(
+        prompt=args.prompt,
         lyrics="[Instrumental]",
-        instrumental=True,
-        reference_audio=None,
-        duration=float(args.duration_sec),
-        inference_steps=int(infer_steps),
-        guidance_scale=gs,
-        use_adg=use_adg,
-        cfg_interval_start=float(args.cfg_interval_start),
-        cfg_interval_end=float(args.cfg_interval_end),
-        shift=float(args.shift),
-        thinking=True,
-        use_constrained_decoding=True,
-        timesteps=ts_list,
+        duration_sec=float(args.duration_sec),
+        ckpt_dir=ckpt_dir,
+        variant=args.variant,
+        lm_variant=args.lm_variant,
+        seed=int(args.seed),
+        torch_dev=torch_dev,
     )
-    config = GenerationConfig(
-        batch_size=1,
-        use_random_seed=False,
-        seeds=[int(args.seed)],
-        audio_format="wav",
-        constrained_decoding_debug=True,
-    )
-    filtered = build_filtered_dit_kwargs_for_handler(dit_handler, llm_handler, params, config, progress=None)
-    enc_hs, enc_mask, ctx_lat, frames, null_emb = handler_prepare_condition_tensors(dit_handler, filtered)
     do_cfg = gs > 1.0 + 1e-6
 
     t_schedule = _build_t_schedule(
@@ -518,11 +317,9 @@ def main() -> None:
             expected_input_length=int(frames),
         )
 
-        _ensure_acestep_on_path()
-        from acestep.models.common.apg_guidance import MomentumBuffer, adg_forward, apg_forward
+        from models.demos.ace_step_v1_5.demo.apg_guidance import MomentumBuffer, adg_forward, apg_forward
 
         momentum_buffer = MomentumBuffer() if do_cfg and not use_adg else None
-        num_steps = len(t_schedule)
         cfg_lo = float(args.cfg_interval_start)
         cfg_hi = float(args.cfg_interval_end)
 
