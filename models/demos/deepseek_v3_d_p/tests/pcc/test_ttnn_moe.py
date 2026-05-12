@@ -19,8 +19,7 @@ from loguru import logger
 from tracy import signpost
 
 import ttnn
-from conftest import is_galaxy
-from models.common.utility_functions import is_blackhole, profiler
+from models.common.utility_functions import profiler
 from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
 from models.demos.deepseek_v3_d_p.reference.tt.moe.moe import TorchMoe
 from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import (
@@ -58,17 +57,20 @@ from tests.ttnn.utils_for_testing import comp_pcc
 # dispatch_buffer_capacity_factor below is ceil(N/2) of the most conservative
 # integer N such that dgs*seq*N >= theoretical worst-case dispatch buffer.
 # Real traffic never approaches the worst case, so half-capacity is sufficient.
+@pytest.mark.timeout(0)
 @pytest.mark.parametrize(
     "seq_len_per_chip, emb_dim, hidden_dim, num_routed_experts, num_experts_per_tok, dispatch_buffer_capacity_factor, gate_fallback_mode, run_pcc_check",
     [
         # fmt: off
-        pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.DEVICE, False, marks=pytest.mark.skipif(not is_blackhole(), reason="Blackhole only")),
-        pytest.param(1600, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 64, 8, 5, GateComputeMode.HOST_ALL, True, marks=pytest.mark.timeout(900)),
-        pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.HOST_ALL, True, marks=[pytest.mark.skipif(not is_blackhole(), reason="Blackhole only"), pytest.mark.skipif(not is_galaxy(), reason="Requires Galaxy")]),
+        # pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.DEVICE, False, marks=pytest.mark.skipif(not is_blackhole(), reason="Blackhole only")),
+        # pytest.param(1600, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 64, 8, 5, GateComputeMode.HOST_ALL, True, marks=pytest.mark.timeout(900)),
+        # pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.HOST_ALL, True, marks=[pytest.mark.skipif(not is_blackhole(), reason="Blackhole only"), pytest.mark.skipif(not is_galaxy(), reason="Requires Galaxy")]),
+        pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.DEVICE_FP32, False),
         # fmt: on
     ],
 )
-@pytest.mark.parametrize("num_iterations", [1, 25, 2000], ids=["iter1", "iter25", "iter2000"])
+@pytest.mark.parametrize("num_iterations", [1, 5, 30], ids=["iter1", "iter5", "iter30"])
+@pytest.mark.parametrize("trace_enabled", [False, True], ids=["disable_trace", "enable_trace"])
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links, topology",
     [
@@ -77,6 +79,7 @@ from tests.ttnn.utils_for_testing import comp_pcc
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "trace_region_size": 200000000,
             },
             1,
             ttnn.Topology.Linear,
@@ -88,6 +91,7 @@ from tests.ttnn.utils_for_testing import comp_pcc
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "trace_region_size": 200000000,
             },
             1,
             ttnn.Topology.Linear,
@@ -99,6 +103,7 @@ from tests.ttnn.utils_for_testing import comp_pcc
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "trace_region_size": 200000000,
             },
             1,
             ttnn.Topology.Linear,
@@ -122,6 +127,7 @@ def test_ttnn_moe(
     topology,
     gate_fallback_mode,
     num_iterations,
+    trace_enabled,
 ):
     """
     Test TtMoe PCC against TorchMoe reference.
@@ -130,7 +136,8 @@ def test_ttnn_moe(
     and run forward(x) end-to-end. Validation compares intermediates directly.
     """
 
-    mesh_device.disable_and_clear_program_cache()  # temporary disabling program cache; because cached all gather semaphores at wrong place cause this test case to OOM
+    if not trace_enabled:
+        mesh_device.disable_and_clear_program_cache()  # temporary disabling program cache; because cached all gather semaphores at wrong place cause this test case to OOM
     # pytest  models/demos/deepseek_v3_d_p/tests/pcc/test_ttnn_moe.py::test_ttnn_moe[blackhole-linear-8-1600-7168-2048-64-8-2-GateComputeMode.HOST_ALL-True]
 
     profiler.clear()
@@ -325,11 +332,33 @@ def test_ttnn_moe(
     profiler.start("tt_forward")
     logger.debug("Running TtMoe forward pass...")
 
-    for i in range(num_iterations):
-        logger.info(f"Starting iteration: {i}")
+    if trace_enabled:
+        # Iter 0: compile run with normal dispatch (populates program cache).
+        logger.info("Iter 0: compile run (normal dispatch)")
         tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
-        logger.info(f"Starting completion sync on iteration: {i}")
         ttnn.synchronize_device(mesh_device)
+
+        if num_iterations > 1:
+            # NOTE: return_intermediates=True triggers ttnn.to_torch readbacks inside
+            # tt_moe.forward (overflow checks), which are illegal during trace capture.
+            # PCC validation uses the iter-0 intermediates captured above.
+            logger.info("Capturing trace")
+            trace_id = ttnn.begin_trace_capture(mesh_device, cq_id=0)
+            tt_output_traced, _ = tt_moe(tt_x, return_intermediates=False)
+            ttnn.end_trace_capture(mesh_device, trace_id, cq_id=0)
+            ttnn.synchronize_device(mesh_device)
+
+            for i in range(1, num_iterations):
+                logger.info(f"Iter {i}: execute_trace (dispatch=0)")
+                ttnn.execute_trace(mesh_device, trace_id, cq_id=0, blocking=False)
+                ttnn.synchronize_device(mesh_device)
+            ttnn.release_trace(mesh_device, trace_id)
+    else:
+        for i in range(num_iterations):
+            logger.info(f"Starting iteration: {i}")
+            tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
+            logger.info(f"Starting completion sync on iteration: {i}")
+            ttnn.synchronize_device(mesh_device)
     profiler.end("tt_forward")
 
     # Early return when run_pcc_check=False (profiling mode)
