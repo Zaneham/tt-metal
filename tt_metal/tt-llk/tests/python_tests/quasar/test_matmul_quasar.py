@@ -67,6 +67,7 @@ MATMUL_FORMAT = input_output_formats(
         DataFormat.Float16,
         DataFormat.Float16_b,
         DataFormat.MxFp4,
+        DataFormat.MxInt8,
     ],
 )
 
