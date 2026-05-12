@@ -68,6 +68,7 @@ from tests.ttnn.utils_for_testing import comp_pcc
         # fmt: on
     ],
 )
+@pytest.mark.parametrize("num_iterations", [1, 25, 2000], ids=["iter1", "iter25", "iter2000"])
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links, topology",
     [
@@ -120,6 +121,7 @@ def test_ttnn_moe(
     num_links,
     topology,
     gate_fallback_mode,
+    num_iterations,
 ):
     """
     Test TtMoe PCC against TorchMoe reference.
@@ -323,8 +325,11 @@ def test_ttnn_moe(
     profiler.start("tt_forward")
     logger.debug("Running TtMoe forward pass...")
 
-    tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
-    ttnn.synchronize_device(mesh_device)
+    for i in range(num_iterations):
+        logger.info(f"Starting iteration: {i}")
+        tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
+        logger.info(f"Starting completion sync on iteration: {i}")
+        ttnn.synchronize_device(mesh_device)
     profiler.end("tt_forward")
 
     # Early return when run_pcc_check=False (profiling mode)
