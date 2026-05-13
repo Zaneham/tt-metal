@@ -6,6 +6,7 @@
 
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/constants.hpp>
+#include <tt-metalium/program_descriptors.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 
 #include <cmath>
@@ -13,20 +14,17 @@
 
 namespace ttnn::prim {
 
-// Single row - single core
-SortProgramFactorySingleRowSingleCore::cached_program_t SortProgramFactorySingleRowSingleCore::create(
-    const SortParams& attributes, const SortInputs& tensor_args, std::vector<Tensor>& output_tensors) {
-    // Program config
-    tt::tt_metal::Program program{};
+using namespace tt::tt_metal;
 
+// Single row - single core
+ProgramDescriptor SortProgramFactorySingleRowSingleCore::create_descriptor(
+    const SortParams& attributes, const SortInputs& tensor_args, std::vector<Tensor>& output_tensors) {
     const bool is_row_major = (tensor_args.input_tensor.layout() == Layout::ROW_MAJOR);
 
     const tt::DataFormat input_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(tensor_args.input_tensor.dtype());
-    const tt::DataFormat value_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(output_tensors.at(0).dtype());
-    const tt::DataFormat index_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(output_tensors.at(1).dtype());
+        datatype_to_dataformat_converter(tensor_args.input_tensor.dtype());
+    const tt::DataFormat value_tensor_cb_data_format = datatype_to_dataformat_converter(output_tensors.at(0).dtype());
+    const tt::DataFormat index_tensor_cb_data_format = datatype_to_dataformat_converter(output_tensors.at(1).dtype());
 
     const uint32_t input_tensor_tile_size = tile_size(input_tensor_cb_data_format);
     const uint32_t value_tensor_tile_size = tile_size(value_tensor_cb_data_format);
@@ -36,55 +34,29 @@ SortProgramFactorySingleRowSingleCore::cached_program_t SortProgramFactorySingle
     auto* value_buffer = output_tensors.at(0).buffer();
     auto* index_buffer = output_tensors.at(1).buffer();
 
-    // For ROW_MAJOR use logical shape (logical == padded for RM).
-    // For TILE use padded shape as before.
     const auto input_shape =
         is_row_major ? tensor_args.input_tensor.logical_shape() : tensor_args.input_tensor.padded_shape();
     const uint32_t Ht = (input_shape[0] * input_shape[1] * input_shape[2]) / tt::constants::TILE_HEIGHT;
     const uint32_t Wt = input_shape[3] / tt::constants::TILE_WIDTH;
 
-    // Byte widths of one logical row (needed for ROW_MAJOR kernel addressing).
-    const uint32_t element_size_bytes = tt::datum_size(input_tensor_cb_data_format);  // bytes per value element
+    const uint32_t element_size_bytes = tt::datum_size(input_tensor_cb_data_format);
     const uint32_t index_element_size_bytes = tt::datum_size(index_tensor_cb_data_format);
-    const uint32_t W_value_bytes = input_shape[3] * element_size_bytes;        // one row of values in bytes
-    const uint32_t W_index_bytes = input_shape[3] * index_element_size_bytes;  // one row of indices in bytes
+    const uint32_t W_value_bytes = input_shape[3] * element_size_bytes;
+    const uint32_t W_index_bytes = input_shape[3] * index_element_size_bytes;
 
-    // Double buffering config (TILE path only)
-    constexpr uint32_t num_cb_unit = 2;                // Number of circular buffer units for double buffering
-    constexpr uint32_t cb_in_units = 2 * num_cb_unit;  // Total number of circular buffer units
+    constexpr uint32_t num_cb_unit = 2;
+    constexpr uint32_t cb_in_units = 2 * num_cb_unit;
 
-    // Calculate the number of cores available for computation
     auto* device = tensor_args.input_tensor.device();
     const auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
     const uint32_t total_number_of_cores = compute_with_storage_grid_size.y * compute_with_storage_grid_size.x;
 
-    // Calculate the number of cores utilized based on the input tensor shape
     const uint32_t all_core_utilization_loop_count = Ht / total_number_of_cores;
     const uint32_t all_core_utilization_loop_residuum = Ht % total_number_of_cores;
 
-    // uint32 index tensor support
     const bool is_32_bit_index = index_tensor_cb_data_format == tt::DataFormat::UInt32;
     const bool is_32_bit_data = is_32_bit_index || input_tensor_cb_data_format == tt::DataFormat::Float32;
-    // Calculate core range
-    /**
-     * Calculates the core range based on the input tensor shape (Ht) and the total number of cores available
-     * in the device's compute grid. The core range determines which cores will be utilized for computation.
-     *
-     * The calculation works as follows:
-     * 1. If the height (Ht) of the input tensor is greater than or equal to the total number of cores,
-     *    all cores in the compute grid are utilized. The core range is set to cover the entire grid.
-     *
-     * 2. If Ht is smaller than the total number of cores:
-     *    - The number of rows (`core_grid_calculated_rows_number`) and columns (`core_grid_calculated_columns_number`)
-     *      required to cover Ht are calculated based on the grid dimensions.
-     *    - If both rows and columns are zero, only a single core is used.
-     *    - If only rows are zero, the core range is set to cover the required number of columns in the first row.
-     *    - Otherwise, the core range is set to cover the required rows, and if there are remaining columns,
-     *      an additional range is added to cover those columns in the next row.
-     *
-     * The resulting core range is represented as a `CoreRangeSet`, which may consist of one or more `CoreRange`
-     * objects depending on the configuration.
-     */
+
     CoreRangeSet core_range;
     if (Ht >= total_number_of_cores) {
         core_range = CoreRangeSet(
@@ -109,178 +81,162 @@ SortProgramFactorySingleRowSingleCore::cached_program_t SortProgramFactorySingle
         }
     }
 
+    ProgramDescriptor desc;
+
     // -----------------------------------------------------------------------
     // Circular buffers
-    //
-    // TILE path (is_row_major == false):
-    //   c_0  input_tensor_cb        – 4-tile streaming input (double-buffered)
-    //   c_1  index_tensor_cb        – 4-tile streaming index (double-buffered)
-    //   c_2  input_transposed_cb    – Wt tiles (sort working buffer, values)
-    //   c_3  index_transposed_cb    – Wt tiles (sort working buffer, indices)
-    //   c_4  value_tensor_cb        – 2-tile streaming output (values)
-    //   c_5  index_tensor_output_cb – 2-tile streaming output (indices)
-    //   c_6  synchronization_cb
-    //
-    // ROW_MAJOR path (is_row_major == true):
-    //   c_0  tile_input_cb          – Wt tiles (tilize output; reused after sort
-    //                                  for un-transposed sorted values → untilize)
-    //   c_1  index_tensor_cb        – 4-tile streaming index (generated by writer,
-    //                                  reused after sort for un-transposed indices)
-    //   c_2  input_transposed_cb    – Wt tiles (sort working buffer, values)
-    //   c_3  index_transposed_cb    – Wt tiles (sort working buffer, indices)
-    //   c_4  (unused in RM path)
-    //   c_5  (unused in RM path)
-    //   c_6  synchronization_cb
-    //   c_7  rm_input_cb               – TILE_HEIGHT pages of W_value_bytes each
-    //   c_8  rm_value_output_cb        – TILE_HEIGHT pages of W_value_bytes each
-    //   c_9  rm_index_output_cb        – TILE_HEIGHT pages of W_index_bytes each
-    //   c_10 rm_post_sort_index_cb     – Wt index tiles, PACK-only producer.
-    //                                    Holds the un-transposed sorted index tiles
-    //                                    that feed the index pack_untilize_block.
-    //                                    Reusing c_1 (writer-produced) here causes
-    //                                    a mixed-producer counter race: BRISC's
-    //                                    cb_push_back uses += into the L1 receive
-    //                                    counter, while PACK's cb_push_back overwrites
-    //                                    it with PACK's own local counter, so PACK's
-    //                                    pushes silently clobber BRISC's contribution
-    //                                    and cb_wait_front deadlocks.
     // -----------------------------------------------------------------------
-
     constexpr uint32_t input_tensor_cb_index = tt::CBIndex::c_0;
     {
-        // TILE path: 4-tile double-buffered streaming input.
-        // ROW_MAJOR path: Wt tiles to hold the full tilize output (and later
-        // the un-transposed sorted values for untilize_block).
         const uint32_t cb0_tiles = is_row_major ? Wt : cb_in_units;
-        const tt::tt_metal::CircularBufferConfig cfg =
-            tt::tt_metal::CircularBufferConfig(
-                cb0_tiles * input_tensor_tile_size, {{input_tensor_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(input_tensor_cb_index, input_tensor_tile_size);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, cfg);
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = cb0_tiles * input_tensor_tile_size,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(input_tensor_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = input_tensor_tile_size,
+            }}},
+        });
     }
 
     constexpr uint32_t index_tensor_cb_index = tt::CBIndex::c_1;
     {
-        // Both paths: writer generates index tiles here.
-        // ROW_MAJOR: after sort the un-transposed sorted index tiles are packed
-        // into rm_post_sort_index_cb (c_10), not here; c_1 is sized to Wt so
-        // it can hold all writer-generated index tiles before they are consumed.
         const uint32_t cb1_tiles = is_row_major ? Wt : cb_in_units;
-        const tt::tt_metal::CircularBufferConfig cfg =
-            tt::tt_metal::CircularBufferConfig(
-                cb1_tiles * index_tensor_tile_size, {{index_tensor_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(index_tensor_cb_index, index_tensor_tile_size);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, cfg);
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = cb1_tiles * index_tensor_tile_size,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(index_tensor_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = index_tensor_tile_size,
+            }}},
+        });
     }
 
     constexpr uint32_t input_tensor_transposed_cb_index = tt::CBIndex::c_2;
-    const tt::tt_metal::CircularBufferConfig input_tensor_transposed_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            Wt * input_tensor_tile_size, {{input_tensor_transposed_cb_index, input_tensor_cb_data_format}})
-            .set_page_size(input_tensor_transposed_cb_index, input_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, input_tensor_transposed_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = Wt * input_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(input_tensor_transposed_cb_index),
+            .data_format = input_tensor_cb_data_format,
+            .page_size = input_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_transposed_cb_index = tt::CBIndex::c_3;
-    const tt::tt_metal::CircularBufferConfig index_tensor_transposed_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            Wt * index_tensor_tile_size, {{index_tensor_transposed_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_transposed_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_transposed_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = Wt * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_transposed_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t value_tensor_cb_index = tt::CBIndex::c_4;
-    const tt::tt_metal::CircularBufferConfig value_tensor_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            num_cb_unit * value_tensor_tile_size, {{value_tensor_cb_index, value_tensor_cb_data_format}})
-            .set_page_size(value_tensor_cb_index, value_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, value_tensor_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = num_cb_unit * value_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(value_tensor_cb_index),
+            .data_format = value_tensor_cb_data_format,
+            .page_size = value_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_output_cb_index = tt::CBIndex::c_5;
-    const tt::tt_metal::CircularBufferConfig index_tensor_output_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            num_cb_unit * index_tensor_tile_size, {{index_tensor_output_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_output_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_output_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = num_cb_unit * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_output_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t synchronization_cb_index = tt::CBIndex::c_6;
     constexpr uint32_t synchronization_cb_size = tt::constants::TILE_HW * sizeof(uint8_t);
-    const tt::tt_metal::CircularBufferConfig synchronization_cb_config =
-        tt::tt_metal::CircularBufferConfig(synchronization_cb_size, {{synchronization_cb_index, tt::DataFormat::UInt8}})
-            .set_page_size(synchronization_cb_index, synchronization_cb_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, synchronization_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = synchronization_cb_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(synchronization_cb_index),
+            .data_format = tt::DataFormat::UInt8,
+            .page_size = synchronization_cb_size,
+        }}},
+    });
 
-    // ROW_MAJOR-only CBs (indices c_7, c_8, c_9, c_10).
-    // c_7/c_8/c_9 hold exactly TILE_HEIGHT pages so one tile-row of RM data fits.
-    // c_10 holds Wt tiles in TILE format and is PACK-only (compute-internal).
     constexpr uint32_t rm_input_cb_index = tt::CBIndex::c_7;
     constexpr uint32_t rm_value_output_cb_index = tt::CBIndex::c_8;
     constexpr uint32_t rm_index_output_cb_index = tt::CBIndex::c_9;
     constexpr uint32_t rm_post_sort_index_cb_index = tt::CBIndex::c_10;
     if (is_row_major) {
-        // rm_input_cb: reader pushes TILE_HEIGHT pages, each W_value_bytes wide.
-        const tt::tt_metal::CircularBufferConfig rm_input_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                tt::constants::TILE_HEIGHT * W_value_bytes, {{rm_input_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(rm_input_cb_index, W_value_bytes);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_input_cfg);
-
-        // rm_value_output_cb: compute pushes untilized value rows; writer drains them.
-        const tt::tt_metal::CircularBufferConfig rm_value_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                tt::constants::TILE_HEIGHT * W_value_bytes, {{rm_value_output_cb_index, value_tensor_cb_data_format}})
-                .set_page_size(rm_value_output_cb_index, W_value_bytes);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_value_cfg);
-
-        // rm_index_output_cb: compute pushes untilized index rows; reader drains them.
-        const tt::tt_metal::CircularBufferConfig rm_index_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                tt::constants::TILE_HEIGHT * W_index_bytes, {{rm_index_output_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_index_output_cb_index, W_index_bytes);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_index_cfg);
-
-        // rm_post_sort_index_cb: holds Wt un-transposed sorted index tiles.
-        // PACK is the sole producer (compute kernel only) and UNPACK is the sole
-        // consumer (also compute), so the cb_push_back / cb_wait_front pair use
-        // matched semantics and the mixed-producer counter race that affects
-        // index_tensor_cb (BRISC + PACK) does not occur here.
-        const tt::tt_metal::CircularBufferConfig rm_post_sort_index_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                Wt * index_tensor_tile_size, {{rm_post_sort_index_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_post_sort_index_cb_index, index_tensor_tile_size);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_post_sort_index_cfg);
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = tt::constants::TILE_HEIGHT * W_value_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_input_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = W_value_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = tt::constants::TILE_HEIGHT * W_value_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_value_output_cb_index),
+                .data_format = value_tensor_cb_data_format,
+                .page_size = W_value_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = tt::constants::TILE_HEIGHT * W_index_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_index_output_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = W_index_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = Wt * index_tensor_tile_size,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_post_sort_index_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = index_tensor_tile_size,
+            }}},
+        });
     }
 
     // -----------------------------------------------------------------------
     // Kernels
     // -----------------------------------------------------------------------
     const uint32_t loop_count = all_core_utilization_loop_count ? all_core_utilization_loop_count : 1;
+    const bool needs_residuum_bump =
+        (all_core_utilization_loop_count != 0) && (all_core_utilization_loop_residuum != 0);
 
     std::vector<uint32_t> reader_compile_time_args = {
         input_tensor_cb_index,
-        index_tensor_output_cb_index,  // TILE path: sorted index tiles come here
+        index_tensor_output_cb_index,
         Wt,
         Ht,
         total_number_of_cores,
         compute_with_storage_grid_size.x,
         compute_with_storage_grid_size.y,
         static_cast<uint32_t>(is_row_major),
-        rm_input_cb_index,         // ROW_MAJOR: reader pushes raw rows here
-        rm_index_output_cb_index,  // ROW_MAJOR: reader drains untilized index rows here
+        rm_input_cb_index,
+        rm_index_output_cb_index,
         W_value_bytes,
         W_index_bytes,
     };
     TensorAccessorArgs(*input_buffer).append_to(reader_compile_time_args);
     TensorAccessorArgs(*index_buffer).append_to(reader_compile_time_args);
-    const std::string reader_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/reader_single_row_single_core.cpp";
-    tt::tt_metal::KernelHandle reader_kernel_id = tt::tt_metal::CreateKernel(
-        program, reader_kernel_path, core_range, tt::tt_metal::ReaderDataMovementConfig{reader_compile_time_args});
-    SetRuntimeArgs(
-        program, reader_kernel_id, core_range, {input_buffer->address(), index_buffer->address(), loop_count});
 
-    // arg 7: is_32_bit_data – true when fp32_dest_acc_en is set (float32 input OR uint32
-    // index).  The topk LLK in 32-bit DEST mode reads indices via INT32 path, so the
-    // index tiles generated by the writer must also be 32-bit.  Using is_32_bit_index
-    // alone is wrong for float32 inputs with uint16 indices.
     std::vector<uint32_t> writer_compile_time_args = {
         value_tensor_cb_index,
         index_tensor_cb_index,
@@ -289,17 +245,12 @@ SortProgramFactorySingleRowSingleCore::cached_program_t SortProgramFactorySingle
         total_number_of_cores,
         compute_with_storage_grid_size.x,
         compute_with_storage_grid_size.y,
-        static_cast<uint32_t>(is_32_bit_data),  // arg 7: UInt32 vs UInt16 index tiles
+        static_cast<uint32_t>(is_32_bit_data),
         static_cast<uint32_t>(is_row_major),
-        rm_value_output_cb_index,  // ROW_MAJOR: writer drains untilized value rows here
+        rm_value_output_cb_index,
         W_value_bytes,
     };
     TensorAccessorArgs(*value_buffer).append_to(writer_compile_time_args);
-    const std::string writer_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/writer_single_row_single_core.cpp";
-    tt::tt_metal::KernelHandle writer_kernel_id = tt::tt_metal::CreateKernel(
-        program, writer_kernel_path, core_range, tt::tt_metal::WriterDataMovementConfig{writer_compile_time_args});
-    SetRuntimeArgs(program, writer_kernel_id, core_range, {value_buffer->address(), loop_count});
 
     const std::vector<uint32_t> compute_compile_time_args = {
         input_tensor_cb_index,
@@ -318,120 +269,84 @@ SortProgramFactorySingleRowSingleCore::cached_program_t SortProgramFactorySingle
         rm_index_output_cb_index,
         rm_post_sort_index_cb_index,
     };
-    const std::string compute_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/compute/sort_single_row_single_core.cpp";
-    std::vector<tt::tt_metal::UnpackToDestMode> unpack_to_dest_mode_vector(NUM_CIRCULAR_BUFFERS, tt::tt_metal::UnpackToDestMode::Default);
+
+    std::vector<UnpackToDestMode> unpack_to_dest_mode_vector(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::Default);
     if (input_tensor_cb_data_format == tt::DataFormat::Float32) {
-        unpack_to_dest_mode_vector[input_tensor_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[input_tensor_transposed_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[value_tensor_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_transposed_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[value_tensor_cb_index] = UnpackToDestMode::UnpackToDestFp32;
         if (is_row_major) {
-            // tilize_block reads from rm_input_cb (Float32 RM data) and writes
-            // tile-format Float32 to input_tensor_cb.  Without UnpackToDestFp32
-            // on the source CB, the UNPACK engine truncates float32 values to
-            // bfloat16 precision before storing them in DEST, causing ~0.004
-            // ATOL error in the sorted output.
-            unpack_to_dest_mode_vector[rm_input_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
+            unpack_to_dest_mode_vector[rm_input_cb_index] = UnpackToDestMode::UnpackToDestFp32;
         }
     }
-    tt::tt_metal::KernelHandle compute_kernel_id = tt::tt_metal::CreateKernel(
-        program,
-        compute_kernel_path,
-        core_range,
-        tt::tt_metal::ComputeConfig{
-            .fp32_dest_acc_en = is_32_bit_data,
-            .unpack_to_dest_mode = unpack_to_dest_mode_vector,
-            .compile_args = compute_compile_time_args});
-    SetRuntimeArgs(program, compute_kernel_id, core_range, {loop_count});
 
-    if (all_core_utilization_loop_residuum != 0 && all_core_utilization_loop_count != 0) {
-        uint32_t residuum_count = 0;
-        for (uint32_t core_y = 0; core_y < compute_with_storage_grid_size.y; core_y++) {
-            for (uint32_t core_x = 0; core_x < compute_with_storage_grid_size.x; core_x++) {
-                const uint32_t new_loop_count = all_core_utilization_loop_count + 1;
-                const CoreCoord core = {core_x, core_y};
+    KernelDescriptor reader_desc;
+    reader_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/reader_single_row_single_core.cpp";
+    reader_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    reader_desc.core_ranges = core_range;
+    reader_desc.compile_time_args = std::move(reader_compile_time_args);
+    reader_desc.config = ReaderConfigDescriptor{};
 
-                SetRuntimeArgs(
-                    program,
-                    reader_kernel_id,
-                    core,
-                    {input_buffer->address(), index_buffer->address(), new_loop_count});
+    KernelDescriptor writer_desc;
+    writer_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/writer_single_row_single_core.cpp";
+    writer_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    writer_desc.core_ranges = core_range;
+    writer_desc.compile_time_args = std::move(writer_compile_time_args);
+    writer_desc.config = WriterConfigDescriptor{};
 
-                SetRuntimeArgs(program, writer_kernel_id, core, {value_buffer->address(), new_loop_count});
+    KernelDescriptor compute_desc;
+    compute_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/compute/sort_single_row_single_core.cpp";
+    compute_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    compute_desc.core_ranges = core_range;
+    compute_desc.compile_time_args = compute_compile_time_args;
+    compute_desc.config = ComputeConfigDescriptor{
+        .fp32_dest_acc_en = is_32_bit_data,
+        .unpack_to_dest_mode = std::move(unpack_to_dest_mode_vector),
+    };
 
-                SetRuntimeArgs(program, compute_kernel_id, core, {new_loop_count});
-
-                residuum_count++;
-                if (residuum_count >= all_core_utilization_loop_residuum) {
-                    core_y = compute_with_storage_grid_size.y;
-                    break;
-                }
+    // Per-core runtime args: first all_core_utilization_loop_residuum cores (in grid order) get
+    // loop_count+1, the rest get loop_count — matching the old SetRuntimeArgs residuum override.
+    uint32_t bumped_count = 0;
+    for (uint32_t core_y = 0; core_y < compute_with_storage_grid_size.y; core_y++) {
+        for (uint32_t core_x = 0; core_x < compute_with_storage_grid_size.x; core_x++) {
+            const CoreCoord core{core_x, core_y};
+            if (!core_range.contains(core)) {
+                continue;
             }
-        }
-    }
-
-    return {
-        std::move(program), {reader_kernel_id, compute_kernel_id, writer_kernel_id, compute_with_storage_grid_size}};
-}
-
-void SortProgramFactorySingleRowSingleCore::override_runtime_arguments(
-    cached_program_t& cached_program,
-    const SortParams& /*attributes*/,
-    const SortInputs& tensor_args,
-    std::vector<Tensor>& output_tensors) {
-    auto* input_tensor_buffer = tensor_args.input_tensor.buffer();
-    auto* value_tensor_buffer = output_tensors.at(0).buffer();
-    auto* index_tensor_buffer = output_tensors.at(1).buffer();
-
-    const bool is_rm = (tensor_args.input_tensor.layout() == Layout::ROW_MAJOR);
-    const auto input_shape = is_rm ? tensor_args.input_tensor.logical_shape() : tensor_args.input_tensor.padded_shape();
-    const uint32_t Ht = (input_shape[0] * input_shape[1] * input_shape[2]) / tt::constants::TILE_HEIGHT;
-    const uint32_t total_number_of_cores =
-        cached_program.shared_variables.storage_grid_size.x * cached_program.shared_variables.storage_grid_size.y;
-
-    // Calculate the number of cores utilized based on the input tensor shape
-    const uint32_t all_core_utilization_loop_count = Ht / total_number_of_cores;
-    const uint32_t all_core_utilization_loop_residuum = Ht % total_number_of_cores;
-
-    uint32_t residuum_count = 0;
-    for (uint32_t core_y = 0; core_y < cached_program.shared_variables.storage_grid_size.y; core_y++) {
-        for (uint32_t core_x = 0; core_x < cached_program.shared_variables.storage_grid_size.x; core_x++) {
-            const CoreCoord core = {core_x, core_y};
-            auto& reader_runtime_args =
-                GetRuntimeArgs(cached_program.program, cached_program.shared_variables.reader_kernel_id, core);
-            reader_runtime_args[0] = input_tensor_buffer->address();
-            reader_runtime_args[1] = index_tensor_buffer->address();
-
-            auto& writer_runtime_args =
-                GetRuntimeArgs(cached_program.program, cached_program.shared_variables.writer_kernel_id, core);
-            writer_runtime_args[0] = value_tensor_buffer->address();
-
-            if (all_core_utilization_loop_count < 1 && all_core_utilization_loop_residuum != 0) {
-                residuum_count++;
-                if (residuum_count >= all_core_utilization_loop_residuum) {
-                    core_y = cached_program.shared_variables.storage_grid_size.y;  // Break outer loop
-                    break;
-                }
+            const bool bump = needs_residuum_bump && (bumped_count < all_core_utilization_loop_residuum);
+            const uint32_t this_loop = bump ? (loop_count + 1) : loop_count;
+            if (bump) {
+                bumped_count++;
             }
+
+            reader_desc.runtime_args.emplace_back(
+                core, KernelDescriptor::CoreRuntimeArgs{input_buffer->address(), index_buffer->address(), this_loop});
+            writer_desc.runtime_args.emplace_back(
+                core, KernelDescriptor::CoreRuntimeArgs{value_buffer->address(), this_loop});
+            compute_desc.runtime_args.emplace_back(core, KernelDescriptor::CoreRuntimeArgs{this_loop});
         }
     }
+
+    desc.kernels.push_back(std::move(reader_desc));
+    desc.kernels.push_back(std::move(writer_desc));
+    desc.kernels.push_back(std::move(compute_desc));
+
+    return desc;
 }
 
 // SortProgramFactoryCrossCoreDataExchange - single row, multi core with processing multiple tiles on one core with
 // cross core data exchange
-SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCrossCoreDataExchange::create(
+ProgramDescriptor SortProgramFactoryCrossCoreDataExchange::create_descriptor(
     const SortParams& attributes, const SortInputs& tensor_args, std::vector<Tensor>& output_tensors) {
-    // Program config
-    tt::tt_metal::Program program{};
-
     const bool is_row_major = (tensor_args.input_tensor.layout() == Layout::ROW_MAJOR);
 
     const tt::DataFormat input_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(tensor_args.input_tensor.dtype());
-    const tt::DataFormat value_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(output_tensors.at(0).dtype());
-    const tt::DataFormat index_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(output_tensors.at(1).dtype());
+        datatype_to_dataformat_converter(tensor_args.input_tensor.dtype());
+    const tt::DataFormat value_tensor_cb_data_format = datatype_to_dataformat_converter(output_tensors.at(0).dtype());
+    const tt::DataFormat index_tensor_cb_data_format = datatype_to_dataformat_converter(output_tensors.at(1).dtype());
     const tt::DataFormat packer_unpacker_sync_cb_data_format = tt::DataFormat::Float16_b;
 
     const uint32_t input_tensor_tile_size = tile_size(input_tensor_cb_data_format);
@@ -446,18 +361,14 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
     const auto tile_width = tensor_args.input_tensor.tensor_spec().tile().get_width();
     const auto tile_height = tensor_args.input_tensor.tensor_spec().tile().get_height();
 
-    // For ROW_MAJOR use logical shape; for TILE use padded shape (existing behaviour).
     const auto input_shape =
         is_row_major ? tensor_args.input_tensor.logical_shape() : tensor_args.input_tensor.padded_shape();
     const uint32_t Ht = (input_shape[0] * input_shape[1] * input_shape[2]) / tile_height;
     const uint32_t Wt = input_shape[3] / tile_width;
 
-    // Per-core slice byte widths for ROW_MAJOR I/O (each core owns a contiguous
-    // strip of `number_of_tiles_per_core * tile_width` elements within each row).
     const uint32_t value_element_bytes = tt::datum_size(value_tensor_cb_data_format);
     const uint32_t index_element_bytes = tt::datum_size(index_tensor_cb_data_format);
 
-    // Calculate the number of cores available for computation
     auto* const device = tensor_args.input_tensor.device();
     const auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
     const uint32_t total_number_of_cores_physical = compute_with_storage_grid_size.y * compute_with_storage_grid_size.x;
@@ -470,12 +381,8 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
         CrossCoreDataExchangeSortSlicingStrategy::USE_AS_MANY_CORES);
     number_of_tiles_per_core = std::min(number_of_tiles_per_core, Wt);
 
-    // Calculate the number of cores utilized based on the input tensor shape
     const uint32_t all_core_utilization_count = (Wt + number_of_tiles_per_core - 1) / number_of_tiles_per_core;
 
-    // Per-core slice widths in bytes for the ROW_MAJOR path (computed after
-    // number_of_tiles_per_core is known).  Each row in the RM input/output is
-    // sliced across `all_core_utilization_count` cores.
     const uint32_t W_value_slice_bytes = number_of_tiles_per_core * tile_width * value_element_bytes;
     const uint32_t W_index_slice_bytes = number_of_tiles_per_core * tile_width * index_element_bytes;
 
@@ -485,32 +392,11 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
         all_core_utilization_count,
         total_number_of_cores_virtual);
 
-    // uint32 index tensor support
     const bool is_32_bit_index = index_tensor_cb_data_format == tt::DataFormat::UInt32;
     const bool is_32_bit_data = is_32_bit_index || input_tensor_cb_data_format == tt::DataFormat::Float32;
 
-    /**
-     * Calculates the core range based on the number of work units (all_core_utilization_count) and the total number of
-     * available cores in the device's compute grid. The core range determines which cores will be utilized for
-     * computation.
-     *
-     * The calculation works as follows:
-     * 1. If all available cores are needed (all_core_utilization_count == total_number_of_cores), the core range covers
-     * the entire grid.
-     * 2. Otherwise, the number of rows (core_grid_calculated_rows_number) and columns
-     * (core_grid_calculated_columns_number) required to cover all_core_utilization_count are calculated based on the
-     * grid dimensions.
-     *    - If both rows and columns are zero, only a single core is used.
-     *    - If only rows are zero, the core range is set to cover the required number of columns in the first row.
-     *    - Otherwise, the core range is set to cover the required rows, and if there are remaining columns,
-     *      an additional range is added to cover those columns in the next row.
-     *
-     * The resulting core range is represented as a `CoreRangeSet`, which may consist of one or more `CoreRange`
-     * objects depending on the configuration.
-     */
     CoreRangeSet core_range;
     if (all_core_utilization_count == total_number_of_cores_physical) {
-        // All cores used
         core_range = CoreRangeSet(
             CoreRange({0, 0}, {compute_with_storage_grid_size.x - 1, compute_with_storage_grid_size.y - 1}));
     } else if (all_core_utilization_count == total_number_of_cores_virtual) {
@@ -518,7 +404,6 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
             (all_core_utilization_count / compute_with_storage_grid_size.x) - 1;
         const uint32_t core_grid_calculated_columns_number =
             all_core_utilization_count % compute_with_storage_grid_size.x;
-        // All virtual cores used
         core_range =
             CoreRangeSet(CoreRange({0, 0}, {compute_with_storage_grid_size.x - 1, core_grid_calculated_rows_number}));
         if (core_grid_calculated_columns_number != 0) {
@@ -533,13 +418,10 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
             all_core_utilization_count % compute_with_storage_grid_size.x;
 
         if (core_grid_calculated_rows_number == 0 && core_grid_calculated_columns_number == 0) {
-            // Only one core used
             core_range = CoreRangeSet(CoreCoord({0, 0}));
         } else if (core_grid_calculated_rows_number == 0) {
-            // Only cores from first row used
             core_range = CoreRangeSet(CoreRange({0, 0}, {core_grid_calculated_columns_number - 1, 0}));
         } else {
-            // Rows and columns used
             core_range = CoreRangeSet(
                 CoreRange({0, 0}, {compute_with_storage_grid_size.x - 1, core_grid_calculated_rows_number - 1}));
             if (core_grid_calculated_columns_number != 0) {
@@ -551,10 +433,10 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
         }
     }
 
-    // Lookup tensor data with physical core coordinates
+    // Physical core lookup table (fixed per device/core-range; recreated each call)
     std::vector<uint32_t> physical_core_lookup_table_data;
-    for (const auto& core_range : core_range.ranges()) {
-        for (const auto& core_coord : core_range) {
+    for (const auto& range : core_range.ranges()) {
+        for (const auto& core_coord : range) {
             const auto physical_core = device->worker_core_from_logical_core(core_coord);
             physical_core_lookup_table_data.emplace_back(physical_core.x);
             physical_core_lookup_table_data.emplace_back(physical_core.y);
@@ -568,157 +450,207 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
     physical_core_lookup_table_tensor = physical_core_lookup_table_tensor.to_device(device);
     auto* const physical_core_lookup_table_tensor_buffer = physical_core_lookup_table_tensor.buffer();
     const tt::DataFormat physical_core_lookup_table_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(physical_core_lookup_table_tensor.dtype());
+        datatype_to_dataformat_converter(physical_core_lookup_table_tensor.dtype());
     const uint32_t physical_core_lookup_table_tile_size = tile_size(physical_core_lookup_table_cb_data_format);
 
+    ProgramDescriptor desc;
+
+    // -----------------------------------------------------------------------
     // Circular buffers
+    // -----------------------------------------------------------------------
     constexpr uint32_t cb_scale_factor = 2;
 
-    // ROW_MAJOR: input_tensor_cb must hold NTPC tiles produced by tilize_block
-    // in a single shot (it's also reused after the sort to hold un-transposed
-    // sorted values), so size it for NTPC tiles instead of the 2-tile streaming
-    // double-buffer used in the TILE path.
     constexpr uint32_t input_tensor_cb_index = tt::CBIndex::c_0;
     {
         const uint32_t cb0_tiles = is_row_major ? number_of_tiles_per_core : cb_scale_factor;
-        const tt::tt_metal::CircularBufferConfig cfg =
-            tt::tt_metal::CircularBufferConfig(
-                cb0_tiles * input_tensor_tile_size, {{input_tensor_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(input_tensor_cb_index, input_tensor_tile_size);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, cfg);
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = cb0_tiles * input_tensor_tile_size,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(input_tensor_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = input_tensor_tile_size,
+            }}},
+        });
     }
 
     constexpr uint32_t index_tensor_cb_index = tt::CBIndex::c_1;
-    const tt::tt_metal::CircularBufferConfig index_tensor_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * index_tensor_tile_size, {{index_tensor_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t input_tensor_transposed_cb_index = tt::CBIndex::c_2;
-    const tt::tt_metal::CircularBufferConfig input_tensor_transposed_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            number_of_tiles_per_core * input_tensor_tile_size,
-            {{input_tensor_transposed_cb_index, input_tensor_cb_data_format}})
-            .set_page_size(input_tensor_transposed_cb_index, input_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, input_tensor_transposed_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = number_of_tiles_per_core * input_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(input_tensor_transposed_cb_index),
+            .data_format = input_tensor_cb_data_format,
+            .page_size = input_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_transposed_cb_index = tt::CBIndex::c_3;
-    const tt::tt_metal::CircularBufferConfig index_tensor_transposed_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            number_of_tiles_per_core * index_tensor_tile_size,
-            {{index_tensor_transposed_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_transposed_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_transposed_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = number_of_tiles_per_core * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_transposed_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t value_tensor_cb_index = tt::CBIndex::c_4;
-    const tt::tt_metal::CircularBufferConfig value_tensor_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * value_tensor_tile_size, {{value_tensor_cb_index, value_tensor_cb_data_format}})
-            .set_page_size(value_tensor_cb_index, value_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, value_tensor_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * value_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(value_tensor_cb_index),
+            .data_format = value_tensor_cb_data_format,
+            .page_size = value_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_output_cb_index = tt::CBIndex::c_5;
-    const tt::tt_metal::CircularBufferConfig index_tensor_output_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * index_tensor_tile_size, {{index_tensor_output_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_output_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_output_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_output_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t value_tensor_intermediate_cb_index = tt::CBIndex::c_6;
-    const tt::tt_metal::CircularBufferConfig value_tensor_intermediate_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * value_tensor_tile_size,
-            {{value_tensor_intermediate_cb_index, value_tensor_cb_data_format}})
-            .set_page_size(value_tensor_intermediate_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, value_tensor_intermediate_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * value_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(value_tensor_intermediate_cb_index),
+            .data_format = value_tensor_cb_data_format,
+            .page_size = value_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_intermediate_cb_index = tt::CBIndex::c_7;
-    const tt::tt_metal::CircularBufferConfig index_tensor_intermediate_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * index_tensor_tile_size,
-            {{index_tensor_intermediate_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_intermediate_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_intermediate_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_intermediate_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t value_tensor_peer_cb_index = tt::CBIndex::c_8;
-    const tt::tt_metal::CircularBufferConfig value_tensor_peer_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * value_tensor_tile_size, {{value_tensor_peer_cb_index, value_tensor_cb_data_format}})
-            .set_page_size(value_tensor_peer_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, value_tensor_peer_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * value_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(value_tensor_peer_cb_index),
+            .data_format = value_tensor_cb_data_format,
+            .page_size = value_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_peer_cb_index = tt::CBIndex::c_9;
-    const tt::tt_metal::CircularBufferConfig index_tensor_peer_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            cb_scale_factor * index_tensor_tile_size, {{index_tensor_peer_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_peer_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, index_tensor_peer_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = cb_scale_factor * index_tensor_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_peer_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t physical_core_lookup_table_cb_index = tt::CBIndex::c_10;
-    const tt::tt_metal::CircularBufferConfig physical_core_lookup_table_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            physical_core_lookup_table_tile_size,
-            {{physical_core_lookup_table_cb_index, physical_core_lookup_table_cb_data_format}})
-            .set_page_size(physical_core_lookup_table_cb_index, physical_core_lookup_table_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, physical_core_lookup_table_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = physical_core_lookup_table_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(physical_core_lookup_table_cb_index),
+            .data_format = physical_core_lookup_table_cb_data_format,
+            .page_size = physical_core_lookup_table_tile_size,
+        }}},
+    });
 
     constexpr uint32_t packer_unpacker_sync_cb_index = tt::CBIndex::c_11;
-    const tt::tt_metal::CircularBufferConfig packer_unpacker_sync_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            packer_unpacker_sync_tile_size, {{packer_unpacker_sync_cb_index, packer_unpacker_sync_cb_data_format}})
-            .set_page_size(packer_unpacker_sync_cb_index, packer_unpacker_sync_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, core_range, packer_unpacker_sync_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = packer_unpacker_sync_tile_size,
+        .core_ranges = core_range,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(packer_unpacker_sync_cb_index),
+            .data_format = packer_unpacker_sync_cb_data_format,
+            .page_size = packer_unpacker_sync_tile_size,
+        }}},
+    });
 
-    // ROW_MAJOR-only CBs (c_12, c_13, c_14, c_15).  Each core only owns a
-    // strip of `number_of_tiles_per_core * tile_width` elements per row, so
-    // the per-core RM CBs are sized for that slice (not the full row).
-    //
-    //   c_12 rm_input_cb                 – TILE_HEIGHT pages of W_value_slice_bytes
-    //   c_13 rm_value_output_cb          – TILE_HEIGHT pages of W_value_slice_bytes
-    //   c_14 rm_index_output_cb          – TILE_HEIGHT pages of W_index_slice_bytes
-    //   c_15 rm_post_sort_index_cb       – number_of_tiles_per_core index tiles,
-    //                                      PACK-only producer (mirrors single-core
-    //                                      design — see comment for c_10 there).
     constexpr uint32_t rm_input_cb_index = tt::CBIndex::c_12;
     constexpr uint32_t rm_value_output_cb_index = tt::CBIndex::c_13;
     constexpr uint32_t rm_index_output_cb_index = tt::CBIndex::c_14;
     constexpr uint32_t rm_post_sort_index_cb_index = tt::CBIndex::c_15;
     if (is_row_major) {
-        const tt::tt_metal::CircularBufferConfig rm_input_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                tt::constants::TILE_HEIGHT * W_value_slice_bytes, {{rm_input_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(rm_input_cb_index, W_value_slice_bytes);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_input_cfg);
-
-        const tt::tt_metal::CircularBufferConfig rm_value_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                tt::constants::TILE_HEIGHT * W_value_slice_bytes,
-                {{rm_value_output_cb_index, value_tensor_cb_data_format}})
-                .set_page_size(rm_value_output_cb_index, W_value_slice_bytes);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_value_cfg);
-
-        const tt::tt_metal::CircularBufferConfig rm_index_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                tt::constants::TILE_HEIGHT * W_index_slice_bytes,
-                {{rm_index_output_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_index_output_cb_index, W_index_slice_bytes);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_index_cfg);
-
-        const tt::tt_metal::CircularBufferConfig rm_post_sort_index_cfg =
-            tt::tt_metal::CircularBufferConfig(
-                number_of_tiles_per_core * index_tensor_tile_size,
-                {{rm_post_sort_index_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_post_sort_index_cb_index, index_tensor_tile_size);
-        tt::tt_metal::CreateCircularBuffer(program, core_range, rm_post_sort_index_cfg);
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = tt::constants::TILE_HEIGHT * W_value_slice_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_input_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = W_value_slice_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = tt::constants::TILE_HEIGHT * W_value_slice_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_value_output_cb_index),
+                .data_format = value_tensor_cb_data_format,
+                .page_size = W_value_slice_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = tt::constants::TILE_HEIGHT * W_index_slice_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_index_output_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = W_index_slice_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = number_of_tiles_per_core * index_tensor_tile_size,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_post_sort_index_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = index_tensor_tile_size,
+            }}},
+        });
     }
 
-    // Semaphores
-    const uint32_t semaphore_exchange_readers = CreateSemaphore(program, core_range, 0);
-    CreateSemaphore(program, core_range, 0);
-    const uint32_t semaphore_barrier = CreateSemaphore(program, core_range, 0);
+    // -----------------------------------------------------------------------
+    // Semaphores — IDs 0, 1, 2 (sequential, no other semaphores on these cores)
+    // -----------------------------------------------------------------------
+    constexpr uint32_t semaphore_exchange_readers = 0;
+    // semaphore ID 1 is unnamed (used internally by the cross-core exchange kernels)
+    constexpr uint32_t semaphore_barrier = 2;
+    desc.semaphores.push_back(SemaphoreDescriptor{.id = 0, .core_ranges = core_range, .initial_value = 0});
+    desc.semaphores.push_back(SemaphoreDescriptor{.id = 1, .core_ranges = core_range, .initial_value = 0});
+    desc.semaphores.push_back(SemaphoreDescriptor{.id = 2, .core_ranges = core_range, .initial_value = 0});
 
+    // -----------------------------------------------------------------------
     // Kernels
+    // -----------------------------------------------------------------------
     std::vector<uint32_t> reader_compile_time_args = {
         compute_with_storage_grid_size.x,
         compute_with_storage_grid_size.y,
@@ -745,15 +677,6 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
     TensorAccessorArgs(*input_buffer).append_to(reader_compile_time_args);
     TensorAccessorArgs(*index_buffer).append_to(reader_compile_time_args);
     TensorAccessorArgs(*physical_core_lookup_table_tensor_buffer).append_to(reader_compile_time_args);
-    const std::string reader_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/reader_cross_core_data_exchange.cpp";
-    tt::tt_metal::KernelHandle reader_kernel_id = tt::tt_metal::CreateKernel(
-        program, reader_kernel_path, core_range, tt::tt_metal::ReaderDataMovementConfig{reader_compile_time_args});
-    SetRuntimeArgs(
-        program,
-        reader_kernel_id,
-        core_range,
-        {input_buffer->address(), index_buffer->address(), physical_core_lookup_table_tensor_buffer->address()});
 
     std::vector<uint32_t> writer_compile_time_args = {
         compute_with_storage_grid_size.x,
@@ -773,11 +696,6 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
         W_value_slice_bytes,
     };
     TensorAccessorArgs(*value_buffer).append_to(writer_compile_time_args);
-    const std::string writer_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/writer_cross_core_data_exchange.cpp";
-    tt::tt_metal::KernelHandle writer_kernel_id = tt::tt_metal::CreateKernel(
-        program, writer_kernel_path, core_range, tt::tt_metal::WriterDataMovementConfig{writer_compile_time_args});
-    SetRuntimeArgs(program, writer_kernel_id, core_range, {value_buffer->address()});
 
     const std::vector<uint32_t> compute_compile_time_args = {
         compute_with_storage_grid_size.x,
@@ -804,71 +722,64 @@ SortProgramFactoryCrossCoreDataExchange::cached_program_t SortProgramFactoryCros
         rm_index_output_cb_index,
         rm_post_sort_index_cb_index,
     };
-    const std::string compute_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/compute/sort_cross_core_data_exchange.cpp";
-    std::vector<tt::tt_metal::UnpackToDestMode> unpack_to_dest_mode_vector(NUM_CIRCULAR_BUFFERS, tt::tt_metal::UnpackToDestMode::Default);
+
+    std::vector<UnpackToDestMode> unpack_to_dest_mode_vector(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::Default);
     if (input_tensor_cb_data_format == tt::DataFormat::Float32) {
-        unpack_to_dest_mode_vector[input_tensor_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[input_tensor_transposed_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[value_tensor_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[value_tensor_intermediate_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[value_tensor_peer_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_transposed_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[value_tensor_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[value_tensor_intermediate_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[value_tensor_peer_cb_index] = UnpackToDestMode::UnpackToDestFp32;
         if (is_row_major) {
-            unpack_to_dest_mode_vector[rm_input_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
+            unpack_to_dest_mode_vector[rm_input_cb_index] = UnpackToDestMode::UnpackToDestFp32;
         }
     }
-    tt::tt_metal::KernelHandle compute_kernel_id = tt::tt_metal::CreateKernel(
-        program,
-        compute_kernel_path,
-        core_range,
-        tt::tt_metal::ComputeConfig{
-            .fp32_dest_acc_en = is_32_bit_data,
-            .unpack_to_dest_mode = unpack_to_dest_mode_vector,
-            .compile_args = compute_compile_time_args});
 
-    return {std::move(program), {reader_kernel_id, compute_kernel_id, writer_kernel_id, core_range}};
-}
+    KernelDescriptor reader_desc;
+    reader_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/reader_cross_core_data_exchange.cpp";
+    reader_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    reader_desc.core_ranges = core_range;
+    reader_desc.compile_time_args = std::move(reader_compile_time_args);
+    reader_desc.config = ReaderConfigDescriptor{};
 
-void SortProgramFactoryCrossCoreDataExchange::override_runtime_arguments(
-    cached_program_t& cached_program,
-    const SortParams& /*attributes*/,
-    const SortInputs& tensor_args,
-    std::vector<Tensor>& output_tensors) {
-    auto* const input_tensor_buffer = tensor_args.input_tensor.buffer();
-    auto* const value_tensor_buffer = output_tensors.at(0).buffer();
-    auto* const index_tensor_buffer = output_tensors.at(1).buffer();
-    auto* const device = tensor_args.input_tensor.device();
+    KernelDescriptor writer_desc;
+    writer_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/writer_cross_core_data_exchange.cpp";
+    writer_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    writer_desc.core_ranges = core_range;
+    writer_desc.compile_time_args = std::move(writer_compile_time_args);
+    writer_desc.config = WriterConfigDescriptor{};
 
-    // Lookup tensor data with physical core coordinates
-    std::vector<uint32_t> physical_core_lookup_table_data;
-    for (const auto& core_range : cached_program.shared_variables.core_range_set.ranges()) {
-        for (const auto& core_coord : core_range) {
-            const auto physical_core = device->worker_core_from_logical_core(core_coord);
-            physical_core_lookup_table_data.emplace_back(physical_core.x);
-            physical_core_lookup_table_data.emplace_back(physical_core.y);
+    KernelDescriptor compute_desc;
+    compute_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/compute/sort_cross_core_data_exchange.cpp";
+    compute_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    compute_desc.core_ranges = core_range;
+    compute_desc.compile_time_args = compute_compile_time_args;
+    compute_desc.config = ComputeConfigDescriptor{
+        .fp32_dest_acc_en = is_32_bit_data,
+        .unpack_to_dest_mode = std::move(unpack_to_dest_mode_vector),
+    };
+
+    // Per-core runtime args (same for all cores in this factory)
+    for (const auto& range : core_range.ranges()) {
+        for (const auto& core : range) {
+            reader_desc.runtime_args.emplace_back(
+                core,
+                KernelDescriptor::CoreRuntimeArgs{
+                    input_buffer->address(),
+                    index_buffer->address(),
+                    physical_core_lookup_table_tensor_buffer->address()});
+            writer_desc.runtime_args.emplace_back(core, KernelDescriptor::CoreRuntimeArgs{value_buffer->address()});
         }
     }
-    const TensorSpec physical_core_lookup_table_spec(
-        ttnn::Shape{1, physical_core_lookup_table_data.size()},
-        TensorLayout{DataType::UINT32, PageConfig{Layout::ROW_MAJOR}, MemoryConfig()});
-    Tensor physical_core_lookup_table_tensor =
-        Tensor::from_vector(std::move(physical_core_lookup_table_data), physical_core_lookup_table_spec);
-    physical_core_lookup_table_tensor = physical_core_lookup_table_tensor.to_device(device);
 
-    // Update runtime args
-    for (const auto& core_range : cached_program.shared_variables.core_range_set.ranges()) {
-        for (const auto& core_coord : core_range) {
-            auto& reader_runtime_args =
-                GetRuntimeArgs(cached_program.program, cached_program.shared_variables.reader_kernel_id, core_coord);
-            reader_runtime_args[0] = input_tensor_buffer->address();
-            reader_runtime_args[1] = index_tensor_buffer->address();
-            reader_runtime_args[2] = physical_core_lookup_table_tensor.buffer()->address();
+    desc.kernels.push_back(std::move(reader_desc));
+    desc.kernels.push_back(std::move(writer_desc));
+    desc.kernels.push_back(std::move(compute_desc));
 
-            auto& writer_runtime_args =
-                GetRuntimeArgs(cached_program.program, cached_program.shared_variables.writer_kernel_id, core_coord);
-            writer_runtime_args[0] = value_tensor_buffer->address();
-        }  // core_coord loop
-    }  // core_range loop
+    return desc;
 }
 
 uint32_t SortProgramFactoryCrossCoreDataExchange::get_number_of_tiles_per_core(
@@ -880,9 +791,6 @@ uint32_t SortProgramFactoryCrossCoreDataExchange::get_number_of_tiles_per_core(
     TT_FATAL(total_number_of_cores != 0, "number of cores cannot be 0");
     switch (slicing_strategy) {
         case CrossCoreDataExchangeSortSlicingStrategy::USE_AS_MANY_CORES: {
-            // Minimum of 2 tiles per core is required because the LLK (Low-Level Kernel) needs at least two tiles per
-            // core to perform sorting operations. Maximum is capped at 128 tiles (power of 2) based on hardware memory
-            // constraints, ensuring that tiles can fit into a single core's available memory.
             constexpr uint32_t MIN_TILES_PER_CORE = 2;
             constexpr uint32_t MAX_TILES_PER_CORE = 128;
             const auto max_val = std::max(Wt / total_number_of_cores, MIN_TILES_PER_CORE);
@@ -909,17 +817,12 @@ uint32_t SortProgramFactoryCrossCoreDataExchange::rounddown_pow2(uint32_t n) {
 }
 
 // Single row - multi core
-SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleRowMultiCore::create(
+ProgramDescriptor SortProgramFactorySingleRowMultiCore::create_descriptor(
     const SortParams& attributes, const SortInputs& tensor_args, std::vector<Tensor>& output_tensors) {
-    // Program config
-    tt::tt_metal::Program program{};
-
     const tt::DataFormat input_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(tensor_args.input_tensor.dtype());
-    const tt::DataFormat value_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(output_tensors.at(0).dtype());
-    const tt::DataFormat index_tensor_cb_data_format =
-        tt::tt_metal::datatype_to_dataformat_converter(output_tensors.at(1).dtype());
+        datatype_to_dataformat_converter(tensor_args.input_tensor.dtype());
+    const tt::DataFormat value_tensor_cb_data_format = datatype_to_dataformat_converter(output_tensors.at(0).dtype());
+    const tt::DataFormat index_tensor_cb_data_format = datatype_to_dataformat_converter(output_tensors.at(1).dtype());
 
     const uint32_t input_tensor_tile_size = tile_size(input_tensor_cb_data_format);
     const uint32_t value_tensor_tile_size = tile_size(value_tensor_cb_data_format);
@@ -947,7 +850,7 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
     const uint32_t total_number_of_cores = compute_with_storage_grid_size.y * compute_with_storage_grid_size.x;
 
     const uint32_t total_work_units = Wt / 2;
-    const uint32_t number_of_available_cores = total_number_of_cores - 1;  // One core for coordinator
+    const uint32_t number_of_available_cores = total_number_of_cores - 1;
 
     const uint32_t all_core_utilization_loop_count = total_work_units / number_of_available_cores;
 
@@ -956,29 +859,6 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
 
     const uint32_t log2Wt = std::log2(Wt);
 
-    /**
-     * Calculates the core range based on the input tensor shape (Wt) and the total number of cores available
-     * in the device's compute grid (minus one reserved for coordinator). The core range determines which
-     * cores will be utilized for computation.
-     *
-     * The calculation works as follows:
-     * 1. The coordinator core is set to the last core in the compute grid.
-     *
-     * 2. If the width (Wt) of the input tensor is greater than or equal to the total number of available cores,
-     *    all cores in the compute grid are utilized. The core range is set to cover the entire grid.
-     *
-     * 3. If Wt is smaller than the total number of cores:
-     *    - The number of rows (`core_grid_calculated_rows_number`) and columns
-     * (`core_grid_calculated_columns_number`) required to cover Wt are calculated based on the grid dimensions.
-     *    - If both rows and columns are zero, only a single core is used.
-     *    - If only rows are zero, the core range is set to cover the required number of columns in the first
-     * row.
-     *    - Otherwise, the core range is set to cover the required rows, and if there are remaining columns,
-     *      an additional range is added to cover those columns in the next row.
-     *
-     * The resulting core range is represented as a `CoreRangeSet`, which may consist of one or more `CoreRange`
-     * objects depending on the configuration.
-     */
     CoreCoord coordinator_core = {compute_with_storage_grid_size.x - 1, compute_with_storage_grid_size.y - 1};
     CoreRangeSet core_range;
     if (all_core_utilization_loop_count > 0) {
@@ -1011,59 +891,80 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
 
     constexpr uint32_t buffer_scale_factor = 2;
 
+    ProgramDescriptor desc;
+
+    // -----------------------------------------------------------------------
+    // Circular buffers (c_0–c_5 on all cores, c_6–c_9 RM-only)
+    // -----------------------------------------------------------------------
     constexpr uint32_t input_tensor_cb_index = tt::CBIndex::c_0;
-    const tt::tt_metal::CircularBufferConfig input_tensor_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            buffer_scale_factor * input_tensor_tile_size, {{input_tensor_cb_index, input_tensor_cb_data_format}})
-            .set_page_size(input_tensor_cb_index, input_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, all_core_set, input_tensor_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = buffer_scale_factor * input_tensor_tile_size,
+        .core_ranges = all_core_set,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(input_tensor_cb_index),
+            .data_format = input_tensor_cb_data_format,
+            .page_size = input_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_cb_index = tt::CBIndex::c_1;
-    const tt::tt_metal::CircularBufferConfig index_tensor_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            buffer_scale_factor * index_tensor_tile_size, {{index_tensor_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, all_core_set, index_tensor_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = buffer_scale_factor * index_tensor_tile_size,
+        .core_ranges = all_core_set,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t input_tensor_transposed_cb_index = tt::CBIndex::c_2;
-    const tt::tt_metal::CircularBufferConfig input_tensor_transposed_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            buffer_scale_factor * input_tensor_tile_size,
-            {{input_tensor_transposed_cb_index, input_tensor_cb_data_format}})
-            .set_page_size(input_tensor_transposed_cb_index, input_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, all_core_set, input_tensor_transposed_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = buffer_scale_factor * input_tensor_tile_size,
+        .core_ranges = all_core_set,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(input_tensor_transposed_cb_index),
+            .data_format = input_tensor_cb_data_format,
+            .page_size = input_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_transposed_cb_index = tt::CBIndex::c_3;
-    const tt::tt_metal::CircularBufferConfig index_tensor_transposed_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            buffer_scale_factor * index_tensor_tile_size,
-            {{index_tensor_transposed_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_transposed_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, all_core_set, index_tensor_transposed_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = buffer_scale_factor * index_tensor_tile_size,
+        .core_ranges = all_core_set,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_transposed_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t input_tensor_output_cb_index = tt::CBIndex::c_4;
-    const tt::tt_metal::CircularBufferConfig input_tensor_output_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            buffer_scale_factor * value_tensor_tile_size, {{input_tensor_output_cb_index, value_tensor_cb_data_format}})
-            .set_page_size(input_tensor_output_cb_index, value_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, all_core_set, input_tensor_output_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = buffer_scale_factor * value_tensor_tile_size,
+        .core_ranges = all_core_set,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(input_tensor_output_cb_index),
+            .data_format = value_tensor_cb_data_format,
+            .page_size = value_tensor_tile_size,
+        }}},
+    });
 
     constexpr uint32_t index_tensor_output_cb_index = tt::CBIndex::c_5;
-    const tt::tt_metal::CircularBufferConfig index_tensor_output_cb_config =
-        tt::tt_metal::CircularBufferConfig(
-            buffer_scale_factor * index_tensor_tile_size, {{index_tensor_output_cb_index, index_tensor_cb_data_format}})
-            .set_page_size(index_tensor_output_cb_index, index_tensor_tile_size);
-    tt::tt_metal::CreateCircularBuffer(program, all_core_set, index_tensor_output_cb_config);
+    desc.cbs.push_back(CBDescriptor{
+        .total_size = buffer_scale_factor * index_tensor_tile_size,
+        .core_ranges = all_core_set,
+        .format_descriptors = {{CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(index_tensor_output_cb_index),
+            .data_format = index_tensor_cb_data_format,
+            .page_size = index_tensor_tile_size,
+        }}},
+    });
 
     const uint32_t index_element_size = tt::datum_size(index_tensor_cb_data_format);
     const uint32_t W_index_bytes = tile_width * index_element_size;
 
-    // Coordinator (c_6, c_7): single-page bounce buffers used when copying RM value
-    // rows and generating RM index rows during the initial data-preparation pass.
-    //
-    // Workers (c_6-c_9): hold one pair of RM tile-block rows (2 tiles x TILE_HEIGHT
-    // rows each) produced by the reader and consumed by the compute kernel (tilize ->
-    // sort -> untilize), and the corresponding output rows consumed by the writer.
     constexpr uint32_t rm_coord_value_row_cb_index = tt::CBIndex::c_6;
     constexpr uint32_t rm_coord_index_row_cb_index = tt::CBIndex::c_7;
     constexpr uint32_t rm_worker_input_value_cb_index = tt::CBIndex::c_6;
@@ -1072,52 +973,79 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
     constexpr uint32_t rm_worker_output_index_cb_index = tt::CBIndex::c_9;
     if (is_row_major) {
         const CoreRangeSet coordinator_core_set{CoreRange(coordinator_core)};
-
-        tt::tt_metal::CreateCircularBuffer(
-            program,
-            coordinator_core_set,
-            tt::tt_metal::CircularBufferConfig(
-                W_tile_bytes, {{rm_coord_value_row_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(rm_coord_value_row_cb_index, W_tile_bytes));
-
-        tt::tt_metal::CreateCircularBuffer(
-            program,
-            coordinator_core_set,
-            tt::tt_metal::CircularBufferConfig(
-                W_index_bytes, {{rm_coord_index_row_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_coord_index_row_cb_index, W_index_bytes));
-
         constexpr uint32_t TILE_H = tt::constants::TILE_HEIGHT;
-        tt::tt_metal::CreateCircularBuffer(
-            program,
-            core_range,
-            tt::tt_metal::CircularBufferConfig(
-                2 * TILE_H * W_tile_bytes, {{rm_worker_input_value_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(rm_worker_input_value_cb_index, W_tile_bytes));
-        tt::tt_metal::CreateCircularBuffer(
-            program,
-            core_range,
-            tt::tt_metal::CircularBufferConfig(
-                2 * TILE_H * W_index_bytes, {{rm_worker_input_index_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_worker_input_index_cb_index, W_index_bytes));
-        tt::tt_metal::CreateCircularBuffer(
-            program,
-            core_range,
-            tt::tt_metal::CircularBufferConfig(
-                2 * TILE_H * W_tile_bytes, {{rm_worker_output_value_cb_index, input_tensor_cb_data_format}})
-                .set_page_size(rm_worker_output_value_cb_index, W_tile_bytes));
-        tt::tt_metal::CreateCircularBuffer(
-            program,
-            core_range,
-            tt::tt_metal::CircularBufferConfig(
-                2 * TILE_H * W_index_bytes, {{rm_worker_output_index_cb_index, index_tensor_cb_data_format}})
-                .set_page_size(rm_worker_output_index_cb_index, W_index_bytes));
+
+        // Coordinator bounce buffers (c_6, c_7) — single-page width
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = W_tile_bytes,
+            .core_ranges = coordinator_core_set,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_coord_value_row_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = W_tile_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = W_index_bytes,
+            .core_ranges = coordinator_core_set,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_coord_index_row_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = W_index_bytes,
+            }}},
+        });
+
+        // Worker RM CBs (c_6, c_7, c_8, c_9) — 2 tile-block rows each
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = 2 * TILE_H * W_tile_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_worker_input_value_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = W_tile_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = 2 * TILE_H * W_index_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_worker_input_index_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = W_index_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = 2 * TILE_H * W_tile_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_worker_output_value_cb_index),
+                .data_format = input_tensor_cb_data_format,
+                .page_size = W_tile_bytes,
+            }}},
+        });
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = 2 * TILE_H * W_index_bytes,
+            .core_ranges = core_range,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(rm_worker_output_index_cb_index),
+                .data_format = index_tensor_cb_data_format,
+                .page_size = W_index_bytes,
+            }}},
+        });
     }
 
-    const uint32_t coordinator_to_cores_semaphore_id = CreateSemaphore(program, all_core_set, 0);
-    const uint32_t cores_to_coordinator_semaphore_id = CreateSemaphore(program, all_core_set, 0);
-    const auto coordinator_core_physical_coord = device->worker_core_from_logical_core(coordinator_core);
+    // -----------------------------------------------------------------------
+    // Semaphores — IDs 0 and 1 on all cores
+    // -----------------------------------------------------------------------
+    constexpr uint32_t coordinator_to_cores_semaphore_id = 0;
+    constexpr uint32_t cores_to_coordinator_semaphore_id = 1;
+    desc.semaphores.push_back(SemaphoreDescriptor{.id = 0, .core_ranges = all_core_set, .initial_value = 0});
+    desc.semaphores.push_back(SemaphoreDescriptor{.id = 1, .core_ranges = all_core_set, .initial_value = 0});
 
+    // -----------------------------------------------------------------------
+    // Kernels
+    // -----------------------------------------------------------------------
+    const auto coordinator_core_physical_coord = device->worker_core_from_logical_core(coordinator_core);
     const auto start_core_logical = core_range.ranges()[0].start_coord;
     const auto start_core_physical_coord = device->worker_core_from_logical_core(start_core_logical);
     const auto end_core_physical_coord = device->worker_core_from_logical_core(coordinator_core);
@@ -1141,28 +1069,6 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
     coordinator_compile_time_args.push_back(W_index_bytes);
     coordinator_compile_time_args.push_back(tile_width);
 
-    const std::string coordinator_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/coordinator_single_row_multi_core.cpp";
-    tt::tt_metal::KernelHandle coordinator_kernel_id = tt::tt_metal::CreateKernel(
-        program,
-        coordinator_kernel_path,
-        coordinator_core,
-        tt::tt_metal::ReaderDataMovementConfig{coordinator_compile_time_args});
-    SetRuntimeArgs(
-        program,
-        coordinator_kernel_id,
-        coordinator_core,
-        {start_core_physical_coord.x,
-         start_core_physical_coord.y,
-         end_core_physical_coord.x,
-         end_core_physical_coord.y,
-         coordinator_to_cores_semaphore_id,
-         cores_to_coordinator_semaphore_id,
-         core_range.num_cores(),
-         input_buffer->address(),
-         value_buffer->address(),
-         index_buffer->address()});
-
     std::vector<uint32_t> reader_compile_time_args = {
         input_tensor_cb_index,
         index_tensor_cb_index,
@@ -1174,26 +1080,11 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
         number_of_available_cores};
     TensorAccessorArgs(*value_buffer).append_to(reader_compile_time_args);
     TensorAccessorArgs(*index_buffer).append_to(reader_compile_time_args);
-    // ROW_MAJOR args for reader (appended after TensorAccessorArgs).
     reader_compile_time_args.push_back(static_cast<uint32_t>(is_row_major));
     reader_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_input_value_cb_index));
     reader_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_input_index_cb_index));
     reader_compile_time_args.push_back(W_tile_bytes);
     reader_compile_time_args.push_back(W_index_bytes);
-    const std::string reader_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/reader_single_row_multi_core.cpp";
-    tt::tt_metal::KernelHandle reader_kernel_id = tt::tt_metal::CreateKernel(
-        program, reader_kernel_path, core_range, tt::tt_metal::ReaderDataMovementConfig{reader_compile_time_args});
-    SetRuntimeArgs(
-        program,
-        reader_kernel_id,
-        core_range,
-        {value_buffer->address(),
-         index_buffer->address(),
-         coordinator_core_physical_coord.x,
-         coordinator_core_physical_coord.y,
-         coordinator_to_cores_semaphore_id,
-         cores_to_coordinator_semaphore_id});
 
     std::vector<uint32_t> writer_compile_time_args = {
         input_tensor_output_cb_index,
@@ -1206,26 +1097,11 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
         number_of_available_cores};
     TensorAccessorArgs(*value_buffer).append_to(writer_compile_time_args);
     TensorAccessorArgs(*index_buffer).append_to(writer_compile_time_args);
-    // ROW_MAJOR args for writer.
     writer_compile_time_args.push_back(static_cast<uint32_t>(is_row_major));
     writer_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_output_value_cb_index));
     writer_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_output_index_cb_index));
     writer_compile_time_args.push_back(W_tile_bytes);
     writer_compile_time_args.push_back(W_index_bytes);
-    const std::string writer_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/writer_single_row_multi_core.cpp";
-    tt::tt_metal::KernelHandle writer_kernel_id = tt::tt_metal::CreateKernel(
-        program, writer_kernel_path, core_range, tt::tt_metal::WriterDataMovementConfig{writer_compile_time_args});
-    SetRuntimeArgs(
-        program,
-        writer_kernel_id,
-        core_range,
-        {value_buffer->address(),
-         index_buffer->address(),
-         coordinator_core_physical_coord.x,
-         coordinator_core_physical_coord.y,
-         coordinator_to_cores_semaphore_id,
-         cores_to_coordinator_semaphore_id});
 
     std::vector<uint32_t> compute_compile_time_args = {
         input_tensor_cb_index,
@@ -1242,65 +1118,102 @@ SortProgramFactorySingleRowMultiCore::cached_program_t SortProgramFactorySingleR
         static_cast<uint32_t>(attributes.descending),
         static_cast<uint32_t>(attributes.stable),
         log2Wt};
-    // ROW_MAJOR args for compute.
     compute_compile_time_args.push_back(static_cast<uint32_t>(is_row_major));
     compute_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_input_value_cb_index));
     compute_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_input_index_cb_index));
     compute_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_output_value_cb_index));
     compute_compile_time_args.push_back(static_cast<uint32_t>(rm_worker_output_index_cb_index));
-    const std::string compute_kernel_path =
-        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/compute/sort_single_row_multi_core.cpp";
-    std::vector<tt::tt_metal::UnpackToDestMode> unpack_to_dest_mode_vector(NUM_CIRCULAR_BUFFERS, tt::tt_metal::UnpackToDestMode::Default);
+
+    std::vector<UnpackToDestMode> unpack_to_dest_mode_vector(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::Default);
     if (input_tensor_cb_data_format == tt::DataFormat::Float32) {
-        unpack_to_dest_mode_vector[input_tensor_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[input_tensor_transposed_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        unpack_to_dest_mode_vector[input_tensor_output_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
-        // RM input value CB also holds FP32 data before tilize.
-        unpack_to_dest_mode_vector[rm_worker_input_value_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_transposed_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[input_tensor_output_cb_index] = UnpackToDestMode::UnpackToDestFp32;
+        unpack_to_dest_mode_vector[rm_worker_input_value_cb_index] = UnpackToDestMode::UnpackToDestFp32;
     }
-    tt::tt_metal::KernelHandle compute_kernel_id = tt::tt_metal::CreateKernel(
-        program,
-        compute_kernel_path,
-        core_range,
-        tt::tt_metal::ComputeConfig{
-            .fp32_dest_acc_en = is_32_bit_data,
-            .unpack_to_dest_mode = unpack_to_dest_mode_vector,
-            .compile_args = compute_compile_time_args});
 
-    return {
-        std::move(program),
-        {coordinator_kernel_id, reader_kernel_id, compute_kernel_id, writer_kernel_id, coordinator_core, core_range}};
+    // Coordinator kernel (single core)
+    KernelDescriptor coordinator_desc;
+    coordinator_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/coordinator_single_row_multi_core.cpp";
+    coordinator_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    coordinator_desc.core_ranges = CoreRangeSet{CoreRange(coordinator_core)};
+    coordinator_desc.compile_time_args = std::move(coordinator_compile_time_args);
+    coordinator_desc.config = ReaderConfigDescriptor{};
+    coordinator_desc.runtime_args.emplace_back(
+        coordinator_core,
+        KernelDescriptor::CoreRuntimeArgs{
+            start_core_physical_coord.x,
+            start_core_physical_coord.y,
+            end_core_physical_coord.x,
+            end_core_physical_coord.y,
+            coordinator_to_cores_semaphore_id,
+            cores_to_coordinator_semaphore_id,
+            core_range.num_cores(),
+            input_buffer->address(),
+            value_buffer->address(),
+            index_buffer->address()});
+
+    // Reader kernel (worker cores)
+    KernelDescriptor reader_desc;
+    reader_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/reader_single_row_multi_core.cpp";
+    reader_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    reader_desc.core_ranges = core_range;
+    reader_desc.compile_time_args = std::move(reader_compile_time_args);
+    reader_desc.config = ReaderConfigDescriptor{};
+
+    // Writer kernel (worker cores)
+    KernelDescriptor writer_desc;
+    writer_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/dataflow/writer_single_row_multi_core.cpp";
+    writer_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    writer_desc.core_ranges = core_range;
+    writer_desc.compile_time_args = std::move(writer_compile_time_args);
+    writer_desc.config = WriterConfigDescriptor{};
+
+    // Compute kernel (worker cores)
+    KernelDescriptor compute_desc;
+    compute_desc.kernel_source =
+        "ttnn/cpp/ttnn/operations/data_movement/sort/device/kernels/compute/sort_single_row_multi_core.cpp";
+    compute_desc.source_type = KernelDescriptor::SourceType::FILE_PATH;
+    compute_desc.core_ranges = core_range;
+    compute_desc.compile_time_args = std::move(compute_compile_time_args);
+    compute_desc.config = ComputeConfigDescriptor{
+        .fp32_dest_acc_en = is_32_bit_data,
+        .unpack_to_dest_mode = std::move(unpack_to_dest_mode_vector),
+    };
+
+    // Per-core runtime args for reader, writer (same args for all worker cores)
+    for (const auto& range : core_range.ranges()) {
+        for (const auto& core : range) {
+            reader_desc.runtime_args.emplace_back(
+                core,
+                KernelDescriptor::CoreRuntimeArgs{
+                    value_buffer->address(),
+                    index_buffer->address(),
+                    coordinator_core_physical_coord.x,
+                    coordinator_core_physical_coord.y,
+                    coordinator_to_cores_semaphore_id,
+                    cores_to_coordinator_semaphore_id});
+            writer_desc.runtime_args.emplace_back(
+                core,
+                KernelDescriptor::CoreRuntimeArgs{
+                    value_buffer->address(),
+                    index_buffer->address(),
+                    coordinator_core_physical_coord.x,
+                    coordinator_core_physical_coord.y,
+                    coordinator_to_cores_semaphore_id,
+                    cores_to_coordinator_semaphore_id});
+        }
+    }
+
+    desc.kernels.push_back(std::move(coordinator_desc));
+    desc.kernels.push_back(std::move(reader_desc));
+    desc.kernels.push_back(std::move(writer_desc));
+    desc.kernels.push_back(std::move(compute_desc));
+
+    return desc;
 }
 
-void SortProgramFactorySingleRowMultiCore::override_runtime_arguments(
-    cached_program_t& cached_program,
-    const SortParams& /*attributes*/,
-    const SortInputs& tensor_args,
-    std::vector<Tensor>& output_tensors) {
-    auto* const input_tensor_buffer = tensor_args.input_tensor.buffer();
-    auto* const value_tensor_buffer = output_tensors.at(0).buffer();
-    auto* const index_tensor_buffer = output_tensors.at(1).buffer();
-
-    auto& coordinator_core_runtime_args = GetRuntimeArgs(
-        cached_program.program,
-        cached_program.shared_variables.coordinator_kernel_id,
-        cached_program.shared_variables.coordinator_core);
-    coordinator_core_runtime_args[7] = input_tensor_buffer->address();
-    coordinator_core_runtime_args[8] = value_tensor_buffer->address();
-    coordinator_core_runtime_args[9] = index_tensor_buffer->address();
-
-    for (const auto& core_range : cached_program.shared_variables.worker_core_range.ranges()) {
-        for (const auto& core : core_range) {
-            auto& reader_runtime_args =
-                GetRuntimeArgs(cached_program.program, cached_program.shared_variables.reader_kernel_id, core);
-            reader_runtime_args[0] = value_tensor_buffer->address();
-            reader_runtime_args[1] = index_tensor_buffer->address();
-
-            auto& writer_runtime_args =
-                GetRuntimeArgs(cached_program.program, cached_program.shared_variables.writer_kernel_id, core);
-            writer_runtime_args[0] = value_tensor_buffer->address();
-            writer_runtime_args[1] = index_tensor_buffer->address();
-        }  // core loop
-    }  // core_range loop
-}
 }  // namespace ttnn::prim
