@@ -102,7 +102,6 @@ class TtDetectionTransformerDecoder:
                 updated_z = tmp[..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])  # shape (..., 1)
 
                 new_reference_points = ttnn.concat([updated_xy, updated_z], dim=-1, memory_config=ttnn.L1_MEMORY_CONFIG)
-                ttnn.deallocate(tmp)
                 new_reference_points = ttnn.sigmoid(new_reference_points, memory_config=ttnn.L1_MEMORY_CONFIG)
 
                 reference_points = new_reference_points

@@ -518,12 +518,14 @@ class TtPansegformerHead(nn.Module):
             if reference.shape[-1] == 4:
                 tmp += reference
             else:
-                tmp = ttnn.to_torch(tmp)
-                reference = ttnn.to_torch(reference)
+                # Replaced the to_torch/from_torch round-trip with pure ttnn
+                # slice + add + concat. Same fix as ttnn_decoder.py for the
+                # reg_branches reference-update.
                 assert reference.shape[-1] == 2
-                tmp[..., :2] += reference
-                reference = ttnn.from_torch(reference, device=self.device, layout=ttnn.TILE_LAYOUT)
-                tmp = ttnn.from_torch(tmp, device=self.device, layout=ttnn.TILE_LAYOUT)
+                tmp_first2 = tmp[..., :2]
+                tmp_rest = tmp[..., 2:]
+                tmp_first2 = ttnn.add(tmp_first2, reference)
+                tmp = ttnn.concat([tmp_first2, tmp_rest], dim=-1)
 
             outputs_coord = ttnn.sigmoid(tmp)
             outputs_classes.append(outputs_class)

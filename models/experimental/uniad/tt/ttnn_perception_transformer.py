@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+import torch
+from torchvision.transforms.functional import rotate
 
 import ttnn
 
 from models.experimental.uniad.tt.ttnn_encoder import TtBEVFormerEncoder
 from models.experimental.uniad.tt.ttnn_decoder import TtDetectionTransformerDecoder
-from torchvision.transforms.functional import rotate
 
 
 class TtPerceptionTransformer:
@@ -103,16 +104,27 @@ class TtPerceptionTransformer:
         shift = ttnn.permute(shift, (1, 0))  # xy, bs -> bs, xy
 
         if prev_bev is not None:
-            assert False, "In our case prev_bev is None, So ttnn for the below is not supported"
+            # Bring prev_bev into the (bev_h*bev_w, bs, C) layout if it isn't already.
             if prev_bev.shape[1] == bev_h * bev_w:
                 prev_bev = ttnn.permute(prev_bev, (1, 0, 2))
             if self.rotate_prev_bev:
+                # Rotation by can_bus angle: TTNN has no native rotation op and
+                # the tensor is small (bev_h × bev_w × C, batch-1), so we do the
+                # rotation on host with torchvision and reupload.
+                prev_bev_dtype = prev_bev.dtype
+                prev_bev_torch = ttnn.to_torch(prev_bev).to(torch.float32)
                 for i in range(bs):
                     rotation_angle = img_metas[i]["can_bus"][-1]
-                    tmp_prev_bev = prev_bev[:, i].reshape(bev_h, bev_w, -1).permute(2, 0, 1)
+                    tmp_prev_bev = prev_bev_torch[:, i].reshape(bev_h, bev_w, -1).permute(2, 0, 1)
                     tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle, center=self.rotate_center)
                     tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(bev_h * bev_w, 1, -1)
-                    prev_bev[:, i] = tmp_prev_bev[:, 0]
+                    prev_bev_torch[:, i] = tmp_prev_bev[:, 0]
+                prev_bev = ttnn.from_torch(
+                    prev_bev_torch,
+                    device=self.device,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=prev_bev_dtype,
+                )
 
         # add can bus signals
         can_bus = ttnn.Tensor(

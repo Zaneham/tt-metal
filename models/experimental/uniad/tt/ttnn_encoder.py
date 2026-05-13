@@ -253,6 +253,105 @@ class TtBEVFormerEncoder:
             hybird_ref_2d = ttnn.stack([ref_2d, ref_2d], 1)
             hybird_ref_2d = ttnn.reshape(hybird_ref_2d, (bs * 2, len_bev, num_bev_level, 2))
         reference_points_cam = ttnn.to_torch(reference_points_cam)
+
+        # Pre-compute per-camera valid-query indexes and the count tensor
+        # once, then reuse across all 6 encoder layers. The original code
+        # recomputed both inside every spatial_cross_attention call (5
+        # redundant copies per inference). bev_mask is identical across
+        # layers because it's a function of (lidar2img, ref_3d, image
+        # shape) only — all constants within one forward.
+        _precomputed_indexes = []
+        for i, mask_per_img in enumerate(bev_mask):
+            idx = ttnn.sum(mask_per_img[0], -1)
+            idx = ttnn.to_torch(idx).nonzero().squeeze(-1).to(torch.long)
+            _precomputed_indexes.append(idx)
+
+        # Also build per-camera scatter-add index tensors on the device, so
+        # spatial_cross_attention can run the result-accumulation step
+        # (slots[j, idx] += queries[j, i, :len(idx)]) as ttnn.scatter_add
+        # instead of pulling the full queries tensor to host every layer.
+        # Each entry is shape [bs, len_i, embed_dims] with the same index
+        # value broadcast along embed_dims.
+        _precomputed_scatter_indexes = []
+        _bs_for_scatter = bev_query.shape[0]
+        _embed_dims_for_scatter = bev_query.shape[2]
+        for idx in _precomputed_indexes:
+            len_i = idx.shape[0]
+            expanded = idx.view(1, len_i, 1).expand(_bs_for_scatter, len_i, _embed_dims_for_scatter).contiguous()
+            expanded_ttnn = ttnn.from_torch(
+                expanded.to(torch.int32),
+                dtype=ttnn.int32,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                device=self.device,
+            )
+            _precomputed_scatter_indexes.append(expanded_ttnn)
+
+        # Replace the per-layer host rebatching loop in spatial_cross_attention
+        # with a single device-side ttnn.gather. We pad each per-camera index
+        # list to max_len with idx[0] (padded outputs are produced but ignored
+        # downstream by scatter_add, which only writes the first len_i
+        # positions), then concatenate across cameras so a single gather call
+        # replaces the per-layer host loop. One gather instead of six avoids
+        # the per-camera dispatch overhead.
+        _precomputed_max_len = max(idx.shape[0] for idx in _precomputed_indexes)
+        _num_cams_for_gather = len(_precomputed_indexes)
+        _padded_idx_per_cam = []
+        for idx in _precomputed_indexes:
+            len_i = idx.shape[0]
+            if len_i == 0:
+                padded_idx = torch.zeros(_precomputed_max_len, dtype=torch.long)
+            elif len_i < _precomputed_max_len:
+                pad = idx[0].expand(_precomputed_max_len - len_i)
+                padded_idx = torch.cat([idx, pad], dim=0)
+            else:
+                padded_idx = idx
+            _padded_idx_per_cam.append(padded_idx)
+        # (num_cams * max_len,) → (bs, num_cams * max_len, embed_dims)
+        _concat_idx = torch.cat(_padded_idx_per_cam, dim=0)
+        _gather_idx_concat = (
+            _concat_idx.view(1, -1, 1)
+            .expand(_bs_for_scatter, _num_cams_for_gather * _precomputed_max_len, _embed_dims_for_scatter)
+            .contiguous()
+        )
+        _precomputed_gather_index_concat = ttnn.from_torch(
+            _gather_idx_concat.to(torch.int32),
+            dtype=ttnn.uint32,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
+
+        # reference_points_cam is constant across all 6 encoder layers (it's a
+        # function of img_metas only), so build the rebatched tensor once on
+        # host using fast torch advanced indexing, then upload once. Saves a
+        # per-layer host roundtrip.
+        _num_cams_for_rebatch = reference_points_cam.shape[0]
+        _D_for_rebatch = reference_points_cam.shape[3]
+        _precomputed_ref_rebatch = torch.zeros(
+            _bs_for_scatter,
+            _num_cams_for_rebatch,
+            _precomputed_max_len,
+            _D_for_rebatch,
+            2,
+            dtype=reference_points_cam.dtype,
+        )
+        for j in range(_bs_for_scatter):
+            for i in range(_num_cams_for_rebatch):
+                idx_i = _precomputed_indexes[i]
+                if idx_i.shape[0] > 0:
+                    _precomputed_ref_rebatch[j, i, : idx_i.shape[0]] = reference_points_cam[i, j, idx_i]
+        _precomputed_ref_rebatch_ttnn = ttnn.from_torch(
+            _precomputed_ref_rebatch,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=self.device,
+        )
+
+        _precomputed_count = ttnn.sum(bev_mask, -1) > 0
+        _precomputed_count = ttnn.permute(_precomputed_count, (1, 2, 0))
+        _precomputed_count = ttnn.sum(_precomputed_count, -1)
+        _precomputed_count = ttnn.clamp(_precomputed_count, min=1.0)
+        _precomputed_count = ttnn.unsqueeze(_precomputed_count, -1)
+
         for lid, layer in enumerate(self.layers):
             output = layer(
                 bev_query,
@@ -268,6 +367,12 @@ class TtBEVFormerEncoder:
                 level_start_index=level_start_index,
                 reference_points_cam=reference_points_cam,
                 bev_mask=bev_mask,
+                _precomputed_indexes=_precomputed_indexes,
+                _precomputed_scatter_indexes=_precomputed_scatter_indexes,
+                _precomputed_gather_index_concat=_precomputed_gather_index_concat,
+                _precomputed_ref_rebatch=_precomputed_ref_rebatch_ttnn,
+                _precomputed_max_len=_precomputed_max_len,
+                _precomputed_count=_precomputed_count,
                 prev_bev=prev_bev,
                 **kwargs,
             )
@@ -387,12 +492,21 @@ class TtBEVFormerLayer:
                 f"operation_order {self.num_attn}"
             )
 
+        # Hoist self_attn spatial_shapes constant out of the per-layer loop
+        # — same (bev_h, bev_w) value every iteration; rebuilding it via
+        # from_torch on every self_attn was 1 host->device transition per
+        # layer × 6 layers.
+        if not hasattr(self, "_self_attn_spatial_shapes_cache"):
+            self._self_attn_spatial_shapes_cache = None
+        if self._self_attn_spatial_shapes_cache is None:
+            _sh = torch.tensor([[bev_h, bev_w]])
+            self._self_attn_spatial_shapes_cache = ttnn.from_torch(
+                _sh, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+            )
+        spatial_shapes_1 = self._self_attn_spatial_shapes_cache
+
         for layer in self.operation_order:
             if layer == "self_attn":
-                spatial_shapes_1 = torch.tensor([[bev_h, bev_w]])
-                spatial_shapes_1 = ttnn.from_torch(
-                    spatial_shapes_1, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
-                )
                 query = self.attentions[attn_index](
                     query,
                     prev_bev,
@@ -417,8 +531,6 @@ class TtBEVFormerLayer:
                     weight=self.params.norms[f"norm{norm_index}"].weight,
                     bias=self.params.norms[f"norm{norm_index}"].bias,
                 )
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].weight)
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].bias)
                 norm_index += 1
 
             # spatial cross attention

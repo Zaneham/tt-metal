@@ -38,6 +38,8 @@ class TtTemporalSelfAttention:
         self.num_heads = num_heads
         self.num_points = num_points
         self.num_bev_queue = num_bev_queue
+        # Cached Python ints for spatial shapes — see TtCustomMSDeformableAttention.
+        self._spatial_shapes_list_cache = None
 
     def __call__(
         self,
@@ -90,8 +92,6 @@ class TtTemporalSelfAttention:
         )
 
         attention_weights = ttnn.linear(query, params.attention_weights.weight, bias=params.attention_weights.bias)
-        ttnn.deallocate(params.attention_weights.weight)
-        ttnn.deallocate(params.attention_weights.bias)
         ttnn.deallocate(query)
         attention_weights = ttnn.reshape(
             attention_weights, (bs, num_query, self.num_heads, self.num_bev_queue, self.num_levels * self.num_points)
@@ -118,12 +118,12 @@ class TtTemporalSelfAttention:
             offset_normalizer_xy = ttnn.reshape(
                 offset_normalizer, (1, 1, 1, offset_normalizer.shape[0], 1, offset_normalizer.shape[1])
             )
+            # Replaced the to_torch / from_torch round-trip with pure ttnn.divide.
+            # The original code pulled both tensors to host just to do an
+            # element-wise division — that's a trace-blocking host read.
             sampling_offsets = ttnn.to_layout(sampling_offsets, ttnn.TILE_LAYOUT)
             offset_normalizer_xy = ttnn.to_layout(offset_normalizer_xy, ttnn.TILE_LAYOUT)
-            sampling_offsets = ttnn.to_torch(sampling_offsets)
-            offset_normalizer_xy = ttnn.to_torch(offset_normalizer_xy)
-            sampling_locations = sampling_offsets / offset_normalizer_xy
-            sampling_locations = ttnn.from_torch(sampling_locations, device=self.device, dtype=ttnn.bfloat16)
+            sampling_locations = ttnn.divide(sampling_offsets, offset_normalizer_xy)
             sampling_locations = reference_xy + sampling_locations
 
         elif reference_points.shape[-1] == 4:
@@ -139,14 +139,23 @@ class TtTemporalSelfAttention:
                 f"Last dim of reference_points must be 2 or 4, but got {reference_points.shape[-1]} instead."
             )
 
+        # Cache spatial_shapes as Python ints once (host read happens during
+        # warm-up, not under trace capture).
+        if self._spatial_shapes_list_cache is None:
+            num_levels = spatial_shapes.shape[0]
+            self._spatial_shapes_list_cache = [
+                (int(spatial_shapes[lvl][0].item()), int(spatial_shapes[lvl][1].item())) for lvl in range(num_levels)
+            ]
+
         output = multi_scale_deformable_attn_pytorch(
             value,
-            ttnn.to_torch(spatial_shapes),
+            spatial_shapes,
             level_start_index,
             sampling_locations,
             attention_weights,
             self.im2col_step,
             self.device,
+            value_spatial_shapes_list=self._spatial_shapes_list_cache,
         )
         ttnn.deallocate(attention_weights)
         output = ttnn.permute(output, (1, 2, 0))
@@ -155,8 +164,6 @@ class TtTemporalSelfAttention:
         output = ttnn.mean(output, dim=-1)
         output = ttnn.permute(output, (2, 0, 1))
         output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
-        ttnn.deallocate(params.output_proj.weight)
-        ttnn.deallocate(params.output_proj.bias)
 
         if not self.batch_first:
             output = ttnn.permute(output, (1, 0, 2))

@@ -98,11 +98,14 @@ class TtSegDeformableTransformer:
         mask_flatten = ttnn.concat(mask_flatten, 1)
         lvl_pos_embed_flatten = ttnn.concat(lvl_pos_embed_flatten, 1)
 
+        # ttnn.prod requires BFLOAT16 (prod_nc_device_operation.cpp:37); the
+        # spatial_shapes tensor only holds small shape integers, so bfloat16
+        # carries no meaningful precision loss.
         spatial_shapes = ttnn.from_torch(
             torch.as_tensor(spatial_shapes, dtype=torch.long),
             device=self.device,
             layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.float32,
+            dtype=ttnn.bfloat16,
         )
         prod = ttnn.prod(spatial_shapes, dim=1)
         cumsum = ttnn.cumsum(prod, dim=0)

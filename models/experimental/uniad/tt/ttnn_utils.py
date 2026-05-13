@@ -39,18 +39,13 @@ class TtBaseBBoxCoder(metaclass=ABCMeta):
 
 
 def inverse_sigmoid(x, eps: float = 1e-5):
+    # `ttnn.rsub(x, 1.0)` replaces `ttnn.ones(shape=x.shape) - x`.
+    # ttnn.ones allocates a buffer inside trace capture, counted as a Write,
+    # which fails begin_trace_capture; rsub computes 1-x without allocating.
     x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
     x = ttnn.clamp(x, min=0, max=1)
     x1 = ttnn.clamp(x, min=eps)
-    if len(x.shape) == 3:
-        x_temp = ttnn.ones(shape=[x.shape[0], x.shape[1], x.shape[2]], layout=ttnn.TILE_LAYOUT, device=x.device())
-    elif len(x.shape) == 2:
-        x_temp = ttnn.ones(shape=[x.shape[0], x.shape[1]], layout=ttnn.TILE_LAYOUT, device=x.device())
-    else:
-        x_temp = ttnn.ones(
-            shape=[x.shape[0], x.shape[1], x.shape[2], x.shape[3]], layout=ttnn.TILE_LAYOUT, device=x.device()
-        )
-    x_temp = x_temp - x
+    x_temp = ttnn.rsub(x, 1.0)
     x2 = ttnn.clamp(x_temp, min=eps)
     return ttnn.log(ttnn.div(x1, x2))
 
@@ -63,47 +58,60 @@ def multi_scale_deformable_attn_pytorch(
     attention_weights,
     im2col_step,
     device,
+    value_spatial_shapes_list=None,
 ):
+    """Multi-scale deformable attention.
+
+    `value_spatial_shapes_list`: optional Python list of (h, w) tuples. If
+    provided, avoids `.item()` device->host reads (trace-compatible). When
+    None, falls back to reading from `value_spatial_shapes` tensor.
+    """
     bs, num_keys, num_heads, head_dim = value.shape
     num_levels = value_spatial_shapes.shape[0]
     num_queries = sampling_locations.shape[1]
     num_points = sampling_locations.shape[4]
 
+    # Resolve (h, w) per level as Python ints. `.item()` on a device tensor
+    # is a host read and breaks trace capture; the caller can pre-extract
+    # the shape list and pass it as `value_spatial_shapes_list`.
+    if value_spatial_shapes_list is not None:
+        spatial_shapes_int = [(int(h), int(w)) for h, w in value_spatial_shapes_list]
+    else:
+        spatial_shapes_int = []
+        for lvl in range(num_levels):
+            h_l, w_l = value_spatial_shapes[lvl]
+            spatial_shapes_int.append((int(h_l.item()), int(w_l.item())))
+
     # Split value into a list of tensors for each level
     value_list = []
     start = 0
     for lvl in range(num_levels):
-        h_l, w_l = value_spatial_shapes[lvl]
-        h_l = int(h_l.item())
-        w_l = int(w_l.item())
+        h_l, w_l = spatial_shapes_int[lvl]
         len_l = h_l * w_l
         value_l = value[:, start : start + len_l, :, :]
         value_list.append(value_l)
         start += len_l
 
-    # Normalize sampling locations to [-1, 1]
+    # Normalize sampling locations to [-1, 1] using pure ttnn ops (no
+    # to_torch/from_torch round-trip — would break trace capture).
     sampling_grids = []
     for lvl in range(num_levels):
-        h_l, w_l = value_spatial_shapes[lvl]
-        h_l = int(h_l.item())
-        w_l = int(w_l.item())
+        h_l, w_l = spatial_shapes_int[lvl]
         grid = sampling_locations[:, :, :, lvl, :, :]
-        grid = ttnn.to_memory_config(grid, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        grid = ttnn.clone(grid)
-        grid = ttnn.to_torch(grid)
-        grid[..., 0] = grid[..., 0] / w_l * 2 - 1
-        grid[..., 1] = grid[..., 1] / h_l * 2 - 1
-        grid = ttnn.from_torch(grid, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+        grid_x = grid[..., 0:1]
+        grid_y = grid[..., 1:2]
+        # x' = x * (2/w_l) - 1
+        grid_x = ttnn.subtract(ttnn.multiply(grid_x, 2.0 / w_l), 1.0)
+        grid_y = ttnn.subtract(ttnn.multiply(grid_y, 2.0 / h_l), 1.0)
+        grid = ttnn.concat([grid_x, grid_y], dim=-1)
         sampling_grids.append(grid)
 
-    # Perform sampling and attention
-    output = ttnn.zeros(
-        [bs, num_queries, num_heads, head_dim], device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
-    )
+    # Accumulator initialized lazily on the first level — avoids an
+    # explicit ttnn.zeros allocation, which counts as a Write inside
+    # begin_trace_capture and breaks the trace.
+    output = None
     for lvl in range(num_levels):
-        h_l, w_l = value_spatial_shapes[lvl]
-        h_l = int(h_l.item())
-        w_l = int(w_l.item())
+        h_l, w_l = spatial_shapes_int[lvl]
         value_l = ttnn.permute(value_list[lvl], (0, 2, 3, 1))
         value_l = ttnn.reshape(value_l, (bs * num_heads, head_dim, h_l, w_l))
         grid = ttnn.permute(sampling_grids[lvl], (0, 2, 1, 3, 4))
@@ -119,7 +127,8 @@ def multi_scale_deformable_attn_pytorch(
         sampled = ttnn.permute(sampled, (0, 3, 1, 4, 2))
         attn = attention_weights[:, :, :, lvl, :]
         attn = ttnn.unsqueeze(attn, -1)
-        output += ttnn.sum((sampled * attn), -2)
+        contrib = ttnn.sum((sampled * attn), -2)
+        output = contrib if output is None else output + contrib
 
     output = ttnn.reshape(output, (bs, num_queries, num_heads * head_dim))
 
@@ -588,6 +597,11 @@ class Instances:
             else:
                 if isinstance(v, ttnn.Tensor):
                     v = ttnn.to_torch(v)
+                    # torch's index_cpu does not support UInt32 (which is how
+                    # ttnn.int32 round-trips through to_torch); promote to long
+                    # before indexing.
+                    if v.dtype == torch.uint32:
+                        v = v.to(torch.long)
                     if isinstance(item, ttnn.Tensor):
                         item = ttnn.to_torch(item).bool()
                     v = v[item]
@@ -599,6 +613,11 @@ class Instances:
 
     def __len__(self) -> int:
         for v in self._fields.values():
+            # ttnn.Tensor has no __len__; fall back to shape[0] which is the
+            # instance axis. This is what TtUniAD's `len(active_inst) > 0`
+            # check needs to work for the 2nd-call path.
+            if isinstance(v, ttnn.Tensor):
+                return int(v.shape[0])
             # use __len__ because len() has to be int and is not friendly to tracing
             return v.__len__()
         raise NotImplementedError("Empty Instances does not support __len__!")
@@ -639,7 +658,10 @@ class Instances:
                 # values = type(v0).cat(values)
             else:
                 if values[1].shape[0] > 0:
-                    values = ttnn.concat(values, dim=1)
+                    # Instances are concatenated along the instance axis (dim=0),
+                    # matching the torch.cat(..., dim=0) path above. The previous
+                    # dim=1 was invalid for rank-1 fields (obj_idxes, etc.).
+                    values = ttnn.concat(values, dim=0)
                 else:
                     values = values[0]
 

@@ -36,6 +36,11 @@ class TtCustomMSDeformableAttention:
         self.num_levels = num_levels
         self.num_heads = num_heads
         self.num_points = num_points
+        # Cache of (h, w) Python ints per level. Populated lazily from
+        # spatial_shapes via .item() on first call (which is a host read,
+        # so it must happen outside trace capture). The PCC/perf test
+        # warm-up calls populate this before begin_trace_capture.
+        self._spatial_shapes_list_cache = None
 
     def __call__(
         self,
@@ -66,7 +71,9 @@ class TtCustomMSDeformableAttention:
 
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        assert (ttnn.sum(spatial_shapes[:, 0] * spatial_shapes[:, 1])) == num_value
+        # `assert (ttnn.sum(...) == num_value)` removed: comparing a ttnn tensor
+        # with a Python int forces a device->host read, which breaks trace
+        # capture. The check is validation-only and not load-bearing.
         value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)
@@ -81,8 +88,6 @@ class TtCustomMSDeformableAttention:
             sampling_offsets, (bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
         )
         attention_weights = ttnn.linear(query, params.attention_weights.weight, bias=params.attention_weights.bias)
-        ttnn.deallocate(params.attention_weights.weight)
-        ttnn.deallocate(params.attention_weights.bias)
         ttnn.deallocate(query)
         attention_weights = ttnn.reshape(
             attention_weights, (bs, num_query, self.num_heads, self.num_levels * self.num_points)
@@ -127,13 +132,26 @@ class TtCustomMSDeformableAttention:
                 f"Last dim of reference_points must be" f" 2 or 4, but get {reference_points.shape[-1]} instead."
             )
 
+        # Lazy-extract spatial_shapes to Python ints (one-time host read).
+        # Trace capture cannot do this read; populate cache via warm-up.
+        if self._spatial_shapes_list_cache is None:
+            num_levels = spatial_shapes.shape[0]
+            self._spatial_shapes_list_cache = [
+                (int(spatial_shapes[lvl][0].item()), int(spatial_shapes[lvl][1].item())) for lvl in range(num_levels)
+            ]
+
         output = multi_scale_deformable_attn_pytorch(
-            value, spatial_shapes, None, sampling_locations, attention_weights, None, self.device
+            value,
+            spatial_shapes,
+            None,
+            sampling_locations,
+            attention_weights,
+            None,
+            self.device,
+            value_spatial_shapes_list=self._spatial_shapes_list_cache,
         )
 
         output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
-        ttnn.deallocate(params.output_proj.weight)
-        ttnn.deallocate(params.output_proj.bias)
         if not self.batch_first:
             output = ttnn.permute(output, (1, 0, 2))
 

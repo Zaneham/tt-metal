@@ -2,6 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import time
 import torch
 import ttnn
 
@@ -13,6 +15,17 @@ from torch.nn.modules.utils import _pair, _single
 from models.experimental.uniad.tt.common import TtnnConv2D
 
 from mmcv.utils import ext_loader
+
+# Diagnostic harness — set TT_DCN_TIMING=1 to print, on every TtResNet
+# forward, the accumulated time spent in TtModulatedDeformConv2dPack
+# split into:
+#   transfer: device->host reads for x / offset / mask
+#   cpu:      mmcv ext modulated_deform_conv_forward on the host
+#   back:     host->device write of the result tensor
+# This is the diagnostic we used to confirm CPU compute (not PCIe) is
+# the dominant cost of the modulated deformable conv path.
+_DCN_TIMING = os.environ.get("TT_DCN_TIMING") == "1"
+_dcn_accum = {"transfer": 0.0, "cpu": 0.0, "back": 0.0, "n": 0}
 
 ext_module = ext_loader.load_ext("_ext", ["modulated_deform_conv_forward"])
 
@@ -142,10 +155,16 @@ class TtModulatedDeformConv2dPack:
         mask = ttnn.sigmoid(mask)  # low pcc if we use ttnn sigmoid for mask
         mask = ttnn.permute(mask, (0, 3, 1, 2))
 
+        if _DCN_TIMING:
+            ttnn.synchronize_device(self.device)
+            _t0 = time.perf_counter()
         mask = ttnn.to_torch(mask).to(dtype=torch.float)
 
         x = ttnn.to_torch(x).permute(0, 3, 1, 2).to(dtype=torch.float)
         offset = ttnn.to_torch(offset).permute(0, 3, 1, 2).to(dtype=torch.float)
+        if _DCN_TIMING:
+            _t1 = time.perf_counter()
+            _dcn_accum["transfer"] += _t1 - _t0
 
         result = modulated_deform_conv2d(
             x,
@@ -159,11 +178,19 @@ class TtModulatedDeformConv2dPack:
             self.groups,
             self.deform_groups,
         )
+        if _DCN_TIMING:
+            _t2 = time.perf_counter()
+            _dcn_accum["cpu"] += _t2 - _t1
         out_h, out_w = result.shape[2], result.shape[3]
         result = result.permute(0, 2, 3, 1)
         result = result.reshape(1, 1, result.shape[0] * result.shape[1] * result.shape[2], result.shape[3])
 
-        return ttnn.from_torch(result, device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT), out_h, out_w
+        result_ttnn = ttnn.from_torch(result, device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+        if _DCN_TIMING:
+            ttnn.synchronize_device(self.device)
+            _dcn_accum["back"] += time.perf_counter() - _t2
+            _dcn_accum["n"] += 1
+        return result_ttnn, out_h, out_w
 
 
 class TtResLayer:
@@ -462,6 +489,11 @@ class TtResNet:
 
     def __call__(self, x):
         """Forward function."""
+        if _DCN_TIMING:
+            _dcn_accum["transfer"] = 0.0
+            _dcn_accum["cpu"] = 0.0
+            _dcn_accum["back"] = 0.0
+            _dcn_accum["n"] = 0
         x, _, _ = self.conv1(x)
 
         x = ttnn.sharded_to_interleaved(x)
@@ -488,4 +520,12 @@ class TtResNet:
                 x = ttnn.add(x, 0.0, dtype=ttnn.bfloat8_b)
             if i in self.out_indices:
                 outs.append(x)
+        if _DCN_TIMING and _dcn_accum["n"] > 0:
+            print(
+                f"  [DCN] count={_dcn_accum['n']:>3d} "
+                f"transfer={_dcn_accum['transfer']*1000:.1f}ms "
+                f"cpu={_dcn_accum['cpu']*1000:.1f}ms "
+                f"back={_dcn_accum['back']*1000:.1f}ms "
+                f"total={(_dcn_accum['transfer']+_dcn_accum['cpu']+_dcn_accum['back'])*1000:.1f}ms"
+            )
         return tuple(outs)

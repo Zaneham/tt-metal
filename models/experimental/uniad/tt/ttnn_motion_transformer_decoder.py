@@ -88,7 +88,7 @@ class TtMotionDeformableAttention:
 
         value = ttnn.permute(value, (1, 0, 2))
         bs, num_value, _ = value.shape
-        assert ttnn.sum(spatial_shapes[:, 0] * spatial_shapes[:, 1]) == num_value
+        # `assert (ttnn.sum(...) == num_value)` removed — host read, trace blocker.
 
         value = self.value_proj(
             value,
@@ -148,16 +148,17 @@ class TtMotionDeformableAttention:
                     reference_trajs_ego.shape[4],
                 ),
             )
-            device = reference_trajs_ego.device()
-            reference_trajs_ego = ttnn.to_torch(reference_trajs_ego)
-            # TODO Raised issue for this operation - <https://github.com/tenstorrent/tt-metal/issues/25517>
-            reference_trajs_ego[..., 0] -= self.bev_range[0]
-            reference_trajs_ego[..., 1] -= self.bev_range[1]
-            reference_trajs_ego[..., 0] /= self.bev_range[3] - self.bev_range[0]
-            reference_trajs_ego[..., 1] /= self.bev_range[4] - self.bev_range[1]
-            reference_trajs_ego = ttnn.from_torch(
-                reference_trajs_ego, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-            )
+            # Replaced the to_torch/from_torch round-trip with pure ttnn slice+
+            # scalar-op+concat. The original used torch in-place assignment to
+            # rescale (x, y) into [0, 1] using the bev range — that's a 4-way
+            # host read + write that blocks trace capture.
+            inv_x = 1.0 / (self.bev_range[3] - self.bev_range[0])
+            inv_y = 1.0 / (self.bev_range[4] - self.bev_range[1])
+            ref_x = reference_trajs_ego[..., 0:1]
+            ref_y = reference_trajs_ego[..., 1:2]
+            ref_x = ttnn.multiply(ttnn.subtract(ref_x, self.bev_range[0]), inv_x)
+            ref_y = ttnn.multiply(ttnn.subtract(ref_y, self.bev_range[1]), inv_y)
+            reference_trajs_ego = ttnn.concat([ref_x, ref_y], dim=-1)
             offset_normalizer = ttnn.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], dim=-1)
 
             # we are making 7D to 5D to support ttnn add and ttnn div
