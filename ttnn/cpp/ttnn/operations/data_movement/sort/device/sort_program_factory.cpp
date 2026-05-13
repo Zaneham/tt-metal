@@ -433,7 +433,6 @@ ProgramDescriptor SortProgramFactoryCrossCoreDataExchange::create_descriptor(
         }
     }
 
-    // Physical core lookup table (fixed per device/core-range; recreated each call)
     std::vector<uint32_t> physical_core_lookup_table_data;
     for (const auto& range : core_range.ranges()) {
         for (const auto& core_coord : range) {
@@ -446,8 +445,7 @@ ProgramDescriptor SortProgramFactoryCrossCoreDataExchange::create_descriptor(
         ttnn::Shape{1, physical_core_lookup_table_data.size()},
         TensorLayout{DataType::UINT32, PageConfig{Layout::ROW_MAJOR}, MemoryConfig()});
     Tensor physical_core_lookup_table_tensor =
-        Tensor::from_vector(std::move(physical_core_lookup_table_data), physical_core_lookup_table_spec);
-    physical_core_lookup_table_tensor = physical_core_lookup_table_tensor.to_device(device);
+        Tensor::from_vector(physical_core_lookup_table_data, physical_core_lookup_table_spec).to_device(device);
     auto* const physical_core_lookup_table_tensor_buffer = physical_core_lookup_table_tensor.buffer();
     const tt::DataFormat physical_core_lookup_table_cb_data_format =
         datatype_to_dataformat_converter(physical_core_lookup_table_tensor.dtype());
