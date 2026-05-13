@@ -494,10 +494,11 @@ enum class ConnectionValidationMode {
 /**
  * @brief Search backend for solve_topology_mapping
  *
- * Use Dfs or Sat for explicit control (e.g. unit tests). Auto uses a size-based heuristic: small problems
- * (n_target * n_global < threshold) use DFS for minimal overhead, while large problems use SAT for
- * superior search efficiency. The environment variable TT_TOPOLOGY_SOLVER_ENGINE can override Auto:
- * set to "sat" to force SAT everywhere, or "dfs" to force DFS everywhere.
+ * Use Dfs or Sat for explicit control (e.g. unit tests). Auto compares |target|×|global| to a baseline
+ * (~2k literals at zero slack). That baseline grows with embedding slack (|global|−|target|)/|target|:
+ * unused globals widen SAT's assignment footprint while DFS often skips them quickly, so SAT is chosen
+ * only at larger products when the host is slack (the rise is capped so enormous hosts still flip to SAT).
+ * TT_TOPOLOGY_SOLVER_ENGINE can override Auto: set to "sat" to force SAT everywhere, or "dfs" for DFS everywhere.
  */
 enum class TopologyMappingSolverEngine {
     Auto,

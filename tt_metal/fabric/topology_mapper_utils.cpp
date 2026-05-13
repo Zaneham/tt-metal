@@ -668,10 +668,11 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
             logical_mesh_level_graph,
             physical_mesh_level,
             mesh_level_constraints,
-            1000,
+            20000,
             ConnectionValidationMode::STRICT,
-            true,
-            TopologyMappingSolverEngine::Sat);
+            false,
+            TopologyMappingSolverEngine::Sat,
+            /*unique_shapes=*/true);
 
         // Record solution ASIC unions as sorted unique dense indices (bitset-friendly disjoint search).
         std::vector<std::vector<std::uint32_t>> solution_dense_sets;
