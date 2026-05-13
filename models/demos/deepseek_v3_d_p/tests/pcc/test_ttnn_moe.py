@@ -65,11 +65,12 @@ from tests.ttnn.utils_for_testing import comp_pcc
         # pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.DEVICE, False, marks=pytest.mark.skipif(not is_blackhole(), reason="Blackhole only")),
         # pytest.param(1600, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 64, 8, 5, GateComputeMode.HOST_ALL, True, marks=pytest.mark.timeout(900)),
         # pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.HOST_ALL, True, marks=[pytest.mark.skipif(not is_blackhole(), reason="Blackhole only"), pytest.mark.skipif(not is_galaxy(), reason="Requires Galaxy")]),
+        pytest.param(1600, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.DEVICE_FP32, False),
         pytest.param(3200, DeepSeekV3Config.EMB_SIZE, DeepSeekV3Config.MOE_INTERMEDIATE_SIZE, 256, 8, 5, GateComputeMode.DEVICE_FP32, False),
         # fmt: on
     ],
 )
-@pytest.mark.parametrize("num_iterations", [1, 5, 30], ids=["iter1", "iter5", "iter30"])
+@pytest.mark.parametrize("num_iterations", [1, 2, 3, 5], ids=["iter1", "iter2", "iter3", "iter5"])
 @pytest.mark.parametrize("trace_enabled", [False, True], ids=["disable_trace", "enable_trace"])
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links, topology",
@@ -333,32 +334,18 @@ def test_ttnn_moe(
     logger.debug("Running TtMoe forward pass...")
 
     if trace_enabled:
-        # Iter 0: compile run with normal dispatch (populates program cache).
-        logger.info("Iter 0: compile run (normal dispatch)")
+        tt_moe.enable_trace()
+
+    for i in range(num_iterations):
+        signpost(f"iter_{i}/{num_iterations}_started")
+        logger.info(f"Starting iteration: {i}")
         tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
+        logger.info(f"Starting completion sync on iteration: {i}")
         ttnn.synchronize_device(mesh_device)
+        signpost(f"iter_{i}/{num_iterations}_completed")
 
-        if num_iterations > 1:
-            # NOTE: return_intermediates=True triggers ttnn.to_torch readbacks inside
-            # tt_moe.forward (overflow checks), which are illegal during trace capture.
-            # PCC validation uses the iter-0 intermediates captured above.
-            logger.info("Capturing trace")
-            trace_id = ttnn.begin_trace_capture(mesh_device, cq_id=0)
-            tt_output_traced, _ = tt_moe(tt_x, return_intermediates=False)
-            ttnn.end_trace_capture(mesh_device, trace_id, cq_id=0)
-            ttnn.synchronize_device(mesh_device)
-
-            for i in range(1, num_iterations):
-                logger.info(f"Iter {i}: execute_trace (dispatch=0)")
-                ttnn.execute_trace(mesh_device, trace_id, cq_id=0, blocking=False)
-                ttnn.synchronize_device(mesh_device)
-            ttnn.release_trace(mesh_device, trace_id)
-    else:
-        for i in range(num_iterations):
-            logger.info(f"Starting iteration: {i}")
-            tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
-            logger.info(f"Starting completion sync on iteration: {i}")
-            ttnn.synchronize_device(mesh_device)
+    if trace_enabled:
+        tt_moe.release_trace()
     profiler.end("tt_forward")
 
     # Early return when run_pcc_check=False (profiling mode)

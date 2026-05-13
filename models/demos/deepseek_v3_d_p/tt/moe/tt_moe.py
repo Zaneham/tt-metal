@@ -341,7 +341,36 @@ class TtMoe(LightweightModule):
         # Load debug flags from environment
         self.debug_token_count = os.getenv("TT_DS_PREFILL_DEBUG_TOKEN_COUNT", "0").lower() in ("1", "true", "yes")
 
+        # Routed-expert trace lifecycle (managed by enable_trace).
+        # Whole-forward trace can't be used here: dispatch/combine/reduce allocate CCL
+        # semaphores internally on each call, and those don't replay correctly via
+        # execute_trace (the trace deadlocks at synchronize_device). The routed-expert
+        # step has no CCL — only local matmuls — so it's the only trace-safe scope.
+        # 1st forward call after enable: warm up routed_expert program cache (naive call).
+        # 2nd call: capture trace around routed_expert.
+        # Subsequent calls: execute the captured trace in place of the naive call.
+        self._moe_trace_enabled = False
+        self._routed_expert_warmed_up = False
+        self._routed_expert_trace_id = None
+        self._routed_expert_traced_outputs = None
+
         logger.debug("TtMoe initialization complete")
+
+    def enable_trace(self):
+        """Enable trace capture/execute for the routed-expert step on subsequent forward calls."""
+        self._moe_trace_enabled = True
+        self._routed_expert_warmed_up = False
+        self._routed_expert_trace_id = None
+        self._routed_expert_traced_outputs = None
+
+    def release_trace(self):
+        """Release any captured routed-expert trace and disable trace mode."""
+        if self._routed_expert_trace_id is not None:
+            ttnn.release_trace(self.mesh_device, self._routed_expert_trace_id)
+        self._moe_trace_enabled = False
+        self._routed_expert_warmed_up = False
+        self._routed_expert_trace_id = None
+        self._routed_expert_traced_outputs = None
 
     def forward(
         self,
@@ -376,6 +405,10 @@ class TtMoe(LightweightModule):
         scores, indices, gate_logits, tt_expert_offsets, tt_expert_token_counts, tt_expert_region_offsets = self.gate(
             ttnn.view(x, (x.shape[0] * x.shape[1], x.shape[2]))
         )
+
+        if read_profiler:
+            ttnn.ReadDeviceProfiler(self.mesh_device)
+
         gate_logits = (
             ttnn.to_memory_config(gate_logits, ttnn.DRAM_MEMORY_CONFIG)
             if return_intermediates
@@ -463,7 +496,10 @@ class TtMoe(LightweightModule):
             tt_expert_offsets,
             self.tt_expert_dispatch_table,
         )
-        x = ttnn.deallocate(x)
+        # Only deallocate x when the all-gather above produced a new tensor; otherwise x
+        # is still the caller's input and freeing it breaks subsequent forward calls.
+        if self.mesh_device.shape[1] > 1:
+            x = ttnn.deallocate(x)
         scores = ttnn.to_memory_config(scores, ttnn.DRAM_MEMORY_CONFIG)
         indices = ttnn.to_memory_config(indices, ttnn.DRAM_MEMORY_CONFIG)
         logger.debug(f"[TtMoe.forward] Dispatch output: buffer={dispatched_buffer.shape}, metadata={metadata.shape}")
@@ -484,7 +520,27 @@ class TtMoe(LightweightModule):
         )
         logger.debug(f"[TtMoe.forward] dispatched_buffer_tiled shape: {dispatched_buffer.shape}")
 
-        expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
+        if not self._moe_trace_enabled:
+            # Naive path.
+            expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
+        elif not self._routed_expert_warmed_up:
+            # Warmup pass: naive call to populate program cache; trace capture next time.
+            expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
+            self._routed_expert_warmed_up = True
+        elif self._routed_expert_trace_id is None:
+            # Capture trace around just the routed-expert call. Output tensor address is
+            # baked into the trace — keep the reference for subsequent execute_trace calls.
+            self._routed_expert_trace_id = ttnn.begin_trace_capture(self.mesh_device, cq_id=0)
+            expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
+            ttnn.end_trace_capture(self.mesh_device, self._routed_expert_trace_id, cq_id=0)
+            self._routed_expert_traced_outputs = expert_outputs
+        else:
+            # Execute previously captured trace; trace writes into the same output tensor.
+            ttnn.execute_trace(self.mesh_device, self._routed_expert_trace_id, cq_id=0, blocking=False)
+            expert_outputs = self._routed_expert_traced_outputs
+
+        if read_profiler:
+            ttnn.ReadDeviceProfiler(self.mesh_device)
 
         if not return_intermediates:
             dispatched_buffer = ttnn.deallocate(dispatched_buffer)
@@ -619,6 +675,7 @@ class TtMoe(LightweightModule):
                 combined_output=combined_output,
                 routed_output=routed_output,
                 expert_token_counts=tt_expert_token_counts,
+                expert_region_offsets=tt_expert_region_offsets,
             )
 
         return final_output, intermediates
