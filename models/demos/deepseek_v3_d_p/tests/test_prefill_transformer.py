@@ -117,7 +117,8 @@ SEQ_LEN_25K = 25 * 1024
     ],
     ids=["e64_host", "e256_host", "e256_device", "e256_device_fp32"],
 )
-@pytest.mark.parametrize("num_iterations", [1, 25, 2000], ids=["iter1", "iter25", "iter2000"])
+@pytest.mark.parametrize("num_iterations", [1, 3, 5], ids=["iter1", "iter3", "iter5"])
+@pytest.mark.parametrize("trace_enabled", [False, True], ids=["disable_trace", "enable_trace"])
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links, topology",
     [
@@ -126,6 +127,7 @@ SEQ_LEN_25K = 25 * 1024
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "trace_region_size": 200000000,
             },
             1,
             ttnn.Topology.Linear,
@@ -137,6 +139,7 @@ SEQ_LEN_25K = 25 * 1024
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "trace_region_size": 200000000,
             },
             2,
             ttnn.Topology.Linear,
@@ -161,6 +164,7 @@ def test_prefill_transformer(
     topology,
     pcc_validation,
     num_iterations,
+    trace_enabled,
     input_source,
     use_pretrained,
     return_kv_cache,
@@ -448,6 +452,17 @@ def test_prefill_transformer(
     profiler.start("tt_forward")
     logger.info("Running TtPrefillTransformer forward...")
     do_return_kv = pcc_validation and return_kv_cache
+
+    # Enable per-MoE routed-expert trace. Each MoE layer manages its own trace
+    # lifecycle: iter 0 warms up routed_expert (naive call, populates program cache),
+    # iter 1 captures the trace, iter 2+ replays it. Dense layers (layer_idx <
+    # NUM_DENSE_LAYERS) have a TtFfn instead of TtMoe and are skipped.
+    moe_layers = [block.ffn for block in transformer.layers if block.is_moe]
+    if trace_enabled:
+        logger.info(f"Enabling routed-expert trace on {len(moe_layers)} MoE layer(s)")
+        for moe in moe_layers:
+            moe.enable_trace()
+
     for i in range(num_iterations):
         logger.info(f"Starting iteration: {i}")
         first_token_id, first_token_prob, tt_intermediates = transformer(
@@ -460,6 +475,10 @@ def test_prefill_transformer(
         )
         logger.info(f"Starting completion sync on iteration: {i}")
         ttnn.synchronize_device(mesh_device)
+
+    if trace_enabled:
+        for moe in moe_layers:
+            moe.release_trace()
     profiler.end("tt_forward")
     logger.info(f"Forward pass completed. First token: ID={first_token_id}, prob={first_token_prob:.4f}")
 
