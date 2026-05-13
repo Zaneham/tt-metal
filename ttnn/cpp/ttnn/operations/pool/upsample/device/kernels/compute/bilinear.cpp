@@ -25,7 +25,14 @@ inline void llk_push_pages_bilinear(const std::int32_t operand, const std::int32
 }
 
 template <uint32_t tiles_per_reduction, uint32_t unpA_face_r_dim>
-inline void reduce_h_fused(experimental::CB in_cb, experimental::CB scalar_cb, experimental::CB out_cb) {
+inline void reduce_h_fused(
+    experimental::CB in_cb,
+    experimental::CB scalar_cb,
+    experimental::CB out_cb,
+    const uint32_t base_in_cb_id,
+    const uint32_t base_scalar_cb_id) {
+    const uint32_t in_cb_id = in_cb.get_cb_id();
+    const uint32_t in_scalar_cb_id = scalar_cb.get_cb_id();
     const uint32_t out_cb_id = out_cb.get_cb_id();
     tile_regs_acquire();
     in_cb.wait_front(4);
@@ -40,8 +47,9 @@ inline void reduce_h_fused(experimental::CB in_cb, experimental::CB scalar_cb, e
     constexpr uint32_t scalar_tile_idx = 0;  // Tile index for scalar CB (only 1 tile of weights loaded)
     constexpr uint32_t num_faces = 2;  // Unpack 2 faces (top faces contain 4 rows needed for bilinear interpolation)
 
+    unpack_reconfig_A_B_block<DST_ACCUM_MODE>(base_in_cb_id, in_cb_id, base_scalar_cb_id, in_scalar_cb_id);
     unpack_tilizeA_B_block<use_neginf_srcA, reload_srcB, zero_srcA, zero_srcA_reduce>(
-        in_cb.get_cb_id(), scalar_cb.get_cb_id(), tiles_per_reduction, scalar_tile_idx, num_faces, unpA_face_r_dim);
+        in_cb_id, in_scalar_cb_id, tiles_per_reduction, scalar_tile_idx);
     for (uint32_t c_i = 0; c_i < tiles_per_reduction; ++c_i) {
         reduce_tile_math<REDUCE_OP, REDUCE_DIM>(
             c_i, num_faces);  // Reduce the 2 faces (containing 4 rows for bilinear interpolation)
@@ -50,8 +58,7 @@ inline void reduce_h_fused(experimental::CB in_cb, experimental::CB scalar_cb, e
 
     tile_regs_wait();
     tile_regs_commit();
-    pack_untilize_dest<tiles_per_reduction>(
-        out_cb_id, 1, 0, 1, num_faces); /* pack 1 row (1x (32 * tiles_per_reduction)) from 2 faces */
+    pack_untilize_dest<tiles_per_reduction>(out_cb_id); /* pack 1 row (1x (32 * tiles_per_reduction)) from 2 faces */
     tile_regs_release();
 
     PACK(llk_push_pages_bilinear(out_cb_id, tiles_per_reduction));
@@ -95,17 +102,19 @@ void kernel_main() {
     experimental::CB out_cb(out_cb_id);
 
     tilizeA_B_reduce_init<use_neginf_srcA, zero_srcA_reduce>(
-        tilize_reduce_cb_0, in_scalar_cb_id1, max_tiles_per_iter, out_cb_id, num_faces, face_r_dim);
-    pack_untilize_dest_init<max_tiles_per_iter>(out_cb_id, 1, num_faces); /* pack 1 row (1x32) from 2 faces */
+        tilize_reduce_cb_0, in_scalar_cb_id1, max_tiles_per_iter, out_cb_id);
+    pack_untilize_dest_init<max_tiles_per_iter>(out_cb_id); /* pack 1 row (1x32) from 2 faces */
     for (uint32_t i = 0; i < nsticks_per_core_by_nblocks; i++) {
         experimental::CB cur_in_cb = (i % 2 == 0) ? tilize_reduce_cb0 : tilize_reduce_cb1;
         experimental::CB cur_scalar_cb = (i % 2 == 0) ? scalar_cb_1 : scalar_cb_2;
 
         for (uint32_t j = 0; j < blocks - 1; j++) {
-            reduce_h_fused<max_tiles_per_iter, window_size_hw>(cur_in_cb, cur_scalar_cb, out_cb);
+            reduce_h_fused<max_tiles_per_iter, window_size_hw>(
+                cur_in_cb, cur_scalar_cb, out_cb, tilize_reduce_cb_0, in_scalar_cb_id1);
             cur_scalar_cb.pop_front(1);
         }
-        reduce_h_fused<partial_iter_output_tiles, window_size_hw>(cur_in_cb, cur_scalar_cb, out_cb);
+        reduce_h_fused<partial_iter_output_tiles, window_size_hw>(
+            cur_in_cb, cur_scalar_cb, out_cb, tilize_reduce_cb_0, in_scalar_cb_id1);
         cur_scalar_cb.pop_front(1);
     }
 }  // void kernel_main()

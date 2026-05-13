@@ -13,7 +13,10 @@
 #include "ttnn/tensor/types.hpp"
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
+
+#include <tt-metalium/host_api.hpp>
 #include "ttnn/tensor/storage.hpp"
 #include <tt-metalium/hal.hpp>
 #include <tt-metalium/program_descriptors.hpp>
@@ -382,7 +385,11 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
     ProgramDescriptor desc;
 
     // Helper to add a non-globally-allocated (local) CB to desc with a single format.
-    auto add_local_cb = [&](uint32_t cb_id, uint32_t page_size, uint32_t num_pages, tt::DataFormat data_format) {
+    auto add_local_cb = [&](uint32_t cb_id,
+                            uint32_t page_size,
+                            uint32_t num_pages,
+                            tt::DataFormat data_format,
+                            std::optional<std::pair<uint32_t, uint32_t>> face_geometry = std::nullopt) {
         desc.cbs.push_back(CBDescriptor{
             .total_size = page_size * num_pages,
             .core_ranges = all_cores,
@@ -390,6 +397,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
                 .buffer_index = static_cast<uint8_t>(cb_id),
                 .data_format = data_format,
                 .page_size = page_size,
+                .face_geometry = face_geometry,
             }}},
         });
     };
@@ -398,7 +406,8 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
                               uint32_t page_size,
                               uint32_t num_pages,
                               tt::DataFormat data_format,
-                              tt::tt_metal::Buffer* buffer) {
+                              tt::tt_metal::Buffer* buffer,
+                              std::optional<std::pair<uint32_t, uint32_t>> face_geometry = std::nullopt) {
         desc.cbs.push_back(CBDescriptor{
             .total_size = page_size * num_pages,
             .core_ranges = all_cores,
@@ -406,6 +415,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
                 .buffer_index = static_cast<uint8_t>(cb_id),
                 .data_format = data_format,
                 .page_size = page_size,
+                .face_geometry = face_geometry,
             }}},
             .buffer = buffer,
         });
@@ -493,12 +503,30 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
     const uint32_t in_cb_pagesize = cb_sizes.in_cb_pagesize;
     const uint32_t in_cb_npages = cb_sizes.in_cb_npages;
 
-    add_local_cb(in_cb_id_0, in_cb_pagesize, in_cb_npages, params.data_format);
+    const uint32_t window_size_hw = kernel_h * kernel_w;
+    const uint32_t raw_face_r = std::min(window_size_hw, 16u);
+    const uint32_t face_r_dim_for_unpack = align_pool_unpack_face_r_dim(raw_face_r);
+    const uint32_t num_faces_in_input_tile_for_cb =
+        (params.max_rows_for_reduction < tt::constants::TILE_HEIGHT || window_size_hw <= tt::constants::FACE_HEIGHT)
+            ? 2u
+            : 4u;
+
+    add_local_cb(
+        in_cb_id_0,
+        in_cb_pagesize,
+        in_cb_npages,
+        params.data_format,
+        std::pair<uint32_t, uint32_t>{face_r_dim_for_unpack, num_faces_in_input_tile_for_cb});
     log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_0, in_cb_pagesize, in_cb_npages);
 
     if (cb_sizes.has_split_reader) {
         in_cb_id_1 = next_cb_index++;
-        add_local_cb(in_cb_id_1, in_cb_pagesize, in_cb_npages, params.data_format);
+        add_local_cb(
+            in_cb_id_1,
+            in_cb_pagesize,
+            in_cb_npages,
+            params.data_format,
+            std::pair<uint32_t, uint32_t>{face_r_dim_for_unpack, num_faces_in_input_tile_for_cb});
         log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_1, in_cb_pagesize, in_cb_npages);
     }
 
@@ -598,10 +626,17 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
     // Conditionally allocate temporary CB - only needed for TILED output
     uint32_t pre_tilize_cb_id = INVALID_CB_ID;
 
+    constexpr uint32_t pack_untilize_face_r_dim = 1;
+    constexpr uint32_t pack_untilize_num_faces = 2;
+
     if (cb_sizes.has_pre_tilize) {
         pre_tilize_cb_id = next_cb_index++;
         add_local_cb(
-            pre_tilize_cb_id, cb_sizes.pre_tilize_cb_pagesize, cb_sizes.pre_tilize_cb_npages, params.data_format);
+            pre_tilize_cb_id,
+            cb_sizes.pre_tilize_cb_pagesize,
+            cb_sizes.pre_tilize_cb_npages,
+            params.data_format,
+            std::pair<uint32_t, uint32_t>{pack_untilize_face_r_dim, pack_untilize_num_faces});
         log_debug(
             tt::LogOp,
             "CB {} :: PS = {}, NP = {}",
@@ -614,7 +649,15 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
     const uint32_t out_cb_npages = cb_sizes.out_cb_npages;
 
     const uint32_t out_cb_id = next_cb_index++;
-    add_sharded_cb(out_cb_id, out_cb_pagesize, out_cb_npages, params.output_data_format, outputs[0].buffer());
+    add_sharded_cb(
+        out_cb_id,
+        out_cb_pagesize,
+        out_cb_npages,
+        params.output_data_format,
+        outputs[0].buffer(),
+        is_output_tiled ? std::nullopt
+                        : std::optional<std::pair<uint32_t, uint32_t>>{
+                              std::pair<uint32_t, uint32_t>{pack_untilize_face_r_dim, pack_untilize_num_faces}});
 
     uint32_t out_idx_cb_id = INVALID_CB_ID;
     if (cb_sizes.has_out_idx) {
