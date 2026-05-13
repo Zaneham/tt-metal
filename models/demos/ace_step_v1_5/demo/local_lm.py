@@ -137,11 +137,21 @@ def parse_audio_codes(text: str) -> list[int]:
     return [int(m) for m in re.findall(r"<\|audio_code_(\d+)\|>", text)]
 
 
-def _build_audio_code_mask(tokenizer: AutoTokenizer) -> tuple[set[int], torch.Tensor]:
-    """Build set of valid audio-code token IDs and a logit mask that blocks everything else."""
+def _build_audio_code_mask(
+    tokenizer: AutoTokenizer,
+    full_vocab_size: int | None = None,
+) -> tuple[set[int], torch.Tensor]:
+    """Build set of valid audio-code token IDs and a logit mask that blocks everything else.
+
+    *full_vocab_size* should be the model's output logit dimension (which may
+    exceed ``tokenizer.vocab_size`` when special tokens like ``<|audio_code_N|>``
+    have been added).  If not given, ``len(tokenizer)`` is used.
+    """
+    if full_vocab_size is None:
+        full_vocab_size = len(tokenizer)
     pattern = re.compile(r"^<\|audio_code_(\d+)\|>$")
     code_ids: set[int] = set()
-    for tid in range(tokenizer.vocab_size):
+    for tid in range(full_vocab_size):
         try:
             tok_text = tokenizer.decode([tid])
             m = pattern.match(tok_text)
@@ -149,7 +159,7 @@ def _build_audio_code_mask(tokenizer: AutoTokenizer) -> tuple[set[int], torch.Te
                 code_ids.add(tid)
         except Exception:
             continue
-    mask = torch.full((1, tokenizer.vocab_size), float("-inf"), dtype=torch.float32)
+    mask = torch.full((1, full_vocab_size), float("-inf"), dtype=torch.float32)
     for tid in code_ids:
         mask[0, tid] = 0.0
     eos = tokenizer.eos_token_id
@@ -301,7 +311,8 @@ def generate_metadata_and_codes(
         attn_mask2 = attn_mask2.to(device)
 
     target_codes = int(round(duration_sec * _CODES_PER_SECOND))
-    _, codes_mask = _build_audio_code_mask(tokenizer)
+    model_vocab_size = model.config.vocab_size
+    _, codes_mask = _build_audio_code_mask(tokenizer, full_vocab_size=model_vocab_size)
 
     gen_ids2 = _generate_until_stop(
         model,

@@ -131,9 +131,9 @@ def prepare_conditioning(
     precomputed_lm_hints_25Hz: torch.Tensor | None = None
     code_ids = parse_audio_codes(audio_codes_str)
     if code_ids:
-        codes_tensor = torch.tensor(code_ids, dtype=torch.long, device=torch_dev).unsqueeze(0)
+        codes_tensor = torch.tensor(code_ids, dtype=torch.long, device=torch_dev).unsqueeze(0).unsqueeze(-1)
         with torch.inference_mode():
-            lm_hints_5Hz = ace.tokenize.quantizer.get_output_from_indices(codes_tensor)
+            lm_hints_5Hz = ace.tokenizer.quantizer.get_output_from_indices(codes_tensor)
             precomputed_lm_hints_25Hz = ace.detokenize(lm_hints_5Hz)
 
     # ── 5. Build remaining tensors ──
