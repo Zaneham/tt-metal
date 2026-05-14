@@ -248,6 +248,13 @@ FusedRMSNormPostAllGatherProgramFactory::cached_program_t FusedRMSNormPostAllGat
     } e{};
     e.f = eps;  // epsilon
 
+    // reduce_factor is the divisor for the AVG reduce that computes E[x²].
+    // Legacy global-RMS mode: sum gathered stats across the full row → divide by padded inner dim.
+    // Per-head mode: each stat tile already represents one head's sum-of-squares (local to device);
+    // the reduce is over that single tile and the divisor is head_dim (per head averaging).
+    const bool per_head_norm = operation_attributes.per_head_norm;
+    const uint32_t reduce_factor = per_head_norm ? (head_dim_tiles * TILE_WIDTH) : (W * num_devices);
+
     std::vector<uint32_t> reader_compile_time_args = {
         input_cb_id,
         stats_cb_id,
@@ -260,7 +267,7 @@ FusedRMSNormPostAllGatherProgramFactory::cached_program_t FusedRMSNormPostAllGat
         num_tile_cols,
         dst_reg_count,
         stats_tiles_cols,
-        W * num_devices,  // reduce_factor
+        reduce_factor,
         e.u,
         has_weight,
         fuse_rope,
@@ -321,7 +328,12 @@ FusedRMSNormPostAllGatherProgramFactory::cached_program_t FusedRMSNormPostAllGat
         use_legacy_rsqrt,
         has_weight,
         fuse_rope,
-        head_dim_tiles};
+        head_dim_tiles,
+        // Per-head mode: when true, the compute kernel runs an inner head loop, treating each
+        // of `num_heads` stat tiles as a separate per-head RMS source and normalizing only that
+        // head's `head_dim_tiles`-wide slice of the input row.
+        static_cast<uint32_t>(per_head_norm),
+        num_heads};
 
     const auto* compute_kernel_file =
         "ttnn/cpp/ttnn/operations/experimental/transformer/fused_distributed_rmsnorm/device/kernels/compute/"
