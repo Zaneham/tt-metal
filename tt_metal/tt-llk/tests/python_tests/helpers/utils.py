@@ -40,6 +40,7 @@ tolerances = {
     DataFormat.MxFp4: Tolerance(atol=0.5, rtol=0.35),
     DataFormat.MxInt8: Tolerance(atol=0.05, rtol=0.05),
     DataFormat.MxInt4: Tolerance(atol=0.5, rtol=0.35),
+    DataFormat.MxInt2: Tolerance(atol=1.0, rtol=0.5),
     DataFormat.Fp8_e4m3: Tolerance(atol=0.2, rtol=0.2),
 }
 
@@ -426,6 +427,10 @@ def passed_test(
         target_pcc = 0.95  # MxFp4 E2M1 has very limited precision (only 8 positive and 8 negative representable values)
     elif output_data_format == DataFormat.MxInt4:
         target_pcc = 0.95  # MxInt4 has only 8 positive and 8 negative representable values (uniform 0.25 step)
+    elif output_data_format == DataFormat.MxInt2:
+        target_pcc = (
+            0.80  # MxInt2 has only -1/0/+1 per block; quantization step = block_scale
+        )
 
     if custom_pcc_threshold is not None:
         logger.info(
