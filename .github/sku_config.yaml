@@ -166,7 +166,7 @@ skus:
 
   bh_llmbox:
     runs_on:
-      - qb-gh02
+      - bh-qbae-05
       - arch-blackhole
       - BH-LLMBox
       - pipeline-perf
