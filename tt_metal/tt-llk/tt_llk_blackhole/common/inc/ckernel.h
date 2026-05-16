@@ -820,7 +820,7 @@ constexpr std::uint32_t DstTileSizeLog2[3] = {
 /**
  * @brief Calculates the maximum number of tiles that can fit in the math's destination region.
  *
- * @tparam SYNC_MODE   Destination synchronization mode (SyncHalf or SyncFull)
+ * @tparam SYNC_MODE   Destination synchronization mode (DstSync::SyncHalf or DstSync::SyncFull)
  * @tparam ACCUM_MODE Accumulation mode: true for 32-bit (FP32), false for 16-bit
  * @tparam TILE_SHAPE      Tile shape enum value (e.g., 32x32, 16x16, etc.)
  * @return constexpr std::uint32_t   Maximum number of destination tiles

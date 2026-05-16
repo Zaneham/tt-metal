@@ -415,7 +415,7 @@ TEST_F(LLKMeshDeviceFixture, TensixComputeCopyBlockMultiple) {
                 .num_tiles = 8,
                 .reader_ublock = 8,
                 .writer_ublock = 8,
-                .compute_ublock = 4,  // compute_ublock must be <= get_dest_max_tiles (4 for SyncHalf+FP32)
+                .compute_ublock = 4,  // compute_ublock must be <= get_dest_max_tiles (4 for DstSync::SyncHalf+FP32)
                 .fp32_dest_acc_en = fp32_dest_acc_en,
                 .dst_full_sync_en = dst_full_sync_en};
             unit_tests::compute::matmul_partials::run_single_core_copy_block_matmul_partials(

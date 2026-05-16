@@ -155,7 +155,7 @@ inline void dbg_thread_unhalt()
 
 inline void dbg_get_array_row(const std::uint32_t array_id, const std::uint32_t row_addr, std::uint32_t *rd_data)
 {
-    // Dest offset is added to row_addr to dump currently used half of the dest accumulator (SyncHalf dest mode)
+    // Dest offset is added to row_addr to dump currently used half of the dest accumulator (DstSync::SyncHalf dest mode)
     std::uint32_t dest_offset = 0;
     if (array_id == dbg_array_id::DEST)
     {

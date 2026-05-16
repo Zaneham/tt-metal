@@ -20,10 +20,10 @@
  * 2. Accumulation mode (16-bit vs 32-bit) - determined by DST_ACCUM_MODE
  *
  * Capacity table:
- * - SyncFull + 16-bit (DST_ACCUM_MODE=false): 16 tiles
- * - SyncFull + 32-bit (DST_ACCUM_MODE=true):  8 tiles
- * - SyncHalf + 16-bit (DST_ACCUM_MODE=false): 8 tiles
- * - SyncHalf + 32-bit (DST_ACCUM_MODE=true):  4 tiles
+ * - DstSync::SyncFull + 16-bit (DST_ACCUM_MODE=false): 16 tiles
+ * - DstSync::SyncFull + 32-bit (DST_ACCUM_MODE=true):  8 tiles
+ * - DstSync::SyncHalf + 16-bit (DST_ACCUM_MODE=false): 8 tiles
+ * - DstSync::SyncHalf + 32-bit (DST_ACCUM_MODE=true):  4 tiles
  */
 
 namespace compute_kernel_lib {
