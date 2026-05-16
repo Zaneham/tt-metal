@@ -772,12 +772,16 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     };
 
     // Pull and cache the next mesh-level solution from a descriptor's enumeration session. Returns true iff a new
-    // solution was appended; sets exhausted=true once next() reports failure (no more distinct embeddings).
+    // solution was appended; sets exhausted=true once next() reports failure (no more distinct embeddings). Logs
+    // when a single SAT next() takes longer than kSlowPullThresholdMs so it's visible whether a long pause is
+    // inside the SAT solver vs the disjoint-packing search.
+    constexpr std::chrono::milliseconds kSlowPullThresholdMs{2000};
     auto pull_next_solution = [&](const std::string& mesh_name) -> bool {
         MeshEnumState& s = mesh_enum_states.at(mesh_name);
         if (s.exhausted) {
             return false;
         }
+        const auto t_pull_begin = std::chrono::steady_clock::now();
         MappingResult<MeshId, MeshId> result = s.session.next(
             s.logical_graph,
             s.physical_graph,
@@ -787,7 +791,23 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
             /*quiet_mode=*/true,
             TopologyMappingSolverEngine::Sat,
             /*unique_shapes=*/true);
+        const auto pull_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_pull_begin);
+        if (pull_ms >= kSlowPullThresholdMs) {
+            log_info(
+                tt::LogFabric,
+                "Topology mapper: SAT next() for mesh '{}' took {}ms (success={}, cache size now {})",
+                mesh_name,
+                pull_ms.count(),
+                result.success,
+                s.solutions.size() + (result.success ? 1 : 0));
+        }
         if (!result.success) {
+            log_info(
+                tt::LogFabric,
+                "Topology mapper: mesh '{}' enumeration exhausted at {} solutions",
+                mesh_name,
+                s.solutions.size());
             s.exhausted = true;
             return false;
         }
@@ -918,14 +938,45 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     };
 
     std::size_t timer_check_mask_ref = kProgressTimerCheckMask;
+    auto last_round_log_time = search_start_time;
+    constexpr std::chrono::seconds kRoundLogInterval{10};
     for (std::size_t round = 1; n_meshes != 0 && !found_disjoint_combination; ++round) {
-        // Grow caches: pull one more solution per non-exhausted mesh. A mesh becomes "exhausted" when the solver
-        // reports no further embeddings; its cache size is then the upper bound contributed to all subsequent rounds.
+        // Per-round pull phase: pull one more solution per non-exhausted mesh. A mesh becomes "exhausted" when
+        // the solver reports no further embeddings; its cache size is then the upper bound contributed to all
+        // subsequent rounds. Time the pull phase separately so a log line attributes any long pause to SAT
+        // enumeration rather than the disjoint-packing search.
+        const auto t_pull_phase_begin = std::chrono::steady_clock::now();
         bool any_progress = false;
         for (std::size_t d = 0; d < n_meshes; ++d) {
             if (pull_next_solution(mesh_order[d])) {
                 any_progress = true;
             }
+        }
+        const auto pull_phase_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_pull_phase_begin)
+                .count();
+        // Periodic round summary every ~10s of wall clock so the user sees per-mesh cache growth even when no
+        // combinations have been tested yet (e.g. during a slow first round of SAT enumeration).
+        const auto now = std::chrono::steady_clock::now();
+        if (round == 1 || (now - last_round_log_time) >= kRoundLogInterval || pull_phase_ms >= 1000) {
+            std::string cache_summary;
+            cache_summary.reserve(n_meshes * 24);
+            for (std::size_t d = 0; d < n_meshes; ++d) {
+                if (d) {
+                    cache_summary += ", ";
+                }
+                const MeshEnumState& s = *mesh_state_ptrs[d];
+                cache_summary +=
+                    fmt::format("{}={}{}", mesh_order[d], s.solutions.size(), s.exhausted ? "(exhausted)" : "");
+            }
+            log_info(
+                tt::LogFabric,
+                "Topology mapper round-robin round {}: pulled in {}ms, caches=[{}], combinations tested so far={}",
+                round,
+                pull_phase_ms,
+                cache_summary,
+                combinations_tested);
+            last_round_log_time = now;
         }
         // Termination: if no mesh can contribute index `round-1` (i.e. every cache has size < round), the full
         // Cartesian product across all caches has already been enumerated by the previous round.
