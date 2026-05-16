@@ -43,8 +43,8 @@ inline void calculate_binary_comp_int32(const uint dst_index_in0, const uint dst
 
 #pragma GCC unroll 8
     for (int d = 0; d < ITERATIONS; d++) {
-        TT_SFPLOAD(p_sfpu::LREG0, INT32, ADDR_MOD_7, dst_index_x * dst_tile_size);
-        TT_SFPLOAD(p_sfpu::LREG1, INT32, ADDR_MOD_7, dst_index_y * dst_tile_size);
+        TT_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, dst_index_x * dst_tile_size);
+        TT_SFPLOAD(p_sfpu::LREG1, InstrModLoadStore::INT32, ADDR_MOD_7, dst_index_y * dst_tile_size);
 
         // Extract sign bits of X (LREG0) and Y (LREG1)
         TTI_SFPMOV(0, p_sfpu::LREG0, p_sfpu::LREG2, 0);
@@ -68,7 +68,7 @@ inline void calculate_binary_comp_int32(const uint dst_index_in0, const uint dst
             TTI_SFPXOR(0, p_sfpu::LREG7, p_sfpu::LREG1, 0);
         }
 
-        TT_SFPSTORE(p_sfpu::LREG1, INT32, ADDR_MOD_6, dst_index_out * dst_tile_size);
+        TT_SFPSTORE(p_sfpu::LREG1, InstrModLoadStore::INT32, ADDR_MOD_6, dst_index_out * dst_tile_size);
     }
 }
 

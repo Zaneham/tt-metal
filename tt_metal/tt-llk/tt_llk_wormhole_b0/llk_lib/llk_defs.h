@@ -150,7 +150,7 @@ enum struct StochRndType
 };
 
 // This is populated per Wormhole ISA for SFPLOAD/SFPSTORE instructions.
-enum InstrModLoadStore
+enum class InstrModLoadStore : std::uint8_t
 {
     DEFAULT       = 0,
     FP16A         = 1,

@@ -150,7 +150,7 @@ enum struct StochRndType
 };
 
 // This is populated per Blackhole ISA for SFPLOAD/SFPSTORE instructions.
-enum InstrModLoadStore
+enum class InstrModLoadStore : std::uint8_t
 {
     DEFAULT       = 0,
     FP16A         = 1,
@@ -209,7 +209,7 @@ constexpr InstrModLoadStore GetSfpLoadStoreInstrMod()
 }
 
 // This is populated per Blackhole ISA for SFPCAST instruction.
-enum InstrModCast
+enum class InstrModCast : std::uint8_t
 {
     INT32_TO_FP32_NEAREST_EVEN     = 0,
     INT32_TO_FP32_STOCHASTIC       = 1,

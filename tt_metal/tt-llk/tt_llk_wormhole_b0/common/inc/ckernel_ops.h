@@ -606,22 +606,25 @@
 #define TTI_SFPIADD(imm12_math, lreg_c, lreg_dest, instr_mod1) INSTRUCTION_WORD(TT_OP_SFPIADD(imm12_math, lreg_c, lreg_dest, instr_mod1))
 
 #define TT_OP_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
-    TT_OP(0x70, (((lreg_ind) << 20) + ((instr_mod0) << 16) + ((sfpu_addr_mode) << 14) + ((dest_reg_addr) << 0)))
-#define TT_SFPLOAD_VALID(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
-    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(instr_mod0, 4) && ckernel::is_valid(sfpu_addr_mode, 2) && ckernel::is_valid(dest_reg_addr, 14))
+    TT_OP(0x70, (((lreg_ind) << 20) + (static_cast<unsigned int>(instr_mod0) << 16) + ((sfpu_addr_mode) << 14) + ((dest_reg_addr) << 0)))
+#define TT_SFPLOAD_VALID(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)                                                                 \
+    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(static_cast<unsigned int>(instr_mod0), 4) && ckernel::is_valid(sfpu_addr_mode, 2) && \
+     ckernel::is_valid(dest_reg_addr, 14))
 #define TT_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
     ckernel::instrn_buffer[0] = TT_OP_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)
 #define TTI_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) INSTRUCTION_WORD(TT_OP_SFPLOAD(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr))
 
-#define TT_OP_SFPLOADI(lreg_ind, instr_mod0, imm16)    TT_OP(0x71, (((lreg_ind) << 20) + ((instr_mod0) << 16) + ((imm16) << 0)))
-#define TT_SFPLOADI_VALID(lreg_ind, instr_mod0, imm16) (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(instr_mod0, 4) && ckernel::is_valid(imm16, 16))
+#define TT_OP_SFPLOADI(lreg_ind, instr_mod0, imm16) TT_OP(0x71, (((lreg_ind) << 20) + (static_cast<unsigned int>(instr_mod0) << 16) + ((imm16) << 0)))
+#define TT_SFPLOADI_VALID(lreg_ind, instr_mod0, imm16) \
+    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(static_cast<unsigned int>(instr_mod0), 4) && ckernel::is_valid(imm16, 16))
 #define TT_SFPLOADI(lreg_ind, instr_mod0, imm16)       ckernel::instrn_buffer[0] = TT_OP_SFPLOADI(lreg_ind, instr_mod0, imm16)
 #define TTI_SFPLOADI(lreg_ind, instr_mod0, imm16)      INSTRUCTION_WORD(TT_OP_SFPLOADI(lreg_ind, instr_mod0, imm16))
 
 #define TT_OP_SFPLOADMACRO(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
-    TT_OP(0x93, (((lreg_ind) << 20) + ((instr_mod0) << 16) + ((sfpu_addr_mode) << 14) + ((dest_reg_addr) << 0)))
-#define TT_SFPLOADMACRO_VALID(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
-    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(instr_mod0, 4) && ckernel::is_valid(sfpu_addr_mode, 2) && ckernel::is_valid(dest_reg_addr, 14))
+    TT_OP(0x93, (((lreg_ind) << 20) + (static_cast<unsigned int>(instr_mod0) << 16) + ((sfpu_addr_mode) << 14) + ((dest_reg_addr) << 0)))
+#define TT_SFPLOADMACRO_VALID(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)                                                            \
+    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(static_cast<unsigned int>(instr_mod0), 4) && ckernel::is_valid(sfpu_addr_mode, 2) && \
+     ckernel::is_valid(dest_reg_addr, 14))
 #define TT_SFPLOADMACRO(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
     ckernel::instrn_buffer[0] = TT_OP_SFPLOADMACRO(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)
 #define TTI_SFPLOADMACRO(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
@@ -748,9 +751,10 @@
 #define TTI_SFPSHFT2(imm12_math, lreg_src_c, lreg_dest, instr_mod1) INSTRUCTION_WORD(TT_OP_SFPSHFT2(imm12_math, lreg_src_c, lreg_dest, instr_mod1))
 
 #define TT_OP_SFPSTORE(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
-    TT_OP(0x72, (((lreg_ind) << 20) + ((instr_mod0) << 16) + ((sfpu_addr_mode) << 14) + ((dest_reg_addr) << 0)))
-#define TT_SFPSTORE_VALID(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
-    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(instr_mod0, 4) && ckernel::is_valid(sfpu_addr_mode, 2) && ckernel::is_valid(dest_reg_addr, 14))
+    TT_OP(0x72, (((lreg_ind) << 20) + (static_cast<unsigned int>(instr_mod0) << 16) + ((sfpu_addr_mode) << 14) + ((dest_reg_addr) << 0)))
+#define TT_SFPSTORE_VALID(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)                                                                \
+    (ckernel::is_valid(lreg_ind, 4) && ckernel::is_valid(static_cast<unsigned int>(instr_mod0), 4) && ckernel::is_valid(sfpu_addr_mode, 2) && \
+     ckernel::is_valid(dest_reg_addr, 14))
 #define TT_SFPSTORE(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) \
     ckernel::instrn_buffer[0] = TT_OP_SFPSTORE(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr)
 #define TTI_SFPSTORE(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr) INSTRUCTION_WORD(TT_OP_SFPSTORE(lreg_ind, instr_mod0, sfpu_addr_mode, dest_reg_addr))

@@ -638,7 +638,7 @@ inline void _init_typecast_fp32_to_fp16b_()
     //   UsesLoadMod0ForStore: {1,0},
     //   UnitDelayKind: {1,1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x310 | InstrModLoadStore::FP16B, 8, 1);
+    TTI_SFPCONFIG(0x310 | to_underlying(InstrModLoadStore::FP16B), 8, 1);
 #endif
 }
 
@@ -662,7 +662,7 @@ inline void _init_typecast_uint16_to_uint32_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::INT32, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::INT32), 8, 1);
 #endif
 }
 
@@ -720,7 +720,7 @@ inline void _init_typecast_uint32_to_fp32_()
     //   UsesLoadMod0ForStore: {0,0,0},
     //   UnitDelayKind: {1,1,1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x700 | InstrModLoadStore::FP32, 8, 1);
+    TTI_SFPCONFIG(0x700 | to_underlying(InstrModLoadStore::FP32), 8, 1);
 #endif
 }
 
@@ -758,7 +758,7 @@ inline void _init_typecast_int32_to_fp32_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::FP32, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::FP32), 8, 1);
 #endif
 }
 
@@ -799,7 +799,7 @@ inline void _init_typecast_int32_to_fp16b_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::DEFAULT, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::DEFAULT), 8, 1);
 #endif
 }
 
@@ -827,7 +827,7 @@ inline void _init_typecast_uint16_to_fp32_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::FP32, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::FP32), 8, 1);
 #endif
 }
 
@@ -858,7 +858,7 @@ inline void _init_typecast_uint16_to_fp16b_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::DEFAULT, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::DEFAULT), 8, 1);
 #endif
 }
 
@@ -897,7 +897,7 @@ inline void _init_typecast_uint32_to_fp16b_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::DEFAULT, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::DEFAULT), 8, 1);
 #endif
 }
 
@@ -928,7 +928,7 @@ inline void _init_typecast_fp32_to_uint16_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::LO16, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::LO16), 8, 1);
 #endif
 }
 
@@ -969,7 +969,7 @@ inline void _init_typecast_uint32_to_uint16_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::LO16, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::LO16), 8, 1);
 #endif
 }
 
@@ -1000,7 +1000,7 @@ inline void _init_typecast_int32_to_uint16_()
     //   UsesLoadMod0ForStore: {0},
     //   UnitDelayKind: {1}, (WaitForElapsedInstructions=1)
     // }
-    TTI_SFPCONFIG(0x100 | InstrModLoadStore::LO16, 8, 1);
+    TTI_SFPCONFIG(0x100 | to_underlying(InstrModLoadStore::LO16), 8, 1);
 #endif
 }
 

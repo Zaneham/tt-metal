@@ -43,8 +43,8 @@ inline void calculate_binary_comp_int32(const uint dst_index_in0, const uint dst
 
 #pragma GCC unroll 8
     for (int d = 0; d < ITERATIONS; d++) {
-        TT_SFPLOAD(p_sfpu::LREG0, INT32, ADDR_MOD_3, dst_index_x * dst_tile_size);
-        TT_SFPLOAD(p_sfpu::LREG1, INT32, ADDR_MOD_3, dst_index_y * dst_tile_size);
+        TT_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_3, dst_index_x * dst_tile_size);
+        TT_SFPLOAD(p_sfpu::LREG1, InstrModLoadStore::INT32, ADDR_MOD_3, dst_index_y * dst_tile_size);
 
         // Extract sign bits of X (LREG0) and Y (LREG1)
         TTI_SFPMOV(0, p_sfpu::LREG0, p_sfpu::LREG2, 0);
@@ -68,7 +68,7 @@ inline void calculate_binary_comp_int32(const uint dst_index_in0, const uint dst
             TTI_SFPXOR(0, p_sfpu::LREG7, p_sfpu::LREG1, 0);
         }
 
-        TT_SFPSTORE(p_sfpu::LREG1, INT32, ADDR_MOD_2, dst_index_out * dst_tile_size);
+        TT_SFPSTORE(p_sfpu::LREG1, InstrModLoadStore::INT32, ADDR_MOD_2, dst_index_out * dst_tile_size);
     }
 }
 
@@ -268,7 +268,7 @@ inline void calculate_binary_comp_uint(const uint dst_index_in0, const uint dst_
     // UInt32 needs full 32-bit loads + MSB disambiguation; UInt16 fits in the low half so we use
     // a 16-bit load (zero-extended into the LREG) and skip the MSB-handling path.
     constexpr bool needs_msb_handling = (DATA_FORMAT == DataFormat::UInt32);
-    constexpr std::uint32_t LD_ST_MOD = needs_msb_handling ? InstrModLoadStore::INT32 : InstrModLoadStore::LO16;
+    constexpr InstrModLoadStore LD_ST_MOD = needs_msb_handling ? InstrModLoadStore::INT32 : InstrModLoadStore::LO16;
     constexpr uint dst_tile_size = 64;
 
     // Loop-invariant invert mask; hoisted out of the unrolled loop to avoid re-issuing
