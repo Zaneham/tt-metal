@@ -209,7 +209,7 @@ constexpr InstrModLoadStore GetSfpLoadStoreInstrMod()
 }
 
 // This is populated per Blackhole ISA for SFPCAST instruction.
-enum InstrModCast
+enum class InstrModCast : std::uint8_t
 {
     INT32_TO_FP32_NEAREST_EVEN     = 0,
     INT32_TO_FP32_STOCHASTIC       = 1,

@@ -601,9 +601,9 @@
 #define TT_SFPARECIP(imm12_math, lreg_c, lreg_dest, instr_mod1)  ckernel::instrn_buffer[0] = TT_OP_SFPARECIP(imm12_math, lreg_c, lreg_dest, instr_mod1)
 #define TTI_SFPARECIP(imm12_math, lreg_c, lreg_dest, instr_mod1) INSTRUCTION_WORD(TT_OP_SFPARECIP(imm12_math, lreg_c, lreg_dest, instr_mod1))
 
-#define TT_OP_SFPCAST(lreg_src_c, lreg_dest, instr_mod1) TT_OP(0x90, (((lreg_src_c) << 8) + ((lreg_dest) << 4) + ((instr_mod1) << 0)))
+#define TT_OP_SFPCAST(lreg_src_c, lreg_dest, instr_mod1) TT_OP(0x90, (((lreg_src_c) << 8) + ((lreg_dest) << 4) + (static_cast<unsigned int>(instr_mod1) << 0)))
 #define TT_SFPCAST_VALID(lreg_src_c, lreg_dest, instr_mod1) \
-    (ckernel::is_valid(lreg_src_c, 16) && ckernel::is_valid(lreg_dest, 4) && ckernel::is_valid(instr_mod1, 4))
+    (ckernel::is_valid(lreg_src_c, 16) && ckernel::is_valid(lreg_dest, 4) && ckernel::is_valid(static_cast<unsigned int>(instr_mod1), 4))
 #define TT_SFPCAST(lreg_src_c, lreg_dest, instr_mod1)  ckernel::instrn_buffer[0] = TT_OP_SFPCAST(lreg_src_c, lreg_dest, instr_mod1)
 #define TTI_SFPCAST(lreg_src_c, lreg_dest, instr_mod1) INSTRUCTION_WORD(TT_OP_SFPCAST(lreg_src_c, lreg_dest, instr_mod1))
 
