@@ -614,8 +614,25 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
     // For each mesh shape that's in the MGD
     const auto [mgd_intermesh_mesh_level, _] = get_requested_intermesh_from_mgd(mesh_graph_descriptor);
     std::unordered_map<std::string, AdjacencyGraph<MeshId>> mesh_to_logical_graph;
-    std::unordered_map<std::string, std::vector<std::vector<std::uint32_t>>> mesh_to_solution_dense_asic_indices;
-    std::unordered_map<std::string, std::vector<MappingResult<MeshId, MeshId>>> mesh_to_mesh_level_solutions;
+    // Per-mesh-descriptor lazy enumeration state. Solutions are pulled one at a time via session.next() and cached
+    // here so the round-robin diagonal search below can revisit them without redoing solver work.
+    //
+    // Each cached solution carries a precomputed *full-width* ASIC bitset (vector<uint64_t> of length
+    // used_asic_word_count). Disjointness, set, and clear during the recursive packing search become tight
+    // word-by-word loops over fixed-size vectors instead of sparse index lookups — that mirrors the dense bitset
+    // intent of the original eager implementation while keeping the lazy enumeration semantics.
+    struct MeshEnumState {
+        AdjacencyGraph<MeshId> logical_graph;
+        AdjacencyGraph<MeshId> physical_graph;
+        MappingConstraints<MeshId, MeshId> constraints;
+        TopologyMappingEnumerationSession<MeshId, MeshId> session;
+        std::vector<std::map<MeshId, MeshId>> excluded;        // fed back into session.next()
+        std::vector<MappingResult<MeshId, MeshId>> solutions;  // cached results, one per pulled solution
+        std::vector<std::vector<std::uint64_t>> bitset_sets;   // parallel: solution -> full-width ASIC bitset
+        std::vector<std::size_t> embedding_sizes;              // parallel: target_to_global.size() for each solution
+        bool exhausted = false;
+    };
+    std::unordered_map<std::string, MeshEnumState> mesh_enum_states;
     // PGD/PSD mesh placement rows are keyed in mesh_id_to_placed_groupings by MGD instance local_id only.
     // Mesh-level solutions may use logical MeshIds beyond those ids when we expand the pattern graph — always resolve
     // placed_groupings through the first mesh instance of this descriptor name.
@@ -662,21 +679,6 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
         }
         mesh_to_logical_graph[mesh_name] = logical_mesh_level_graph;
 
-        // TODO: This might be overkill for smaller meshes, lets see performance
-        MappingConstraints<MeshId, MeshId> mesh_level_constraints;
-        auto mesh_level_solutions = solve_topology_mapping_n(
-            logical_mesh_level_graph,
-            physical_mesh_level,
-            mesh_level_constraints,
-            20000,
-            ConnectionValidationMode::STRICT,
-            false,
-            TopologyMappingSolverEngine::Sat,
-            /*unique_shapes=*/true);
-
-        // Record solution ASIC unions as sorted unique dense indices (bitset-friendly disjoint search).
-        std::vector<std::vector<std::uint32_t>> solution_dense_sets;
-        solution_dense_sets.reserve(mesh_level_solutions.size());
         MeshId placed_groupings_lookup_mesh_id{0};
         bool found_mesh_instance = false;
         for (::tt::tt_fabric::GlobalNodeId gid : mesh_graph_descriptor.instances_by_name(mesh_name)) {
@@ -690,144 +692,316 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
         }
         TT_FATAL(found_mesh_instance, "No mesh instances for descriptor '{}' in MGD", mesh_name);
         mesh_name_to_placed_groupings_anchor[mesh_name] = placed_groupings_lookup_mesh_id;
-        const auto& placed_groupings_for_mesh = mesh_id_to_placed_groupings.at(placed_groupings_lookup_mesh_id);
-        for (const auto& solution : mesh_level_solutions) {
-            std::vector<std::uint32_t> dense;
-            for (const auto& [logical_mesh_id, physical_mesh_id] : solution.target_to_global) {
-                TT_FATAL(
-                    physical_mesh_id.get() < placed_groupings_for_mesh.size(),
-                    "Physical mesh index {} out of range for placed_groupings (logical MeshId {})",
-                    physical_mesh_id.get(),
-                    logical_mesh_id.get());
-                const auto& asics = placed_groupings_for_mesh[physical_mesh_id.get()];
-                for (const auto& asic : asics) {
-                    auto di = asic_to_dense_index.find(asic);
-                    TT_FATAL(
-                        di != asic_to_dense_index.end(),
-                        "ASIC from placement not found in PSD flat graph (dense index)");
-                    dense.push_back(di->second);
-                }
-            }
-            std::sort(dense.begin(), dense.end());
-            dense.erase(std::unique(dense.begin(), dense.end()), dense.end());
-            solution_dense_sets.push_back(std::move(dense));
-        }
-        mesh_to_solution_dense_asic_indices[mesh_name] = std::move(solution_dense_sets);
-        mesh_to_mesh_level_solutions[mesh_name] = std::move(mesh_level_solutions);
+
+        // Stage the lazy enumeration session for this descriptor. No solver work is performed here — solutions are
+        // pulled on demand below by the round-robin diagonal enumeration. unique_shapes=true matches the prior
+        // solve_topology_mapping_n contract (image-set equivalence classes).
+        MeshEnumState state;
+        state.logical_graph = std::move(logical_mesh_level_graph);
+        state.physical_graph = physical_mesh_level;
+        mesh_enum_states.emplace(mesh_name, std::move(state));
     }
 
-    // Single pool of all dense ASIC sets (every mesh-level solution), tagged by mesh descriptor + solution index.
-    // Packing goal: pick exactly one solution per mesh descriptor (1:1:1 across types) with pairwise disjoint dense
-    // sets — i.e. maximize feasible selections subject to at-most-one-per-descriptor; success means all |mesh_order|
-    // slots filled (maximum possible count under that constraint).
-    struct PooledDenseSolution {
-        std::string mesh_name;
-        std::size_t sol_idx{};
-        const std::vector<std::uint32_t>* dense{};
-    };
-    std::vector<PooledDenseSolution> dense_solution_pool;
-    for (const auto& [mesh_name, sets] : mesh_to_solution_dense_asic_indices) {
-        for (std::size_t si = 0; si < sets.size(); ++si) {
-            dense_solution_pool.push_back(PooledDenseSolution{mesh_name, si, &sets[si]});
-        }
-    }
-    std::sort(
-        dense_solution_pool.begin(),
-        dense_solution_pool.end(),
-        [](const PooledDenseSolution& a, const PooledDenseSolution& b) {
-            const std::size_t na = a.dense ? a.dense->size() : 0;
-            const std::size_t nb = b.dense ? b.dense->size() : 0;
-            return na < nb;
-        });
-
+    // Stable mesh ordering for the diagonal enumeration. mesh_enum_states keys = descriptors that have a PSD-derived
+    // physical graph; that's the same set the previous implementation packed across.
     std::vector<std::string> mesh_order;
-    mesh_order.reserve(mesh_to_solution_dense_asic_indices.size());
-    for (const auto& [name, sets] : mesh_to_solution_dense_asic_indices) {
-        if (!sets.empty()) {
-            mesh_order.push_back(name);
-        }
+    mesh_order.reserve(mesh_enum_states.size());
+    for (const auto& [name, _state] : mesh_enum_states) {
+        mesh_order.push_back(name);
     }
     std::sort(mesh_order.begin(), mesh_order.end());
 
-    // Per mesh descriptor: try solutions that embed *more* logical meshes first. Sorting only by small |dense|
-    // favored degenerate/partial embeddings (tiny footprint) and returned the first disjoint combination that only
-    // placed one MeshId even when full subgraph embeddings exist.
-    std::unordered_map<std::string, std::vector<std::size_t>> solution_try_order;
-    for (const auto& mesh_name : mesh_order) {
-        const auto& sets = mesh_to_solution_dense_asic_indices.at(mesh_name);
-        const auto& sols = mesh_to_mesh_level_solutions.at(mesh_name);
-        std::vector<std::size_t> perm(sets.size());
-        std::iota(perm.begin(), perm.end(), 0);
-        std::sort(perm.begin(), perm.end(), [&](std::size_t a, std::size_t b) {
-            const std::size_t ma = sols[a].target_to_global.size();
-            const std::size_t mb = sols[b].target_to_global.size();
-            if (ma != mb) {
-                return ma > mb;
-            }
-            return sets[a].size() < sets[b].size();
-        });
-        solution_try_order[mesh_name] = std::move(perm);
-    }
-
+    // Word-aligned ASIC bitset operations. Solutions carry full-width vectors so disjoint/set/clear are tight
+    // word loops (vectorizable; one branch per word). This is the core of the speed parity with the eager
+    // implementation: every recursive step touches O(used_asic_word_count) words instead of iterating sparse
+    // dense-index lists.
     std::vector<std::uint64_t> used_asic_bits(used_asic_word_count, 0);
-    auto bit_is_set = [](const std::vector<std::uint64_t>& words, std::uint32_t i) -> bool {
-        return (words[i >> 6] >> (i & 63)) & 1u;
-    };
-    auto bit_set = [](std::vector<std::uint64_t>& words, std::uint32_t i) {
-        words[i >> 6] |= (std::uint64_t{1} << (i & 63));
-    };
-    auto bit_clear = [](std::vector<std::uint64_t>& words, std::uint32_t i) {
-        words[i >> 6] &= ~(std::uint64_t{1} << (i & 63));
-    };
-    auto disjoint_dense =
-        [&bit_is_set](const std::vector<std::uint32_t>& cand, const std::vector<std::uint64_t>& occupied) -> bool {
-        for (std::uint32_t idx : cand) {
-            if (bit_is_set(occupied, idx)) {
+    auto bitset_disjoint = [used_asic_word_count](
+                               const std::vector<std::uint64_t>& cand,
+                               const std::vector<std::uint64_t>& occupied) -> bool {
+        const std::uint64_t* a = cand.data();
+        const std::uint64_t* b = occupied.data();
+        for (std::size_t i = 0; i < used_asic_word_count; ++i) {
+            if (a[i] & b[i]) {
                 return false;
             }
         }
         return true;
     };
-
-    std::vector<std::size_t> first_disjoint_choice(mesh_order.size(), 0);
-
-    std::function<bool(std::size_t)> enumerate_one_per_mesh = [&](std::size_t depth) -> bool {
-        if (depth == mesh_order.size()) {
-            return true;
+    auto bitset_or_into = [used_asic_word_count](
+                              std::vector<std::uint64_t>& dst, const std::vector<std::uint64_t>& src) {
+        std::uint64_t* d = dst.data();
+        const std::uint64_t* s = src.data();
+        for (std::size_t i = 0; i < used_asic_word_count; ++i) {
+            d[i] |= s[i];
         }
-        const std::string& mn = mesh_order[depth];
-        const auto& sol_sets = mesh_to_solution_dense_asic_indices.at(mn);
-        const auto& try_order = solution_try_order.at(mn);
-        for (std::size_t si : try_order) {
-            const auto& cand = sol_sets[si];
-            if (!disjoint_dense(cand, used_asic_bits)) {
-                continue;
-            }
-            for (std::uint32_t idx : cand) {
-                bit_set(used_asic_bits, idx);
-            }
-            first_disjoint_choice[depth] = si;
-            if (enumerate_one_per_mesh(depth + 1)) {
-                return true;
-            }
-            for (std::uint32_t idx : cand) {
-                bit_clear(used_asic_bits, idx);
-            }
+    };
+    auto bitset_andnot_from = [used_asic_word_count](
+                                  std::vector<std::uint64_t>& dst, const std::vector<std::uint64_t>& src) {
+        std::uint64_t* d = dst.data();
+        const std::uint64_t* s = src.data();
+        for (std::size_t i = 0; i < used_asic_word_count; ++i) {
+            d[i] &= ~s[i];
         }
-        return false;
     };
 
+    // Build the full-width ASIC bitset for one mesh-level solution against this descriptor's placed_groupings.
+    // Length is fixed at used_asic_word_count for every cached solution so the recursive search can OR/AND-NOT
+    // word-aligned vectors with no per-bit indirection.
+    auto compute_bitset_for_solution = [&](const std::string& mesh_name,
+                                           const MappingResult<MeshId, MeshId>& solution) {
+        std::vector<std::uint64_t> bits(used_asic_word_count, 0);
+        const auto& placed_groupings_for_mesh =
+            mesh_id_to_placed_groupings.at(mesh_name_to_placed_groupings_anchor.at(mesh_name));
+        for (const auto& [logical_mesh_id, physical_mesh_id] : solution.target_to_global) {
+            TT_FATAL(
+                physical_mesh_id.get() < placed_groupings_for_mesh.size(),
+                "Physical mesh index {} out of range for placed_groupings (logical MeshId {})",
+                physical_mesh_id.get(),
+                logical_mesh_id.get());
+            const auto& asics = placed_groupings_for_mesh[physical_mesh_id.get()];
+            for (const auto& asic : asics) {
+                auto di = asic_to_dense_index.find(asic);
+                TT_FATAL(
+                    di != asic_to_dense_index.end(), "ASIC from placement not found in PSD flat graph (dense index)");
+                const std::uint32_t i = di->second;
+                bits[i >> 6] |= (std::uint64_t{1} << (i & 63));
+            }
+        }
+        return bits;
+    };
+
+    // Pull and cache the next mesh-level solution from a descriptor's enumeration session. Returns true iff a new
+    // solution was appended; sets exhausted=true once next() reports failure (no more distinct embeddings).
+    auto pull_next_solution = [&](const std::string& mesh_name) -> bool {
+        MeshEnumState& s = mesh_enum_states.at(mesh_name);
+        if (s.exhausted) {
+            return false;
+        }
+        MappingResult<MeshId, MeshId> result = s.session.next(
+            s.logical_graph,
+            s.physical_graph,
+            s.constraints,
+            s.excluded,
+            ConnectionValidationMode::STRICT,
+            /*quiet_mode=*/true,
+            TopologyMappingSolverEngine::Sat,
+            /*unique_shapes=*/true);
+        if (!result.success) {
+            s.exhausted = true;
+            return false;
+        }
+        std::vector<std::uint64_t> bits = compute_bitset_for_solution(mesh_name, result);
+        s.excluded.push_back(result.target_to_global);
+        s.bitset_sets.push_back(std::move(bits));
+        s.embedding_sizes.push_back(result.target_to_global.size());
+        s.solutions.push_back(std::move(result));
+        return true;
+    };
+
+    // Diagonal round-robin enumeration over the per-mesh caches.
+    //
+    // Round k (k = 1, 2, ...): pull one new solution from each non-exhausted mesh, growing each cache to size k
+    // (or to its terminal exhausted size). Then enumerate every "new" combination — those whose maximum chosen
+    // *raw cache index* across descriptors equals k-1 — and check pairwise-disjoint ASIC bitsets. Combinations
+    // from earlier rounds (max raw index < k-1) were already tested, so each combination is visited exactly once.
+    // Within a round each descriptor iterates its cached solutions in `try_order` (largest target_to_global first,
+    // breaking ties by smaller bitset cardinality is implicit via SAT enumeration order) so feasible packings tend
+    // to be hit early; the frontier check stays on raw cache indices to preserve the visit-once invariant.
+    //
+    // Hot-path constants captured outside the recursion: pointers to MeshEnumState per depth, and per-round
+    // try_order indices. This eliminates string hashing, std::function indirection, and repeated map lookups
+    // inside the recursive packing — the original eager code's bitset DFS only touched plain arrays.
+    const std::size_t n_meshes = mesh_order.size();
+    std::vector<MeshEnumState*> mesh_state_ptrs(n_meshes, nullptr);
+    for (std::size_t d = 0; d < n_meshes; ++d) {
+        mesh_state_ptrs[d] = &mesh_enum_states.at(mesh_order[d]);
+    }
+    std::vector<std::vector<std::size_t>> try_order_per_depth(n_meshes);
+
+    std::vector<std::size_t> chosen_index(n_meshes, 0);
     bool found_disjoint_combination = false;
-    if (!mesh_order.empty()) {
-        found_disjoint_combination = enumerate_one_per_mesh(0);
+
+    // Liveness instrumentation: count every full leaf combination considered (one disjoint check across all
+    // descriptors). Emit a heartbeat every PackingSearch::kProgressInterval wall-clock seconds so long-running
+    // searches don't appear hung. Counter is monotonic across rounds; the timer is checked every 4096 leaves to
+    // keep the per-leaf overhead negligible (steady_clock::now() is not free).
+    constexpr std::size_t kProgressTimerCheckMask = 4095;  // check timer every 4096 leaves (power-of-two mask)
+    std::size_t combinations_tested = 0;
+    const auto search_start_time = std::chrono::steady_clock::now();
+    auto last_progress_log_time = search_start_time;
+
+    // Recursive packing search. depth ∈ [0, n_meshes), iterates its descriptor's `try_order` filtered to raw
+    // indices < round. The frontier (visit-once) check is applied at the leaf — a combination is "new" iff at
+    // least one chosen raw index equals round-1.
+    struct PackingSearch {
+        const std::vector<MeshEnumState*>& mesh_state_ptrs;
+        const std::vector<std::vector<std::size_t>>& try_order_per_depth;
+        std::vector<std::size_t>& chosen_index;
+        std::vector<std::uint64_t>& used_asic_bits;
+        std::size_t round;
+        std::size_t target_idx;
+        std::size_t n_meshes;
+        std::size_t& combinations_tested;
+        std::size_t& timer_check_mask;
+        std::chrono::steady_clock::time_point& last_progress_log_time;
+        const std::chrono::steady_clock::time_point& search_start_time;
+        // Lambdas captured by reference (no std::function indirection).
+        decltype(bitset_disjoint)& bitset_disjoint_fn;
+        decltype(bitset_or_into)& bitset_or_into_fn;
+        decltype(bitset_andnot_from)& bitset_andnot_from_fn;
+        std::chrono::seconds progress_interval{10};
+
+        bool run(std::size_t depth, bool frontier_used) {
+            const MeshEnumState& s = *mesh_state_ptrs[depth];
+            const std::vector<std::size_t>& order = try_order_per_depth[depth];
+            const std::size_t order_size = order.size();
+            const bool is_leaf = (depth + 1 == n_meshes);
+            if (is_leaf) {
+                // Leaf: each iteration is one full combination. Skip whole leaf scan if frontier can't be hit.
+                const bool can_hit_frontier_here = (target_idx < s.solutions.size());
+                if (!frontier_used && !can_hit_frontier_here) {
+                    return false;
+                }
+                for (std::size_t i = 0; i < order_size; ++i) {
+                    const std::size_t si = order[i];
+                    if (si >= round) {
+                        // try_order is sorted but capped at raw index < round; entries beyond `round` (if any) are
+                        // skipped. The expected layout is order_size == round, so this branch is rarely taken.
+                        continue;
+                    }
+                    if (!frontier_used && si != target_idx) {
+                        continue;  // frontier-must-hit-here: only si == target_idx satisfies the visit-once rule
+                    }
+                    ++combinations_tested;
+                    if ((combinations_tested & timer_check_mask) == 0) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now - last_progress_log_time >= progress_interval) {
+                            const auto elapsed_sec =
+                                std::chrono::duration_cast<std::chrono::seconds>(now - search_start_time).count();
+                            log_info(
+                                tt::LogFabric,
+                                "Topology mapper round-robin: tested {} mesh-level combinations in {}s (round {})",
+                                combinations_tested,
+                                elapsed_sec,
+                                round);
+                            last_progress_log_time = now;
+                        }
+                    }
+                    if (!bitset_disjoint_fn(s.bitset_sets[si], used_asic_bits)) {
+                        continue;
+                    }
+                    chosen_index[depth] = si;
+                    return true;
+                }
+                return false;
+            }
+            for (std::size_t i = 0; i < order_size; ++i) {
+                const std::size_t si = order[i];
+                if (si >= round) {
+                    continue;
+                }
+                const auto& cand = s.bitset_sets[si];
+                if (!bitset_disjoint_fn(cand, used_asic_bits)) {
+                    continue;
+                }
+                bitset_or_into_fn(used_asic_bits, cand);
+                chosen_index[depth] = si;
+                const bool next_frontier_used = frontier_used || (si == target_idx);
+                if (run(depth + 1, next_frontier_used)) {
+                    return true;
+                }
+                bitset_andnot_from_fn(used_asic_bits, cand);
+            }
+            return false;
+        }
+    };
+
+    std::size_t timer_check_mask_ref = kProgressTimerCheckMask;
+    for (std::size_t round = 1; n_meshes != 0 && !found_disjoint_combination; ++round) {
+        // Grow caches: pull one more solution per non-exhausted mesh. A mesh becomes "exhausted" when the solver
+        // reports no further embeddings; its cache size is then the upper bound contributed to all subsequent rounds.
+        bool any_progress = false;
+        for (std::size_t d = 0; d < n_meshes; ++d) {
+            if (pull_next_solution(mesh_order[d])) {
+                any_progress = true;
+            }
+        }
+        // Termination: if no mesh can contribute index `round-1` (i.e. every cache has size < round), the full
+        // Cartesian product across all caches has already been enumerated by the previous round.
+        bool any_can_hit_frontier = false;
+        for (std::size_t d = 0; d < n_meshes; ++d) {
+            if (mesh_state_ptrs[d]->solutions.size() >= round) {
+                any_can_hit_frontier = true;
+                break;
+            }
+        }
+        if (!any_can_hit_frontier) {
+            (void)any_progress;
+            break;
+        }
+        // Per-depth try_order: raw cache indices [0, min(cache_size, round)) sorted by descending embedding size,
+        // tie-break by ascending bitset population (smaller footprint preferred — leaves more room for other
+        // descriptors). This restores the "prefer larger embedding" heuristic of the original eager implementation
+        // while preserving diagonal correctness via the leaf-level frontier check on raw cache indices.
+        for (std::size_t d = 0; d < n_meshes; ++d) {
+            const MeshEnumState& s = *mesh_state_ptrs[d];
+            const std::size_t hi = std::min<std::size_t>(s.solutions.size(), round);
+            std::vector<std::size_t>& order = try_order_per_depth[d];
+            order.resize(hi);
+            std::iota(order.begin(), order.end(), std::size_t{0});
+            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                if (s.embedding_sizes[a] != s.embedding_sizes[b]) {
+                    return s.embedding_sizes[a] > s.embedding_sizes[b];
+                }
+                return a < b;  // stable tiebreak by raw arrival order
+            });
+        }
+
+        std::fill(used_asic_bits.begin(), used_asic_bits.end(), 0);
+        const std::size_t combos_before_round = combinations_tested;
+        PackingSearch search{
+            mesh_state_ptrs,
+            try_order_per_depth,
+            chosen_index,
+            used_asic_bits,
+            round,
+            round - 1,
+            n_meshes,
+            combinations_tested,
+            timer_check_mask_ref,
+            last_progress_log_time,
+            search_start_time,
+            bitset_disjoint,
+            bitset_or_into,
+            bitset_andnot_from};
+        found_disjoint_combination = search.run(0, /*frontier_used=*/false);
+        const std::size_t combos_this_round = combinations_tested - combos_before_round;
+        log_debug(
+            tt::LogFabric,
+            "Topology mapper round-robin round {} complete: +{} combinations (total {}), found={}",
+            round,
+            combos_this_round,
+            combinations_tested,
+            found_disjoint_combination);
+    }
+    {
+        const auto total_elapsed_sec =
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - search_start_time)
+                .count();
+        log_info(
+            tt::LogFabric,
+            "Topology mapper round-robin finished: {} mesh-level combinations tested in {}s, success={}",
+            combinations_tested,
+            total_elapsed_sec,
+            found_disjoint_combination);
     }
 
     PhysicalMultiMeshGraph result;
     if (found_disjoint_combination) {
         MeshId max_logical{0};
         for (size_t j = 0; j < mesh_order.size(); ++j) {
-            const auto& mapping =
-                mesh_to_mesh_level_solutions.at(mesh_order[j]).at(first_disjoint_choice[j]).target_to_global;
+            const auto& mapping = mesh_enum_states.at(mesh_order[j]).solutions.at(chosen_index[j]).target_to_global;
             for (const auto& [logical_mesh_id, _] : mapping) {
                 if (logical_mesh_id.get() > max_logical.get()) {
                     max_logical = logical_mesh_id;
@@ -838,8 +1012,7 @@ PhysicalMultiMeshGraph build_physical_multi_mesh_adjacency_graph(
         std::vector<std::unordered_set<tt::tt_metal::AsicID>> combined_mesh_groupings(max_logical.get() + 1);
         for (size_t j = 0; j < mesh_order.size(); ++j) {
             const std::string& mesh_name = mesh_order[j];
-            const MappingResult<MeshId, MeshId>& picked =
-                mesh_to_mesh_level_solutions.at(mesh_name).at(first_disjoint_choice[j]);
+            const MappingResult<MeshId, MeshId>& picked = mesh_enum_states.at(mesh_name).solutions.at(chosen_index[j]);
             TT_FATAL(!picked.target_to_global.empty(), "Empty mesh-level mapping for mesh descriptor '{}'", mesh_name);
             // placed_groupings rows are indexed by physical_mesh_id (within this descriptor's PSD placement).
             // Resolve via the anchor MGD instance: logical MeshIds after pattern expansion are not all registered in
