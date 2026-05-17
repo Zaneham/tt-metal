@@ -23,6 +23,7 @@ import json
 import pytest
 import torch
 from loguru import logger
+from tracy import signpost
 
 import ttnn
 from conftest import is_galaxy
@@ -102,10 +103,13 @@ SEQ_LEN_25K = 25 * 1024
     "num_layers",
     [
         5,
+        10,
         12,
+        15,
+        21,
         pytest.param(61, marks=pytest.mark.skipif(not is_galaxy(), reason="Testing entire-prefill only on Galaxy")),
     ],
-    ids=["5_layers", "12_layers", "61_layers"],
+    ids=["5_layers", "10_layers", "12_layers", "15_layers", "21_layers", "full"],
 )
 @pytest.mark.parametrize(
     "n_routed_experts, gate_fallback_mode",
@@ -117,7 +121,7 @@ SEQ_LEN_25K = 25 * 1024
     ],
     ids=["e64_host", "e256_host", "e256_device", "e256_device_fp32"],
 )
-@pytest.mark.parametrize("num_iterations", [1, 3, 5], ids=["iter1", "iter3", "iter5"])
+@pytest.mark.parametrize("num_iterations", [1, 3, 4, 5], ids=["iter1", "iter3", "iter4", "iter5"])
 @pytest.mark.parametrize("trace_enabled", [False, True], ids=["disable_trace", "enable_trace"])
 @pytest.mark.parametrize(
     "mesh_device, device_params, num_links, topology",
@@ -464,6 +468,7 @@ def test_prefill_transformer(
             moe.enable_trace()
 
     for i in range(num_iterations):
+        signpost(f"iteration_{i}/{num_iterations}_started")
         logger.info(f"Starting iteration: {i}")
         first_token_id, first_token_prob, tt_intermediates = transformer(
             tt_tokens,
@@ -473,8 +478,9 @@ def test_prefill_transformer(
             read_profiler=True,
             temperature=temperature,
         )
-        logger.info(f"Starting completion sync on iteration: {i}")
         ttnn.synchronize_device(mesh_device)
+        logger.info(f"Completed iteration: {i}")
+        signpost(f"iteration_{i}/{num_iterations}_completed")
 
     if trace_enabled:
         for moe in moe_layers:

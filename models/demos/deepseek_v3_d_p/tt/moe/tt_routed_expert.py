@@ -12,6 +12,7 @@ Unlike TtSharedExpert, this module:
 - Each device holds weights for `experts_per_chip` local experts
 """
 
+import os
 from math import ceil
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,14 @@ from tracy import signpost
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import ExpertMapping
+
+# Per-expert/per-chunk signposts emit one Tracy zone per inner-loop iteration —
+# at experts_per_chip × ffn_chunks × num_layers × num_iterations per test run
+# that quickly overwhelms a Tracy capture. The coarse signposts in
+# tt_prefill_transformer (per-layer) and the test driver (per-iteration) are
+# enough for end-to-end timing; set TT_DS_PREFILL_TRACY_FINE=1 to re-enable the
+# fine-grained per-expert markers when debugging an individual expert.
+_TRACY_FINE = os.getenv("TT_DS_PREFILL_TRACY_FINE", "0").lower() in ("1", "true", "yes")
 
 COMPUTE_KERNEL_CONFIG_LOFI = ttnn.WormholeComputeKernelConfig(
     math_fidelity=ttnn.MathFidelity.LoFi,
@@ -517,7 +526,8 @@ class TtRoutedExpert(LightweightModule):
         expert_outputs = dispatched_buffer
         # DEBUG_TENSOR(expert_outputs, "1 expert_outputs")
         for local_expert in range(self.experts_per_chip):
-            signpost(f"Expert {local_expert+1}/{self.experts_per_chip}")
+            if _TRACY_FINE:
+                signpost(f"Expert {local_expert+1}/{self.experts_per_chip}")
 
             # Per-expert slice from the shared dispatch buffer.
             tokens = ttnn.experimental.deepseek_prefill.extract(

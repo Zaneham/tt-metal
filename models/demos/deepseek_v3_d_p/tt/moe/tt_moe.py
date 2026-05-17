@@ -33,6 +33,14 @@ from models.demos.deepseek_v3_d_p.tt.moe.tt_reduce import TtReduceModule
 from models.demos.deepseek_v3_d_p.tt.moe.tt_routed_expert import TtRoutedExpert
 from models.demos.deepseek_v3_d_p.tt.moe.tt_shared_expert import TtSharedExpert
 
+# When TT_DS_PREFILL_TRACY_FINE is set, drain the device profiler between every
+# sub-stage of MoE forward (gate / all-gather / shared-expert / dispatch /
+# routed_expert / combine / reduce). In the default coarse mode we drain only
+# once per MoE forward — fewer host-device syncs, and the Tracy timeline stays
+# navigable with per-layer (tt_prefill_transformer) and per-iteration (test
+# driver) signposts marking the structure.
+_TRACY_FINE = os.getenv("TT_DS_PREFILL_TRACY_FINE", "0").lower() in ("1", "true", "yes")
+
 
 class TtMoe(LightweightModule):
     """
@@ -346,13 +354,39 @@ class TtMoe(LightweightModule):
         # semaphores internally on each call, and those don't replay correctly via
         # execute_trace (the trace deadlocks at synchronize_device). The routed-expert
         # step has no CCL — only local matmuls — so it's the only trace-safe scope.
-        # 1st forward call after enable: warm up routed_expert program cache (naive call).
-        # 2nd call: capture trace around routed_expert.
-        # Subsequent calls: execute the captured trace in place of the naive call.
+        #
+        # TT-Metal trace contract: execute_trace replays a trace using the device
+        # addresses baked at capture time. Inputs to the trace must therefore live at
+        # the same physical address every replay. We don't allocate any persistent
+        # buffers — we instead rely on the deterministic allocator: when no
+        # inter-iteration state is held, every forward sees an identical alive set
+        # at every allocation point, so dispatch / to_layout / typecast all produce
+        # outputs at the same addresses each iteration. The trace's baked addresses
+        # therefore stay valid across replays.
+        #
+        # Two invariants make that work:
+        #   (a) The routed_expert input — the typecasted dispatched_buffer — is
+        #       allocated by tt_moe just outside the trace, so its address is
+        #       deterministic and the trace can read from it directly. The
+        #       in-routed_expert typecast becomes a no-op (dtype already matches).
+        #   (b) Nothing from a previous iteration is held alive into the next. In
+        #       particular, we do NOT save the routed_expert output as
+        #       self._routed_expert_traced_outputs — keeping that wrapper alive
+        #       would change the alive set seen by the allocator on the next
+        #       forward, divergng the addresses the trace was baked against.
+        #
+        # Phases:
+        #   1st forward call after enable_trace: naive routed_expert call, populates
+        #                                        program cache.
+        #   2nd call:                            capture the trace around the naive
+        #                                        routed_expert call.
+        #   3rd+ calls:                          execute the trace; expert_outputs
+        #                                        is just the local typecasted buffer
+        #                                        whose address matches what the
+        #                                        trace was baked against.
         self._moe_trace_enabled = False
         self._routed_expert_warmed_up = False
         self._routed_expert_trace_id = None
-        self._routed_expert_traced_outputs = None
 
         logger.debug("TtMoe initialization complete")
 
@@ -361,7 +395,6 @@ class TtMoe(LightweightModule):
         self._moe_trace_enabled = True
         self._routed_expert_warmed_up = False
         self._routed_expert_trace_id = None
-        self._routed_expert_traced_outputs = None
 
     def release_trace(self):
         """Release any captured routed-expert trace and disable trace mode."""
@@ -370,7 +403,6 @@ class TtMoe(LightweightModule):
         self._moe_trace_enabled = False
         self._routed_expert_warmed_up = False
         self._routed_expert_trace_id = None
-        self._routed_expert_traced_outputs = None
 
     def forward(
         self,
@@ -406,7 +438,7 @@ class TtMoe(LightweightModule):
             ttnn.view(x, (x.shape[0] * x.shape[1], x.shape[2]))
         )
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         gate_logits = (
@@ -449,7 +481,7 @@ class TtMoe(LightweightModule):
         logger.debug(f"  {scores.shape=} {scores.memory_config()=}")
         logger.debug(f"  {indices.shape=} {indices.memory_config()=}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================
@@ -468,7 +500,7 @@ class TtMoe(LightweightModule):
             )
         logger.debug(f"[TtMoe.forward] x (after all_gather) shape: {x.shape}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================
@@ -481,7 +513,7 @@ class TtMoe(LightweightModule):
         shared_output = self.shared_expert(x)
         logger.debug(f"[TtMoe.forward] Shared expert output shape: {shared_output.shape}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================
@@ -504,7 +536,7 @@ class TtMoe(LightweightModule):
         indices = ttnn.to_memory_config(indices, ttnn.DRAM_MEMORY_CONFIG)
         logger.debug(f"[TtMoe.forward] Dispatch output: buffer={dispatched_buffer.shape}, metadata={metadata.shape}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================
@@ -520,6 +552,24 @@ class TtMoe(LightweightModule):
         )
         logger.debug(f"[TtMoe.forward] dispatched_buffer_tiled shape: {dispatched_buffer.shape}")
 
+        # Pre-typecast outside routed_expert when trace is enabled. The routed_expert
+        # input must live at a deterministic address that subsequent execute_trace calls
+        # can read from. With the typecast inlined inside routed_expert it's allocated
+        # *inside* the trace at capture, leaving no Python wrapper for it on later
+        # iterations — the original code worked around this by saving
+        # _routed_expert_traced_outputs, but pinning that wrapper changed the alive set
+        # seen by the allocator on every subsequent forward and made the trace's other
+        # baked addresses drift. With the typecast moved here the routed_expert input
+        # is a normal local whose address the deterministic allocator reproduces on
+        # every iteration, routed_expert's internal typecast becomes a no-op, and we
+        # don't need to hold any inter-iteration state.
+        if self._moe_trace_enabled:
+            expert_input_dtype = self.routed_expert.activations_dtype
+            if dispatched_buffer.dtype != expert_input_dtype:
+                typed = ttnn.typecast(dispatched_buffer, expert_input_dtype)
+                ttnn.deallocate(dispatched_buffer)
+                dispatched_buffer = typed
+
         if not self._moe_trace_enabled:
             # Naive path.
             expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
@@ -528,22 +578,30 @@ class TtMoe(LightweightModule):
             expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
             self._routed_expert_warmed_up = True
         elif self._routed_expert_trace_id is None:
-            # Capture trace around just the routed-expert call. Output tensor address is
-            # baked into the trace — keep the reference for subsequent execute_trace calls.
+            # Capture trace around just the routed-expert call.
             self._routed_expert_trace_id = ttnn.begin_trace_capture(self.mesh_device, cq_id=0)
             expert_outputs = self.routed_expert(dispatched_buffer, tt_expert_token_counts, tt_expert_region_offsets)
             ttnn.end_trace_capture(self.mesh_device, self._routed_expert_trace_id, cq_id=0)
-            self._routed_expert_traced_outputs = expert_outputs
         else:
-            # Execute previously captured trace; trace writes into the same output tensor.
+            # Replay: trace writes in-place into dispatched_buffer (insert is in-place).
+            # The deterministic allocator places this iteration's dispatched_buffer at
+            # the same address the trace was captured against, so after the replay the
+            # local wrapper points at the expert outputs.
             ttnn.execute_trace(self.mesh_device, self._routed_expert_trace_id, cq_id=0, blocking=False)
-            expert_outputs = self._routed_expert_traced_outputs
+            expert_outputs = dispatched_buffer
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         if not return_intermediates:
-            dispatched_buffer = ttnn.deallocate(dispatched_buffer)
+            # In trace mode dispatched_buffer aliases expert_outputs (the typecasted
+            # tensor; insert is in-place), and combine reads from it — let the local
+            # ref carry it to combine and auto-free at end of forward. In non-trace
+            # mode dispatched_buffer is the BFLOAT16 tile-layout buffer and is distinct
+            # from expert_outputs (which is the typecasted version routed_expert
+            # allocated internally), so freeing it here saves memory before combine.
+            if not self._moe_trace_enabled:
+                dispatched_buffer = ttnn.deallocate(dispatched_buffer)
         else:
             # add squeezed dimenisions back for intermediates to match original dispatch output shape
             dispatched_buffer = ttnn.unsqueeze(dispatched_buffer, dim=0)
@@ -557,7 +615,7 @@ class TtMoe(LightweightModule):
         expert_outputs = ttnn.unsqueeze(expert_outputs, dim=0)
         logger.debug(f"[TtMoe.forward] expert_outputs (unsqueezed) shape: {expert_outputs.shape}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================
@@ -574,7 +632,7 @@ class TtMoe(LightweightModule):
         )
         logger.debug(f"[TtMoe.forward] combined_output shape: {combined_output.shape} {combined_output.dtype=}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================
@@ -599,7 +657,7 @@ class TtMoe(LightweightModule):
         routed_output = ttnn.squeeze(routed_output, dim=0)
         logger.debug(f"[TtMoe.forward] routed_output (squeezed) shape: {routed_output.shape}")
 
-        if read_profiler:
+        if read_profiler and _TRACY_FINE:
             ttnn.ReadDeviceProfiler(self.mesh_device)
 
         # ========================================

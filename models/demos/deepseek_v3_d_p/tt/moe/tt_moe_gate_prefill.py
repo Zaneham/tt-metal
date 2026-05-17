@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -18,6 +19,11 @@ from models.common.lightweightmodule import LightweightModule
 from models.common.utility_functions import is_blackhole
 from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
 from models.demos.deepseek_v3_d_p.tt.moe.tt_moe_routing_setup import TtMoERoutingSetup
+
+# Gate sub-stage signposts (linear / grouped_gate / dispatch_offsets) fire 6 times
+# per MoE layer per forward, which adds up fast across layers × iterations. Skip
+# them in coarse traces; re-enable with TT_DS_PREFILL_TRACY_FINE=1.
+_TRACY_FINE = os.getenv("TT_DS_PREFILL_TRACY_FINE", "0").lower() in ("1", "true", "yes")
 
 
 class GateComputeMode(Enum):
@@ -468,15 +474,18 @@ class TtMoEGatePrefill(LightweightModule):
         logger.debug(f"[MoeGate] fallback_mode={mode.value}")
 
         # ---- Phase 1: Logits (matmul) ----
-        signpost(header="moe_gate_linear")
+        if _TRACY_FINE:
+            signpost(header="moe_gate_linear")
         if mode in (GateComputeMode.DEVICE, GateComputeMode.DEVICE_FP32, GateComputeMode.HOST_GROUPED_GATE):
             logits = self._device_matmul(x)
         else:  # HOST_MATMUL, HOST_ALL
             host_logits = self._host_matmul(x)
-        signpost(header="moe_gate_linear")
+        if _TRACY_FINE:
+            signpost(header="moe_gate_linear")
 
         # ---- Phase 2: Grouped gate ----
-        signpost(header="moe_gate_grouped_gate")
+        if _TRACY_FINE:
+            signpost(header="moe_gate_grouped_gate")
         if mode == GateComputeMode.DEVICE:
             ttnn_scores, ttnn_top_k_experts_indices = self._device_grouped_gate(logits)
 
@@ -498,10 +507,12 @@ class TtMoEGatePrefill(LightweightModule):
             ttnn_scores = self._host_scores_to_device(host_scores)
             ttnn_top_k_experts_indices = self._host_indices_to_device(host_indices)
             logits = self._host_logits_to_device(host_logits)
-        signpost(header="moe_gate_grouped_gate")
+        if _TRACY_FINE:
+            signpost(header="moe_gate_grouped_gate")
 
         # ---- Phase 3: Routing setup ----
-        signpost(header="moe_gate_calculate_dispatch_offsets")
+        if _TRACY_FINE:
+            signpost(header="moe_gate_calculate_dispatch_offsets")
         ttnn_top_k_experts_indices = ttnn.to_layout(ttnn_top_k_experts_indices, ttnn.ROW_MAJOR_LAYOUT)
 
         dispatch_offsets, total_counts_per_expert, expert_region_offsets, _ = self.routing_setup(
@@ -510,7 +521,8 @@ class TtMoEGatePrefill(LightweightModule):
             seq_len_per_chip=self.config.sp_dim,
             num_experts_per_tok=self.config.n_activated_experts,
         )
-        signpost(header="moe_gate_calculate_dispatch_offsets")
+        if _TRACY_FINE:
+            signpost(header="moe_gate_calculate_dispatch_offsets")
 
         return (
             ttnn_scores,
