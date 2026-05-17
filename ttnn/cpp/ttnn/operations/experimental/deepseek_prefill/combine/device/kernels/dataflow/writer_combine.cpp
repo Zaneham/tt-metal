@@ -178,6 +178,7 @@ void kernel_main() {
     volatile tt_l1_ptr uint32_t* zi_done_sem_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(zi_done_sem_address);
     noc_semaphore_wait(zi_done_sem_ptr, num_total_idle_cores);
     noc_semaphore_set(zi_done_sem_ptr, 0);
+    noc_semaphore_set(zero_init_sem_ptr, 1);
 #endif
 
 #ifdef DEST_CHIP_ID
@@ -214,6 +215,7 @@ void kernel_main() {
 
     DPRINT_COMBINE << "Fabric setup complete" << ENDL();
 #endif
+
     // Signal ALL readers that global init exchange is done.
     // Each writer increments every reader's barrier sem so each reader
     // collects num_cores signals before proceeding.
@@ -223,6 +225,7 @@ void kernel_main() {
     noc_async_atomic_barrier();
 
     {
+        // DeviceZoneScopedN("combine-ethernet-flow");
         //  Sentinel-terminated fabric send loop
         while (true) {
             cb_wait_front(cb_route_info_id, 1);
@@ -230,6 +233,7 @@ void kernel_main() {
                 reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_read_ptr(cb_route_info_id));
             uint32_t route = route_info[0];
             {
+                // DeviceZoneScopedN("combine-waiting-for-route-info");
                 if (route == ROUTE_INFO_SENTINEL) {
                     cb_pop_front(cb_route_info_id, 1);
                     break;
