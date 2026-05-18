@@ -104,7 +104,7 @@ inline void llk_unpack_tilizeA_B(
     std::uint32_t operandB_id = get_operand_id(operandB);
 
     const std::uint32_t face_r_dim = get_operand_face_r_dim(operandA_id);
-    const std::uint32_t num_faces_eff = get_operand_num_faces(operandA_id);
+    const std::uint32_t num_faces = get_operand_num_faces(operandA_id);
 
     const std::uint32_t base_address_a =
         get_local_cb_interface(operandA_id).fifo_rd_ptr - 1;  // Remove header size added by descriptor
@@ -121,7 +121,7 @@ inline void llk_unpack_tilizeA_B(
         unpack_dst_format[operandB_id],
         face_r_dim,
         get_operand_face_r_dim(operandB_id),
-        num_faces_eff,
+        num_faces,
         get_operand_num_faces(operandB_id)));
 
     WAYPOINT("UPTW");
@@ -133,7 +133,7 @@ inline void llk_unpack_tilizeA_B(
         address_b,
         tile_index_a,
         block_ct_dim,
-        num_faces_eff
+        num_faces
     );
 
     WAYPOINT("UPTD");

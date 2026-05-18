@@ -207,8 +207,8 @@ ALWI void unpack_reconfig_A_B_block(
     const std::uint32_t new_icb0,
     const std::uint32_t old_icb1,
     const std::uint32_t new_icb1) {
-    UNPACK((llk_unpack_reconfig_data_format_srca<dst_accum_mode>(old_icb0, new_icb0)));
-    UNPACK((llk_unpack_reconfig_data_format_srcb<dst_accum_mode>(old_icb1, new_icb1)));
+    UNPACK((llk_unpack_reconfig_data_format_srca<dst_accum_mode, p_dim_stride_target::IGNORE>(old_icb0, new_icb0)));
+    UNPACK((llk_unpack_reconfig_data_format_srcb<dst_accum_mode, p_dim_stride_target::IGNORE>(old_icb1, new_icb1)));
 }
 
 // clang-format off

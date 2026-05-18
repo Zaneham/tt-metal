@@ -5,6 +5,8 @@
 #include "flatbuffer/buffer_types_from_flatbuffer.hpp"
 #include "flatbuffer/program_types_from_flatbuffer.hpp"
 
+#include <utility>
+
 namespace tt::tt_metal {
 
 BufferType from_flatbuffer(flatbuffer::BufferType type) {
@@ -60,6 +62,11 @@ CircularBufferConfig from_flatbuffer(
     }
 
     std::array<std::optional<std::pair<uint32_t, uint32_t>>, NUM_CIRCULAR_BUFFERS> unpack_face_geometry = {};
+    if (config_fb->unpack_face_geometry()) {
+        for (const auto* entry : *config_fb->unpack_face_geometry()) {
+            unpack_face_geometry[entry->index()] = std::make_pair(entry->face_r_dim(), entry->num_faces());
+        }
+    }
 
     // Convert FlatBuffer vector to unordered_set of uint8_t
     auto create_uint8_set = [](auto* fb_vector) {

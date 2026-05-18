@@ -18,6 +18,25 @@ namespace tt {
 enum class DataFormat : uint8_t;
 }  // namespace tt
 
+namespace {
+
+void validate_unpack_face_geometry(uint32_t face_r_dim, uint32_t num_faces) {
+    TT_FATAL(face_r_dim > 0, "face_r_dim must be > 0");
+    TT_FATAL(
+        face_r_dim <= tt::constants::FACE_HEIGHT,
+        "face_r_dim ({}) must be <= FACE_HEIGHT ({})",
+        face_r_dim,
+        tt::constants::FACE_HEIGHT);
+    TT_FATAL(num_faces > 0, "num_faces must be > 0");
+    TT_FATAL(
+        tt::constants::TILE_HEIGHT % face_r_dim == 0,
+        "tile height ({}) must be divisible by face_r_dim ({}) for JIT unpack descriptors",
+        tt::constants::TILE_HEIGHT,
+        face_r_dim);
+}
+
+}  // namespace
+
 namespace tt::tt_metal {
 
 // Static circular buffer spec
@@ -91,7 +110,9 @@ CircularBufferConfig::CircularBufferConfig(const CBDescriptor& descriptor) : tot
                 {format_descriptor.tile->height, format_descriptor.tile->width}, format_descriptor.tile->transpose);
         }
         if (format_descriptor.face_geometry) {
-            this->unpack_face_geometry_[format_descriptor.buffer_index] = format_descriptor.face_geometry.value();
+            const auto [face_r_dim, num_faces] = format_descriptor.face_geometry.value();
+            validate_unpack_face_geometry(face_r_dim, num_faces);
+            this->unpack_face_geometry_[format_descriptor.buffer_index] = {face_r_dim, num_faces};
         }
     };
     this->buffer_indices_.reserve(descriptor.format_descriptors.size() + descriptor.remote_format_descriptors.size());
@@ -128,13 +149,18 @@ CircularBufferConfig::CircularBufferConfig(
     data_formats_(data_formats),
     page_sizes_(page_sizes),
     tiles_(tiles),
-    unpack_face_geometry_(unpack_face_geometry),
     buffer_indices_(buffer_indices),
     local_buffer_indices_(local_buffer_indices),
     remote_buffer_indices_(remote_buffer_indices),
     dynamic_cb_(dynamic_cb),
     max_size_(max_size),
-    buffer_size_(buffer_size) {}
+    buffer_size_(buffer_size) {
+    for (const auto& geom : unpack_face_geometry) {
+        if (geom.has_value()) {
+            validate_unpack_face_geometry(geom->first, geom->second);
+        }
+    }
+}
 
 CircularBufferConfig& CircularBufferConfig::set_page_size(uint8_t buffer_index, uint32_t page_size) {
     uint32_t max_cbs = tt::tt_metal::MetalContext::instance().hal().get_arch_num_circular_buffers();
@@ -217,18 +243,7 @@ CircularBufferConfig& CircularBufferConfig::set_unpack_face_geometry(
             "during config creation",
             buffer_index);
     }
-    TT_FATAL(face_r_dim > 0, "face_r_dim must be > 0");
-    TT_FATAL(
-        face_r_dim <= tt::constants::FACE_HEIGHT,
-        "face_r_dim ({}) must be <= FACE_HEIGHT ({})",
-        face_r_dim,
-        tt::constants::FACE_HEIGHT);
-    TT_FATAL(num_faces > 0, "num_faces must be > 0");
-    TT_FATAL(
-        tt::constants::TILE_HEIGHT % face_r_dim == 0,
-        "tile height ({}) must be divisible by face_r_dim ({}) for JIT unpack descriptors",
-        tt::constants::TILE_HEIGHT,
-        face_r_dim);
+    validate_unpack_face_geometry(face_r_dim, num_faces);
     this->unpack_face_geometry_[buffer_index] = std::make_pair(face_r_dim, num_faces);
     return *this;
 }

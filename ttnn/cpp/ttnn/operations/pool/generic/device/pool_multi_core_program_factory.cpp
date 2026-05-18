@@ -389,7 +389,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
                             uint32_t page_size,
                             uint32_t num_pages,
                             tt::DataFormat data_format,
-                            std::optional<std::pair<uint32_t, uint32_t>> face_geometry = std::nullopt) {
+                            std::optional<FaceGeometry> face_geometry = std::nullopt) {
         desc.cbs.push_back(CBDescriptor{
             .total_size = page_size * num_pages,
             .core_ranges = all_cores,
@@ -407,7 +407,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
                               uint32_t num_pages,
                               tt::DataFormat data_format,
                               tt::tt_metal::Buffer* buffer,
-                              std::optional<std::pair<uint32_t, uint32_t>> face_geometry = std::nullopt) {
+                              std::optional<FaceGeometry> face_geometry = std::nullopt) {
         desc.cbs.push_back(CBDescriptor{
             .total_size = page_size * num_pages,
             .core_ranges = all_cores,
@@ -425,13 +425,16 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
     const uint32_t in_scalar_cb_id_0 = next_cb_index++;
     const uint32_t in_scalar_cb_pagesize = cb_sizes.scalar_cb_pagesize;
     const uint32_t in_scalar_cb_npages = cb_sizes.scalar_cb_npages;
-    add_local_cb(in_scalar_cb_id_0, in_scalar_cb_pagesize, in_scalar_cb_npages, params.data_format);
+    const auto scalar_face_geometry = FaceGeometry{.face_r_dim = 1, .num_faces = 4};
+    add_local_cb(
+        in_scalar_cb_id_0, in_scalar_cb_pagesize, in_scalar_cb_npages, params.data_format, scalar_face_geometry);
     log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_scalar_cb_id_0, in_scalar_cb_pagesize, in_scalar_cb_npages);
 
     uint32_t in_scalar_cb_id_1 = INVALID_CB_ID;
     if (cb_sizes.has_second_scalar_cb) {
         in_scalar_cb_id_1 = next_cb_index++;
-        add_local_cb(in_scalar_cb_id_1, in_scalar_cb_pagesize, in_scalar_cb_npages, params.data_format);
+        add_local_cb(
+            in_scalar_cb_id_1, in_scalar_cb_pagesize, in_scalar_cb_npages, params.data_format, scalar_face_geometry);
         log_debug(
             tt::LogOp, "CB {} :: PS = {}, NP = {}", in_scalar_cb_id_1, in_scalar_cb_pagesize, in_scalar_cb_npages);
     }
@@ -516,7 +519,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
         in_cb_pagesize,
         in_cb_npages,
         params.data_format,
-        std::pair<uint32_t, uint32_t>{face_r_dim_for_unpack, num_faces_in_input_tile_for_cb});
+        FaceGeometry{.face_r_dim = face_r_dim_for_unpack, .num_faces = num_faces_in_input_tile_for_cb});
     log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_0, in_cb_pagesize, in_cb_npages);
 
     if (cb_sizes.has_split_reader) {
@@ -526,7 +529,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
             in_cb_pagesize,
             in_cb_npages,
             params.data_format,
-            std::pair<uint32_t, uint32_t>{face_r_dim_for_unpack, num_faces_in_input_tile_for_cb});
+            FaceGeometry{.face_r_dim = face_r_dim_for_unpack, .num_faces = num_faces_in_input_tile_for_cb});
         log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_1, in_cb_pagesize, in_cb_npages);
     }
 
@@ -627,16 +630,16 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
     uint32_t pre_tilize_cb_id = INVALID_CB_ID;
 
     constexpr uint32_t pack_untilize_face_r_dim = 1;
-    constexpr uint32_t pack_untilize_num_faces = 2;
+    const bool last_tile_is_partial = in_c % tt::constants::TILE_WIDTH != 0;
+    const bool single_partial_fits_in_face = last_tile_is_partial && in_c <= tt::constants::FACE_WIDTH;
+    const uint32_t pack_untilize_num_faces = single_partial_fits_in_face ? 1u : 2u;
+    const auto pack_untilize_face_geometry =
+        FaceGeometry{.face_r_dim = pack_untilize_face_r_dim, .num_faces = pack_untilize_num_faces};
 
     if (cb_sizes.has_pre_tilize) {
         pre_tilize_cb_id = next_cb_index++;
         add_local_cb(
-            pre_tilize_cb_id,
-            cb_sizes.pre_tilize_cb_pagesize,
-            cb_sizes.pre_tilize_cb_npages,
-            params.data_format,
-            std::pair<uint32_t, uint32_t>{pack_untilize_face_r_dim, pack_untilize_num_faces});
+            pre_tilize_cb_id, cb_sizes.pre_tilize_cb_pagesize, cb_sizes.pre_tilize_cb_npages, params.data_format);
         log_debug(
             tt::LogOp,
             "CB {} :: PS = {}, NP = {}",
@@ -655,9 +658,7 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
         out_cb_npages,
         params.output_data_format,
         outputs[0].buffer(),
-        is_output_tiled ? std::nullopt
-                        : std::optional<std::pair<uint32_t, uint32_t>>{
-                              std::pair<uint32_t, uint32_t>{pack_untilize_face_r_dim, pack_untilize_num_faces}});
+        is_output_tiled ? std::nullopt : std::optional{pack_untilize_face_geometry});
 
     uint32_t out_idx_cb_id = INVALID_CB_ID;
     if (cb_sizes.has_out_idx) {

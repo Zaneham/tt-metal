@@ -18,6 +18,7 @@
 #include <bitset>
 #include <filesystem>
 #include <optional>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -50,6 +51,13 @@ struct TileDescriptor {
     bool operator==(const TileDescriptor& other) const {
         return height == other.height && width == other.width && transpose == other.transpose;
     }
+};
+
+struct FaceGeometry {
+    uint32_t face_r_dim = constants::FACE_HEIGHT;
+    uint32_t num_faces = constants::TILE_HEIGHT / constants::FACE_HEIGHT;
+
+    constexpr operator std::pair<uint32_t, uint32_t>() const { return {face_r_dim, num_faces}; }
 };
 
 struct CBFormatDescriptor {
