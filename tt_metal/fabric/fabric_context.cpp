@@ -251,6 +251,20 @@ FabricContext::FabricContext(
     this->topology_ = FabricContext::get_topology_from_config(fabric_config);
     this->wrap_around_mesh_ = this->check_for_wrap_around_mesh(control_plane);
 
+    // Validate: Ring/Torus topology requires wrap-around connectivity in the mesh descriptor.
+    // A linear mesh descriptor (dim_types: LINE) has no wrap-around — requesting FABRIC_1D_RING
+    // on it will cause device hangs when kernels attempt to send on non-existent fabric connections.
+    if (is_ring_or_torus(this->topology_)) {
+        for (const auto& [mesh_id, has_wrap_around] : this->wrap_around_mesh_) {
+            TT_FATAL(
+                has_wrap_around,
+                "FabricConfig {} requires ring/torus connectivity, but mesh {} has a linear (non-wrap-around) "
+                "topology. Use FABRIC_1D for linear mesh descriptors or provide a torus/ring mesh descriptor.",
+                enchantum::to_string(fabric_config),
+                mesh_id);
+        }
+    }
+
     // Step 3: Compute routing flags (depends on: topology_)
     this->is_2D_routing_enabled_ = is_2D_topology(this->topology_);
     this->bubble_flow_control_enabled_ = is_ring_or_torus(this->topology_);

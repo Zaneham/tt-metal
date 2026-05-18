@@ -336,6 +336,7 @@ void kernel_main() {
             mesh_rows,
             mesh_cols,
             replicate_axis,
+            topology,
             true>(fabric_connections, packet_headers[1], packet_headers[2], global_noc_semaphore_addr);
 
         auto semaphore_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(global_semaphore_addr);
@@ -349,7 +350,12 @@ void kernel_main() {
             fabric_mux_termination_signal_address,
             num_mux_workers_per_link>(directions, fabric_connections, true, rt_arg_count);
 
-        noc_semaphore_wait(semaphore_ptr, replicate_group_devices);
+        // Ring with DoubleAntipodalAtomicInc: each device receives replicate_group_devices signals
+        // (antipodal device gets hit from both directions).
+        // Linear: each device receives exactly replicate_group_devices - 1 signals (no wrap-around).
+        constexpr uint32_t barrier_wait_count =
+            has_wrap_around<topology>() ? replicate_group_devices : replicate_group_devices - 1;
+        noc_semaphore_wait(semaphore_ptr, barrier_wait_count);
         noc_semaphore_set(semaphore_ptr, 0);
     } else {
         // get sync core semaphore noc address

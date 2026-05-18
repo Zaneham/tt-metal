@@ -782,14 +782,16 @@ inline void fabric_send_chip_unicast_noc_unicast_semaphore_only_1d(
         reinterpret_cast<uint32_t>(packet_header), sizeof(PACKET_HEADER_TYPE));
 }
 
-// Bidirectional fabric multicast atomic increment - sends to both positive and negative directions
-// For a 1D ring with even number of devices, we multicast in both directions to cover all devices
-// with just 2 packets instead of (dispatch_devices - 1) unicast packets
+// Bidirectional fabric multicast atomic increment - sends to both positive and negative directions.
+// For ring topology, splits the ring evenly across directions.
+// For linear topology, computes position-aware ranges so endpoint devices only send in their
+// available direction (range=0 on the missing side makes the corresponding send a compile-time no-op).
 template <
     uint32_t LinearizedSrcMeshCoord,
     uint32_t MeshRows,
     uint32_t MeshCols,
     ttnn::operations::ccl::common::ReplicateGroup Axis,
+    tt::tt_fabric::Topology Topology = tt::tt_fabric::Topology::Ring,
     bool DoubleAntipodalAtomicInc = false,
     class SenderType = WorkerToFabricEdmSender>
 FORCE_INLINE void fabric_multicast_bidirectional_atomic_inc_ring_1d(
@@ -806,13 +808,19 @@ FORCE_INLINE void fabric_multicast_bidirectional_atomic_inc_ring_1d(
     constexpr uint32_t dispatch_devices =
         Axis == ttnn::operations::ccl::common::ReplicateGroup::COLS ? MeshRows : MeshCols;
 
-    // Split the ring: positive direction gets half, negative direction gets the other half
-    // For dispatch_devices = 16: positive gets 8, negative gets 7 (total 15 = dispatch_devices - 1) if
-    // DoubleAntipodalAtomicInc is false For dispatch_devices = 16: positive gets 8, negative gets 8 (total 16 =
-    // dispatch_devices) if DoubleAntipodalAtomicInc is true
-    constexpr uint32_t positive_range = DoubleAntipodalAtomicInc ? (dispatch_devices + 1) / 2 : dispatch_devices / 2;
+    constexpr uint32_t src_axis_position =
+        Axis == ReplicateGroup::COLS ? (LinearizedSrcMeshCoord / MeshCols) : (LinearizedSrcMeshCoord % MeshCols);
+
+    // For ring topology: split evenly; DoubleAntipodalAtomicInc sends an extra signal via the antipodal device.
+    // For linear topology: position-aware ranges — no wrapping, so endpoint devices naturally get range=0
+    // on the side with no neighbor, making the corresponding send a compile-time no-op.
+    constexpr uint32_t positive_range =
+        has_wrap_around<Topology>() ? (DoubleAntipodalAtomicInc ? (dispatch_devices + 1) / 2 : dispatch_devices / 2)
+                                    : (dispatch_devices - 1 - src_axis_position);
     constexpr uint32_t negative_range =
-        DoubleAntipodalAtomicInc ? dispatch_devices - positive_range : (dispatch_devices - 1) - positive_range;
+        has_wrap_around<Topology>()
+            ? (DoubleAntipodalAtomicInc ? dispatch_devices - positive_range : (dispatch_devices - 1) - positive_range)
+            : src_axis_position;
 
     // Determine directions based on axis:
     // COLS (axis=0): dispatch along column → SOUTH is positive, NORTH is negative

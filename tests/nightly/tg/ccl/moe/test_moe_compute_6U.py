@@ -39,6 +39,12 @@ MESH_GRAPH_DESC_1x16 = (
 MESH_GRAPH_DESC_1x8 = (
     "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_1x8_torus_graph_descriptor.textproto"
 )
+MESH_GRAPH_DESC_1x16_LINEAR = (
+    "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_1x16_linear_graph_descriptor.textproto"
+)
+MESH_GRAPH_DESC_1x8_LINEAR = (
+    "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_1x8_linear_graph_descriptor.textproto"
+)
 # FYI: These tests also work in a MESH_GRAPH_DESC_1x4 setting (~1 minute to set up), but not in a 1x2 setting.
 
 
@@ -132,7 +138,15 @@ MODELS_1x8 = _expand_model_configs(_MODELS_1x8)
 
 
 def _run_model_test(
-    mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+    mesh_device,
+    mesh_shape,
+    enable_trace,
+    model_cfg,
+    test_mode,
+    has_bias,
+    experts_per_device,
+    activation_type,
+    topology=None,
 ):
     if test_mode == "perf":
         selected_experts_k = 1
@@ -160,6 +174,7 @@ def _run_model_test(
         enable_trace=enable_trace,
         activation_type=activation_type,
         has_bias=has_bias,
+        topology=topology,
     )
 
 
@@ -1277,6 +1292,7 @@ def run_moe_compute_test(
     enable_trace,
     activation_type,
     has_bias,
+    topology=None,
 ):
     """
     Core test execution helper function.
@@ -1668,6 +1684,7 @@ def run_moe_compute_test(
             intermediate_size=N,
             has_bias=has_bias,
             cluster_axis=cluster_axis,
+            topology=topology,
             mux_core_range_set=mux_core_range_set,
             optional_output_tensor=tt_combine_output_tensors[layer_id],
             optional_cross_device_semaphore=combine_barrier_semaphore,
@@ -1871,6 +1888,73 @@ def test_moe_compute_1x8(
 ):
     _run_model_test(
         mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parametrized model tests (1x16 and 1x8 meshes, LINEAR topology)
+# ---------------------------------------------------------------------------
+MOE_DEVICE_PARAMS_LINEAR = {
+    "dispatch_core_axis": ttnn.DispatchCoreAxis.COL,
+    "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+    "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+    "trace_region_size": 500000,
+}
+
+
+@pytest.mark.skipif(
+    not is_mesh_graph_descriptor_set(MESH_GRAPH_DESC_1x16_LINEAR),
+    reason=f"1x16 model tests require TT_MESH_GRAPH_DESC_PATH={MESH_GRAPH_DESC_1x16_LINEAR}",
+)
+@pytest.mark.parametrize("device_params", [MOE_DEVICE_PARAMS_LINEAR], indirect=True)
+@pytest.mark.parametrize("mesh_shape, mesh_device", [((1, 16), (1, 16))], indirect=["mesh_device"])
+@pytest.mark.parametrize(
+    "enable_trace", [pytest.param(False, id="disable_trace"), pytest.param(True, id="enable_trace")]
+)
+@pytest.mark.parametrize("model_cfg, test_mode, has_bias, experts_per_device, activation_type", MODELS_1x16)
+def test_moe_compute_1x16_linear(
+    mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+):
+    from ttnn.operations.ccl import Topology
+
+    _run_model_test(
+        mesh_device,
+        mesh_shape,
+        enable_trace,
+        model_cfg,
+        test_mode,
+        has_bias,
+        experts_per_device,
+        activation_type,
+        topology=Topology.Linear,
+    )
+
+
+@pytest.mark.skipif(
+    not is_mesh_graph_descriptor_set(MESH_GRAPH_DESC_1x8_LINEAR),
+    reason=f"1x8 linear model tests require TT_MESH_GRAPH_DESC_PATH={MESH_GRAPH_DESC_1x8_LINEAR}",
+)
+@pytest.mark.parametrize("device_params", [MOE_DEVICE_PARAMS_LINEAR], indirect=True)
+@pytest.mark.parametrize("mesh_shape, mesh_device", [((1, 8), (1, 8))], indirect=["mesh_device"])
+@pytest.mark.parametrize(
+    "enable_trace", [pytest.param(False, id="disable_trace"), pytest.param(True, id="enable_trace")]
+)
+@pytest.mark.parametrize("model_cfg, test_mode, has_bias, experts_per_device, activation_type", MODELS_1x8)
+def test_moe_compute_1x8_linear(
+    mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+):
+    from ttnn.operations.ccl import Topology
+
+    _run_model_test(
+        mesh_device,
+        mesh_shape,
+        enable_trace,
+        model_cfg,
+        test_mode,
+        has_bias,
+        experts_per_device,
+        activation_type,
+        topology=Topology.Linear,
     )
 
 
