@@ -88,13 +88,6 @@ static inline uint32_t bf16_pack_to_uint32(uint16_t bf16_val) {
 // Convenience: convert fp32 -> bf16 (RNE) and pack two copies into a uint32.
 static inline uint32_t float_to_bf16_packed(float x) { return bf16_pack_to_uint32(float_to_bf16_rne(x)); }
 
-// Fill row 0 (face-0 row-0 lanes 0..15 + face-1 row-0 lanes 0..15) of a 32x32
-// bf16 tile with `bf16_val`, repeated. Rows 1..31 are left as-is.
-//
-// Used by the Stage-B fused TRISC pipeline: TRISC's downstream element-wise
-// ops (mul_binary_tile, lt_binary_tile, ...) need the broadcast value at every
-// row-0 column, but only row 0 is read by BRISC, so filling rows 1..31 would
-// be wasted L1 traffic. The fill takes 16 u32 stores (~32 cy on BRISC).
 FORCE_INLINE void generate_row0_bcast(const uint32_t cb_id, uint16_t bf16_val) {
     cb_reserve_back(cb_id, 1);
     auto* tile_u32 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_id));
@@ -114,6 +107,7 @@ FORCE_INLINE void generate_row0_bcast(const uint32_t cb_id, uint16_t bf16_val) {
 #endif
 
 #if defined(COMPILE_FOR_TRISC)
+#include "api/debug/dprint.h"
 #include "api/debug/dprint_tensix.h"
 #include "api/compute/compute_kernel_api.h"
 #include "api/compute/eltwise_binary.h"
@@ -140,56 +134,12 @@ FORCE_INLINE void generate_row0_bcast(const uint32_t cb_id, uint16_t bf16_val) {
 #include "../kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_math_top32_rm_api.h"
 #include "../kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/llk_math_deepseek_top32_rm.h"
 
-// Sampling-local single-scalar `recip_tile` for Steps 6 and 18.
-//
-// Pipeline trace establishing why only ONE scalar matters:
-//   Step 1  : sampling_reduce_tile<MAX, REDUCE_ROW>  on in_cb (row-strip;
-//             only row 0 of faces 0/1 holds the real scores). REDUCE_ROW
-//             writes each row's reduction at col 0 of that row, but since
-//             only row 0 had real data, the only meaningful output is at
-//             (face 0, row 0, col 0).
-//   Step 2  : ELWSUB with `unpack_full_transpose=true` -- in_cb's row 0
-//             unpacks into SrcA's column 0, gets `- max` (scalar bcast),
-//             so DST ends as a column-strip (col 0 of faces 0/2 valid).
-//   Step 3-4: exp_tile (full tile) -> pack to exp_cb. exp_cb still has
-//             the column-strip shape in col 0 of faces 0/2.
-//   Step 5  : sampling_reduce_tile<SUM, REDUCE_COL>. Reduces along rows
-//             for each column; only col 0 sums to a meaningful value, and
-//             the result lands at (face 0, row 0, col 0). All other lanes
-//             are 0 / noise (REDUCE_COL writes row 0 of each column; the
-//             other columns reduced zeros from the column-strip input).
-//   Step 6  : THIS RECIP. We only need (face 0, row 0, col 0).
-//   Step 7  : rmsnorm_bcast_scalar_reuse_tiles<ELWMUL,...> consumes the
-//             recip output via `TTI_MOVD2B(0, SRC_ZERO_OFFSET, MOV_1_ROW)`
-//             + ELWMUL with `p_elwise::SRCB_BCAST_ALL` (= 0x3, a true
-//             scalar broadcast). Only DST address 0 of the recip output
-//             is ever observed; every other lane is dead.
-//
-// Steps 17-19 mirror Steps 5-7 (REDUCE_COL on the filtered cumsum -> recip
-// -> scalar-bcast ELWMUL with out_cb), so Step 18 has the identical layout.
-//
-// Implementation: one SFPU vector op on Face 0 only.
-//   * `VectorMode::None` (= 0) hits the `else` branch of
-//     `_llk_math_eltwise_unary_sfpu_params_` in
-//     `tt_llk_blackhole/llk_lib/llk_math_eltwise_unary_sfpu_params.h`,
-//     which calls the body exactly once with no `inc_dst_face_addr` --
-//     so only Face 0 is touched.
-//   * The body does a single `sfpi::dst_reg[0]` recip. On Blackhole that
-//     slot is the 4-row × 8-col band at (rows 0-3, cols 0-7) of Face 0,
-//     which contains lane (0, 0). The other 31 lanes of the vector are
-//     wasted but the alternative is launching a second instruction.
-//
-// Cost: 1 SFPU vector op vs. the stock `recip_tile(0)`'s 32 ops
-// (`VectorMode::RC` × ITERATIONS=8). 32× reduction in SFPU recip cycles
-// at each of the two sites.
+// Sampling-local single-scalar `recip_tile`
 template <bool legacy_compat = true>
 void calculate_sampling_recip_scalar() {
     sfpi::vFloat in = sfpi::dst_reg[0];
     if constexpr (legacy_compat) {
         sfpi::vFloat out = ckernel::sfpu::_reciprocal_compat_<APPROX ? 2 : 3>(in);
-        // Input is always a non-negative softmax denominator / cumsum
-        // total, so the negate-on-sign branch in the stock
-        // `calculate_reciprocal` is unnecessary.
         if constexpr (DST_ACCUM_MODE || APPROX) {
             sfpi::dst_reg[0] = out;
         } else {
@@ -213,6 +163,26 @@ void calculate_sampling_recip_scalar() {
 template <bool legacy_compat = true>
 ALWI void sampling_recip_tile_scalar(uint32_t idst) {
     _llk_math_eltwise_unary_sfpu_params_(calculate_sampling_recip_scalar<legacy_compat>, idst, (int)VectorMode::None);
+}
+
+// Clamp the scalar at DST[idst][0] to at most `param` (passed as an fp32
+// bit-pattern). Used after the top-p MIN reduce to bound `cum_kept` by 1.0:
+// if the cumsum (computed in DST FP32) ever saturates strictly below `p` --
+// which happens for sharp distributions where the tail probs vanish to bf16
+// zero in the pack-reload between softmax and cumsum -- every lane is still
+// "below cutoff" and the MIN-reduce returns ~BIG instead of the true kept
+// mass. Since the kept mass is mathematically <= 1.0, clamping here turns
+// that pathological case into a no-op rescale (1/1.0 = 1.0) and keeps the
+// surviving probs unscaled.
+inline void calculate_sampling_clamp_max_scalar(uint32_t param) {
+    const sfpi::vFloat max_val = ckernel::sfpu::Converter::as_float(param);
+    sfpi::vFloat in = sfpi::dst_reg[0];
+    v_if(in > max_val) { sfpi::dst_reg[0] = max_val; }
+    v_endif;
+}
+
+ALWI void sampling_clamp_max_tile_scalar(uint32_t idst, uint32_t param) {
+    _llk_math_eltwise_unary_sfpu_params_(calculate_sampling_clamp_max_scalar, idst, (int)VectorMode::None, param);
 }
 
 // ----------------------------------------------------------------------------
@@ -254,7 +224,9 @@ ALWI void sampling_recip_tile_scalar(uint32_t idst) {
 template <SfpuType OP>
 inline void calculate_sampling_binary_comp_first_column(
     const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
-    static_assert(OP == SfpuType::le || OP == SfpuType::ge, "sampling_binary_comp_first_column supports le/ge only");
+    static_assert(
+        OP == SfpuType::le || OP == SfpuType::lt || OP == SfpuType::ge,
+        "sampling_binary_comp_first_column supports le/lt/ge only");
     constexpr uint dst_tile_size_sfpi = 32;
     constexpr int ITERATIONS_FIRST_COLUMN = 4;
 
@@ -265,6 +237,9 @@ inline void calculate_sampling_binary_comp_first_column(
 
         if constexpr (OP == SfpuType::le) {
             v_if(in0 <= in1) { result = sfpi::vConst1; }
+            v_endif;
+        } else if constexpr (OP == SfpuType::lt) {
+            v_if(in0 < in1) { result = sfpi::vConst1; }
             v_endif;
         } else {
             v_if(in0 >= in1) { result = sfpi::vConst1; }
@@ -279,6 +254,17 @@ inline void calculate_sampling_binary_comp_first_column(
 ALWI void sampling_le_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
     _llk_math_eltwise_binary_sfpu_params_(
         calculate_sampling_binary_comp_first_column<SfpuType::le>, idst0, idst1, odst, (int)VectorMode::C);
+}
+
+// Strict less-than variant. Used by the top-p cutoff mask so that lanes where
+// `cumsum == p` (which happens in bf16 when the cumsum saturates exactly at
+// `p_bf16`) are treated as ABOVE the cutoff, matching BRISC's `num_kept` rule
+// (`!(cum[i] < p_bf16)`). Without this, every saturated lane gets inflated by
+// BIG and the subsequent MIN-reduce returns ~BIG instead of `cum_kept`, which
+// shrinks every output prob by ~1/BIG.
+ALWI void sampling_lt_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
+    _llk_math_eltwise_binary_sfpu_params_(
+        calculate_sampling_binary_comp_first_column<SfpuType::lt>, idst0, idst1, odst, (int)VectorMode::C);
 }
 
 ALWI void sampling_ge_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
@@ -490,9 +476,22 @@ void trisc_fused_softmax_top_p_sampling_block() {
     copy_tile(p_cb, 0, 1);
     {
         DeviceZoneScopedN("SP-TOPP-TRISC-9");
-        // Step 12: DST[2] = (cumsum <= p) ? 1.0 : 0.0
-        le_binary_tile_init();
-        MATH((sampling_le_binary_tile_first_column(0, 1, 2)));
+        // Step 12: DST[2] = (cumsum < p) ? 1.0 : 0.0
+        //
+        // Uses strict-less-than (not <=) on purpose. The boundary lane where
+        // `cumsum == p` must be treated as ABOVE the cutoff so it isn't
+        // inflated by Step 13's BIG. This matters in two cases:
+        //   (a) `p = 1.0`: the final cumsum lane is exactly 1.0, and we need
+        //       that lane to survive as the MIN-reduce winner = cum_kept.
+        //   (b) bf16 saturation: when the tail probs are below bf16 ULP near
+        //       1.0, the packed cumsum stops moving and saturates at exactly
+        //       `p_bf16`. With `<=`, every saturated lane is "kept" and
+        //       inflated, so MIN returns ~BIG -> cum_kept ~= 100 -> all
+        //       output probs come out ~100x too small.
+        // This also matches BRISC's `if (!(cum[i] < p_bf16))` num_kept rule
+        // so TRISC's rescale denominator and BRISC's num_kept stay consistent.
+        lt_binary_tile_init();
+        MATH((sampling_lt_binary_tile_first_column(0, 1, 2)));
         // Step 13: DST[2] *= BIG. Below-cutoff lanes blow up to ~BIG so the
         // upcoming Pass 4 MIN-reduce skips them; above-cutoff lanes stay at 0.
         constexpr uint32_t BIG_VAL_FP32_U32 = 0x42C80000u;  // 100.0f
@@ -536,6 +535,18 @@ void trisc_fused_softmax_top_p_sampling_block() {
     }
     {
         DeviceZoneScopedN("SP-TOPP-TRISC-13");
+        // Step 17.5: Clamp cum_kept <= 1.0. The MIN-reduce sentinel trick
+        // (filtered = cumsum + BIG*mask, then MIN) only works when at least one
+        // lane has mask=0 (i.e. cumsum >= p). When the DST FP32 cumsum
+        // saturates strictly below p_bf16 -- which happens for sharp
+        // distributions whose tail probs round to 0 in bf16 when packed to
+        // probs_cb between Steps 8 and 9 -- every lane stays "below cutoff"
+        // and MIN returns ~BIG instead of cum_kept. Clamping to 1.0 here turns
+        // that into a no-op rescale (1/1.0 = 1.0), preserving the surviving
+        // probs unscaled; for the well-conditioned case cum_kept is already
+        // <= 1.0 by construction, so the clamp is a true no-op.
+        constexpr uint32_t SP_ONE_FP32 = 0x3F800000u;  // 1.0f
+        MATH((sampling_clamp_max_tile_scalar(0, SP_ONE_FP32)));
         // Step 18: Compute DST[0] = 1/cum_kept
         recip_tile_init();
         MATH((sampling_recip_tile_scalar(0)));
@@ -561,6 +572,9 @@ void trisc_fused_softmax_top_p_sampling_block() {
         copy_tile(exp_cb, 0, 0);
         sfpu_reduce_init<PoolType::MIN, DataFormat::Float32>();
         sfpu_reduce<PoolType::MIN, DataFormat::Float32, ReduceDim::REDUCE_COL>(0);
+        // Same clamp as Step 17.5: see comment above.
+        constexpr uint32_t SP_ONE_FP32 = 0x3F800000u;  // 1.0f
+        MATH((sampling_clamp_max_tile_scalar(0, SP_ONE_FP32)));
         recip_tile_init();
         MATH((sampling_recip_tile_scalar(0)));
     }
@@ -1850,7 +1864,6 @@ struct TopKSampling {
                                 indices_src_l1, get_noc_addr(indices_dst_l1), 32 * sizeof(uint32_t));
 
                             noc_async_write_barrier();
-
                             cb_pop_front(CTArgs::probs_cb, 1);
                         }
 
