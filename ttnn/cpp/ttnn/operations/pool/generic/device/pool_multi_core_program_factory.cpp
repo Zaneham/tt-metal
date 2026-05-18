@@ -513,23 +513,17 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
         (params.max_rows_for_reduction < tt::constants::TILE_HEIGHT || window_size_hw <= tt::constants::FACE_HEIGHT)
             ? 2u
             : 4u;
+    const std::optional<FaceGeometry> input_face_geometry =
+        return_indices ? std::nullopt
+                       : std::optional{FaceGeometry{
+                             .face_r_dim = face_r_dim_for_unpack, .num_faces = num_faces_in_input_tile_for_cb}};
 
-    add_local_cb(
-        in_cb_id_0,
-        in_cb_pagesize,
-        in_cb_npages,
-        params.data_format,
-        FaceGeometry{.face_r_dim = face_r_dim_for_unpack, .num_faces = num_faces_in_input_tile_for_cb});
+    add_local_cb(in_cb_id_0, in_cb_pagesize, in_cb_npages, params.data_format, input_face_geometry);
     log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_0, in_cb_pagesize, in_cb_npages);
 
     if (cb_sizes.has_split_reader) {
         in_cb_id_1 = next_cb_index++;
-        add_local_cb(
-            in_cb_id_1,
-            in_cb_pagesize,
-            in_cb_npages,
-            params.data_format,
-            FaceGeometry{.face_r_dim = face_r_dim_for_unpack, .num_faces = num_faces_in_input_tile_for_cb});
+        add_local_cb(in_cb_id_1, in_cb_pagesize, in_cb_npages, params.data_format, input_face_geometry);
         log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_1, in_cb_pagesize, in_cb_npages);
     }
 
