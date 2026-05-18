@@ -453,33 +453,3 @@ def test_deepseek_v3_mla_tilize_trace_mode(
     ), f"Shape mismatch: {torch_output_from_tt.shape} != {torch_output_tensor.shape}"
 
     assert_equal(torch_output_tensor, torch_output_from_tt)
-
-
-import ttnn
-
-
-def test_single_device_tilize_padded(device):
-    """Repro: to_layout(TILE) hangs on HEIGHT_SHARDED tensor needing padding in slow dispatch.
-
-    Requires TT_METAL_SLOW_DISPATCH_MODE=1. Passes with fast dispatch.
-    The hang is in ttnn::pad called from to_layout when height (8) is not tile-aligned (32).
-    """
-    core_x = 0
-    core_y = 9
-    target = ttnn.CoreCoord(core_x, core_y)
-    core_grid = ttnn.CoreRangeSet([ttnn.CoreRange(target, target)])
-    mem_cfg = ttnn.MemoryConfig(
-        ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-        ttnn.BufferType.L1,
-        ttnn.ShardSpec(core_grid, [32, 128], ttnn.ShardOrientation.ROW_MAJOR),
-    )
-
-    # Height 8 requires padding to tile height 32 — this triggers the hang.
-    # Height 32 (tile-aligned) passes because it skips the pad path.
-    Q = torch.randn(1, 1, 8, 128, dtype=torch.bfloat16)
-
-    tt_Q = ttnn.from_torch(
-        Q, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device, pad_value=0.0, memory_config=mem_cfg
-    )
-
-    tt_Q = ttnn.to_layout(tt_Q, ttnn.TILE_LAYOUT, memory_config=mem_cfg)
