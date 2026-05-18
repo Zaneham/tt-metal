@@ -113,9 +113,9 @@ enum out_op_id_e
     OUT_ID4 = 4,
 };
 
-enum ReluType
+enum class ReluType : std::uint8_t
 {
-    NO_RELU,
+    NO_RELU = 0,
     ZERO_RELU,
     MIN_THRESHOLD_RELU,
     MAX_THRESHOLD_RELU,
