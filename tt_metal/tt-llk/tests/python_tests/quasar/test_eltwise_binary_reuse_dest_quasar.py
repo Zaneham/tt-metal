@@ -69,6 +69,7 @@ TILE_DIMENSIONS = [32, 32]
             DataFormat.MxFp4,
             DataFormat.MxInt8,
             DataFormat.MxInt4,
+            DataFormat.MxInt2,
         ],
     ),
     mathop=[
@@ -114,26 +115,6 @@ def test_eltwise_binary_reuse_dest_quasar(
     if mathop == MathOperation.Elwmul and formats.output_format == DataFormat.MxFp4:
         pytest.skip(
             "Elwmul with MxFp4 output and reuse_dest has rounding differences; skip to avoid flaky tolerance failures"
-        )
-
-    if mathop == MathOperation.Elwmul and formats.output_format == DataFormat.MxFp4:
-        pytest.skip(
-            "Elwmul with MxFp4 output and reuse_dest has rounding differences; skip to avoid flaky tolerance failures"
-        )
-
-    if (
-        mathop == MathOperation.Elwadd
-        and formats.input_format == DataFormat.Float16
-        and formats.output_format == DataFormat.MxInt4
-        and dest_sync_mode == DestSync.Half
-    ):
-        pytest.skip(
-            "Elwadd with Float16 input, MxInt4 output and dest_sync=Half: HW's "
-            "Half-mode accumulation path diverges from the bfloat16 golden in a "
-            "way that the Full-mode path does not (Full passes). Tried matching "
-            "with float16-precision internal_dtype — that also fails Full, "
-            "ruling out simple mantissa-bit-loss as the cause. The Half-mode HW "
-            "conversion is not yet modeled. Skip to avoid flaky tolerance failures."
         )
 
     # MX formats require implied_math_format=Yes on Quasar; set it and disable_format_inference so golden matches.
@@ -215,9 +196,25 @@ def test_eltwise_binary_reuse_dest_quasar(
         src_B_t = quantize_mx_tensor_chunked(
             src_B_t.to(torch.bfloat16), formats.input_format
         )
-    golden_tensor = torch.zeros(tile_cnt_output * tile_elements, dtype=torch_format)
 
-    internal_dtype = torch.bfloat16 if use_mx else torch_format
+    # On Quasar with IMPLIED_MATH_FORMAT=Yes the HW dest accumulator's physical
+    # storage is implied from the SrcA tag: Float16 input → FP16A (1.5.10);
+    # Float16_b and plain MX inputs → BF16 (1.8.7). Match that here so the
+    # golden's multi-tile accumulation rounds the same way as HW. The pack
+    # stage widens dest to (sign, 8-bit exp, 23-bit mantissa) without a bf16
+    # detour, so the post-loop tensor is kept in fp32 — feeding bf16 into the
+    # MX quantize would discard 3 mantissa bits the HW preserves.
+    if use_mx:
+        internal_dtype = (
+            torch.float16
+            if formats.input_format == DataFormat.Float16
+            else torch.bfloat16
+        )
+        golden_dtype = torch.float32
+    else:
+        internal_dtype = torch_format
+        golden_dtype = torch_format
+    golden_tensor = torch.zeros(tile_cnt_output * tile_elements, dtype=golden_dtype)
 
     eltwise_golden = (
         EltwiseBinaryGolden()
@@ -275,7 +272,7 @@ def test_eltwise_binary_reuse_dest_quasar(
                 else:
                     dest = srcA * srcB
 
-        golden_tensor[out_start : out_start + tile_elements] = dest.to(torch_format)
+        golden_tensor[out_start : out_start + tile_elements] = dest.to(golden_dtype)
 
     configuration = TestConfig(
         "sources/quasar/eltwise_binary_reuse_dest_quasar_test.cpp",
@@ -334,14 +331,42 @@ def test_eltwise_binary_reuse_dest_quasar(
     torch_format = format_dict[formats.output_format]
     res_tensor = torch.tensor(res_from_L1, dtype=torch_format)
 
-    # Quantize golden tensor if output format is MX format
+    # Quantize golden tensor if output format is MX format. Feed the native
+    # (fp16 or bf16) values directly — HW does not bf16-cast before MX quantize.
     if formats.output_format.is_mx_format():
         golden_tensor = quantize_mx_tensor_chunked(
-            golden_tensor.to(torch.bfloat16), formats.output_format
+            golden_tensor, formats.output_format
         ).to(torch_format)
 
     test_passed = passed_test(
         golden_tensor, res_tensor, formats.output_format, print_errors=False
     )
 
+    if not test_passed:
+        print_diff(golden_tensor, res_tensor)
+
     assert test_passed, "Assert against golden failed"
+
+
+def print_diff(golden_tensor, res_tensor, max_print: int = 32):
+    diff = (golden_tensor.to(torch.float32) - res_tensor.to(torch.float32)).abs()
+    mismatch_mask = ~torch.isclose(
+        golden_tensor.to(torch.float32),
+        res_tensor.to(torch.float32),
+        rtol=0.0,
+        atol=0.0,
+        equal_nan=True,
+    )
+    mismatch_idx = torch.nonzero(mismatch_mask, as_tuple=False).flatten()
+    total = mismatch_idx.numel()
+    print(f"\n=== Diff: {total}/{golden_tensor.numel()} elements differ ===")
+    if total == 0:
+        return
+    print(f"max |diff| = {diff.max().item():.6g}")
+    print(f"{'idx':>8} {'golden':>14} {'result':>14} {'abs_diff':>14}")
+    for idx in mismatch_idx[:max_print].tolist():
+        g = golden_tensor[idx].item()
+        r = res_tensor[idx].item()
+        print(f"{idx:>8d} {g:>14.6g} {r:>14.6g} {abs(g - r):>14.6g}")
+    if total > max_print:
+        print(f"... ({total - max_print} more)")
