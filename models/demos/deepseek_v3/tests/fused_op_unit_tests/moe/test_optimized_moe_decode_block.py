@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import random
 
 import pytest
@@ -580,11 +579,11 @@ def _expert_tensor_to_list(expert_tensor: torch.Tensor) -> list[torch.Tensor]:
     return [expert_tensor[:, i : i + 1, ...] for i in range(num_experts)]
 
 
-@pytest.mark.requires_device(["QUAD"])
-@pytest.mark.skipif(
-    (os.getenv("USE_TORUS_MODE") is None),
-    reason=f"Requires ring fabric",
-)
+# @pytest.mark.requires_device(["QUAD"])
+# @pytest.mark.skipif(
+#     (os.getenv("USE_TORUS_MODE") is None),
+#     reason=f"Requires ring fabric",
+# )
 @pytest.mark.parametrize(
     "mesh_shape, mesh_device",
     [
