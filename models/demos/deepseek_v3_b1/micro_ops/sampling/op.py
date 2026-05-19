@@ -469,8 +469,6 @@ class SamplingOp:
             ),
             ("sampling_num_internal_iterations", num_internal_iterations),
             ("sampling_softmax_in_cb", softmax_in_cb),
-            # Kept for the deprecated InvTempBF16 slot on WriterCTArgs; BRISC
-            # no longer reads it (TRISC consumes inv_temp_bf16 directly).
             ("sampling_inv_temp_bf16", inv_temp_bf16),
             ("sampling_enable_metadata", sampling_enable_metadata_value),
             ("sampling_copy_probabilities", 1 if copy_probabilities else 0),
@@ -622,9 +620,6 @@ class SamplingOp:
                 ttnn.CBFormatDescriptor(buffer_index=rand_cb, data_format=ttnn.bfloat16, page_size=bf16_tile_size)
             ],
         )
-        # Dedicated TRISC -> BRISC mask channel on the final core. Sized at
-        # one bf16 tile to match the ge_binary_tile output that TRISC packs in
-        # Block C of trisc_fused_softmax_top_p_sampling_block.
         mask_cb_descriptor = ttnn.CBDescriptor(
             total_size=bf16_tile_size,
             core_ranges=final_core_crs,
@@ -950,8 +945,6 @@ class SamplingOp:
                     ("sampling_max_cb", max_cb if is_final_mesh_device else 0),
                     ("sampling_sum_cb", sum_cb if is_final_mesh_device else 0),
                     ("sampling_scaler_cb", scaler_cb if is_final_mesh_device else 0),
-                    # ProbsOutCBId: TRISC -> BRISC channel for the rescaled
-                    # PMF (Step 21.5 push). Single popper (BRISC).
                     ("sampling_probs_out_cb", probs_out_cb if is_final_mesh_device else 0),
                     ("sampling_rand_cb", rand_cb if is_final_mesh_device else 0),
                     ("sampling_seed", seed),
@@ -973,8 +966,6 @@ class SamplingOp:
                     ("sampling_stage2_num_input_tiles", stage2_mesh_tiles),
                     ("sampling_num_internal_iterations", num_internal_iterations),
                     ("sampling_mask_cb", mask_cb if is_final_mesh_device else 0),
-                    # Metadata-direct temperature read on TRISC (replaces
-                    # the BRISC -> TRISC 1-tile `temp_cb` marshalling).
                     ("sampling_enable_metadata", sampling_enable_metadata_value),
                     ("sampling_metadata_address", sampling_metadata_address_value),
                     ("sampling_inv_temp_bf16", inv_temp_bf16),
@@ -997,9 +988,6 @@ class SamplingOp:
                     ("sampling_rand_output_addr", rand_output_addr),
                     ("sampling_num_internal_iterations", num_internal_iterations),
                     ("sampling_softmax_in_cb", softmax_in_cb if is_final_mesh_device else 0),
-                    # Kept for the deprecated InvTempBF16 slot on WriterCTArgs;
-                    # BRISC no longer reads it (TRISC consumes inv_temp_bf16
-                    # directly).
                     ("sampling_inv_temp_bf16", inv_temp_bf16),
                     ("sampling_enable_metadata", sampling_enable_metadata_value),
                     ("sampling_copy_probabilities", 1 if copy_probabilities else 0),
@@ -1007,8 +995,6 @@ class SamplingOp:
                     ("sampling_copy_probabilities_to_q", 0),
                     ("sampling_p_bcast_cb", softmax_sub_cb if is_final_mesh_device else 0),
                     ("sampling_rand_bcast_cb", sum_cb if is_final_mesh_device else 0),
-                    # ProbsOutCBId slot in WriterCTArgs: dedicated TRISC ->
-                    # BRISC channel for the rescaled PMF (formerly `temp_cb`).
                     ("sampling_probs_out_cb", probs_out_cb if is_final_mesh_device else 0),
                     ("sampling_mask_cb", mask_cb if is_final_mesh_device else 0),
                 ]

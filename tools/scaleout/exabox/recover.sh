@@ -221,7 +221,7 @@ echo ""
 # Step 1: tt-smi reset
 if [[ "$SKIP_RESET" == false ]]; then
     echo "Running tt-smi -glx_reset..."
-    mpirun --host "$HOSTS" --mca btl_tcp_if_exclude docker0,lo,tailscale0  tt-smi -glx_reset
+    mpirun --host "$HOSTS" --mca btl_tcp_if_exclude docker0,lo,tailscale0 tt-smi -glx_reset
 
     echo ""
     echo "Sleeping ${SLEEP_DURATION}s..."

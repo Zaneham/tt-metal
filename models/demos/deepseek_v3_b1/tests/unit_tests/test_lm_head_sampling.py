@@ -1893,8 +1893,6 @@ def test_persistent_mode_spec_decode(mesh_device, use_fp32, num_mtp_levels):
         else:
             logger.debug(f"[TEST] skipping golden computation")
 
-        # Reuse a single output buffer across iterations exactly like
-        # `DeepSeekV3.read_result` in the working demo (model.py).
         output_tensor = ttnn.from_torch(
             torch.zeros(1, token_meta_words, dtype=torch.int32),
             dtype=ttnn.uint32,

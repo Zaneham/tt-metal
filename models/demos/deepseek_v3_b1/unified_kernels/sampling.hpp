@@ -1005,12 +1005,6 @@ struct TopKSampling {
         static constexpr bool stage2_receiver = Stage2Receiver == 1;
         static constexpr uint32_t output_addr = OutputAddr;
         static constexpr uint32_t rand_output_addr = RandOutputAddr;
-        // NOTE: TempCBId / InvTempBF16 template slots are retained for
-        // backward template-arity compat with existing call sites but BRISC
-        // no longer uses them -- TRISC consumes the temperature directly
-        // from the metadata buffer (or from ComputeCTArgs::InvTempBF16 as
-        // the compile-time fallback). Leaving the slots avoids touching
-        // every WriterCTArgs<...> instantiation positionally.
         static constexpr uint32_t softmax_in_cb = SoftmaxInCBId;
         static constexpr bool defer_socket_output = DeferSocketOutput == 1;
         static constexpr bool enable_metadata = EnableMetadata == 1;
@@ -1067,10 +1061,6 @@ struct TopKSampling {
         static constexpr uint32_t softmax_sub_cb = SoftmaxSubCBId;
         static constexpr uint32_t max_cb = MaxCBId;
         static constexpr uint32_t sum_cb = SumCBId;
-        // Stage-B semantic aliases (same physical CBs as softmax_sub_cb / sum_cb,
-        // which the softmax tail never reads). BRISC pushes broadcast `p` to
-        // p_bcast_cb and broadcast `rand` to rand_bcast_cb; TRISC pops them
-        // in the fused post-softmax pipeline.
         static constexpr uint32_t p_bcast_cb = SoftmaxSubCBId;
         static constexpr uint32_t rand_bcast_cb = SumCBId;
         static constexpr uint32_t scaler_cb = ScalerCBId;
@@ -1097,9 +1087,7 @@ struct TopKSampling {
         static constexpr uint32_t stage1_num_input_tiles = Stage1NumInputTiles;
         static constexpr uint32_t stage2_row_elements = Stage2RowElements;
         static constexpr uint32_t stage2_num_input_tiles = Stage2NumInputTiles;
-        // TRISC -> BRISC mask channel. See WriterCTArgs::mask_cb for rationale.
         static constexpr uint32_t mask_cb = MaskCBId;
-        // Metadata-read parameters (see template-arg comments above).
         static constexpr bool enable_metadata = EnableMetadata == 1;
         static constexpr uint32_t metadata_output_l1_addr = MetadataOutputL1Addr;
         static constexpr uint32_t inv_temp_bf16 = InvTempBF16;
@@ -1751,10 +1739,6 @@ struct TopKSampling {
                             noc_async_read_barrier();
                             cb_push_back(CTArgs::softmax_in_cb, 1);
                         }
-
-                        // rand_cb lands mid-pipeline (after Pass 2 cumsum), giving us
-                        // ~Pass-3-worth of slack to broadcast it back before TRISC's
-                        // Pass 4 needs rand_bcast_cb.
                         uint16_t rand;
                         {
                             DeviceZoneScopedN("SP-FC-RAND-STAGE");
@@ -1778,9 +1762,6 @@ struct TopKSampling {
                         uint32_t selected_index;
                         {
                             DeviceZoneScopedN("SP-FC-LOOKUP");
-                            // K==1 shortcut: the top-K reduction already produced a single
-                            // winner, so argmax = that winner. No softmax / top-p / random
-                            // sampling needed -- TRISC's mask is irrelevant here.
                             if (K == 1) {
                                 selected_index = global_indices[0];
                             } else {
