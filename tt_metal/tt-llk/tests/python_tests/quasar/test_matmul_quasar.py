@@ -267,7 +267,8 @@ def test_matmul(
     )
 
     if not test_passed and format.output_format.is_mx_format():
-        # MxInt2 has only 4 quantization levels per row, so K-deep accumulation
+        # MxInt2 elements are 2 bits → only {-1, 0, -0 (not recommended) +1} scaled by a per-block
+        # E8M0 exponent, so the lattice is very coarse. K-deep accumulation
         # drift between the golden (fp32-internal torch.matmul within each KT
         # tile) and HW (bf16/fp16 per-mul-add accumulation) tips occasional
         # elements into adjacent bins. Allow a more permissive mismatch ratio

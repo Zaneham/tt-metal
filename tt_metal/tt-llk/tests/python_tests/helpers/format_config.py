@@ -153,6 +153,22 @@ class DataFormat(Enum):
             DataFormat.MxInt2,
         }
 
+    def is_mx_int_format(self) -> bool:
+        """Checks if the data format is an MX integer format."""
+        return self in {
+            DataFormat.MxInt8,
+            DataFormat.MxInt4,
+            DataFormat.MxInt2,
+        }
+
+    def is_mx_fp_format(self) -> bool:
+        """Checks if the data format is an MX floating-point format."""
+        return self in {
+            DataFormat.MxFp8R,
+            DataFormat.MxFp8P,
+            DataFormat.MxFp4,
+        }
+
     def supports_l1_accumulation(self) -> bool:
         """Checks if the data format supports L1 accumulation"""
         return self in {

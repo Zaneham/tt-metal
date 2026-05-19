@@ -198,8 +198,8 @@ def test_eltwise_binary_reuse_dest_quasar(
         )
 
     # On Quasar with IMPLIED_MATH_FORMAT=Yes the HW dest accumulator's physical
-    # storage is implied from the SrcA tag: Float16 input → FP16A (1.5.10);
-    # Float16_b and plain MX inputs → BF16 (1.8.7). Match that here so the
+    # storage is implied from the SrcA tag: Float16 input → FP16A (S1E5M10);
+    # Float16_b and plain MX inputs → BF16 (S1E8M7). Match that here so the
     # golden's multi-tile accumulation rounds the same way as HW. The pack
     # stage widens dest to (sign, 8-bit exp, 23-bit mantissa) without a bf16
     # detour, so the post-loop tensor is kept in fp32 — feeding bf16 into the
@@ -332,41 +332,14 @@ def test_eltwise_binary_reuse_dest_quasar(
     res_tensor = torch.tensor(res_from_L1, dtype=torch_format)
 
     # Quantize golden tensor if output format is MX format. Feed the native
-    # (fp16 or bf16) values directly — HW does not bf16-cast before MX quantize.
+    # (fp16 or bf16) values directly.
     if formats.output_format.is_mx_format():
         golden_tensor = quantize_mx_tensor_chunked(
             golden_tensor, formats.output_format
         ).to(torch_format)
 
-    test_passed = passed_test(
-        golden_tensor, res_tensor, formats.output_format, print_errors=False
-    )
-
-    if not test_passed:
-        print_diff(golden_tensor, res_tensor)
-
-    assert test_passed, "Assert against golden failed"
-
-
-def print_diff(golden_tensor, res_tensor, max_print: int = 32):
-    diff = (golden_tensor.to(torch.float32) - res_tensor.to(torch.float32)).abs()
-    mismatch_mask = ~torch.isclose(
-        golden_tensor.to(torch.float32),
-        res_tensor.to(torch.float32),
-        rtol=0.0,
-        atol=0.0,
-        equal_nan=True,
-    )
-    mismatch_idx = torch.nonzero(mismatch_mask, as_tuple=False).flatten()
-    total = mismatch_idx.numel()
-    print(f"\n=== Diff: {total}/{golden_tensor.numel()} elements differ ===")
-    if total == 0:
-        return
-    print(f"max |diff| = {diff.max().item():.6g}")
-    print(f"{'idx':>8} {'golden':>14} {'result':>14} {'abs_diff':>14}")
-    for idx in mismatch_idx[:max_print].tolist():
-        g = golden_tensor[idx].item()
-        r = res_tensor[idx].item()
-        print(f"{idx:>8d} {g:>14.6g} {r:>14.6g} {abs(g - r):>14.6g}")
-    if total > max_print:
-        print(f"... ({total - max_print} more)")
+    assert passed_test(
+        golden_tensor,
+        res_tensor,
+        formats.output_format,
+    ), "Assert against golden failed"
