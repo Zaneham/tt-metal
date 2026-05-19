@@ -28,11 +28,6 @@ void validate_unpack_face_geometry(uint32_t face_r_dim, uint32_t num_faces) {
         face_r_dim,
         tt::constants::FACE_HEIGHT);
     TT_FATAL(num_faces > 0, "num_faces must be > 0");
-    TT_FATAL(
-        tt::constants::TILE_HEIGHT % face_r_dim == 0,
-        "tile height ({}) must be divisible by face_r_dim ({}) for JIT unpack descriptors",
-        tt::constants::TILE_HEIGHT,
-        face_r_dim);
 }
 
 }  // namespace

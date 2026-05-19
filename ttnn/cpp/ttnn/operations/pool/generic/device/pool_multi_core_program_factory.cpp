@@ -508,15 +508,14 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
 
     const uint32_t window_size_hw = kernel_h * kernel_w;
     const uint32_t raw_face_r = std::min(window_size_hw, 16u);
-    const uint32_t face_r_dim_for_unpack = align_pool_unpack_face_r_dim(raw_face_r);
     const uint32_t num_faces_in_input_tile_for_cb =
         (params.max_rows_for_reduction < tt::constants::TILE_HEIGHT || window_size_hw <= tt::constants::FACE_HEIGHT)
             ? 2u
             : 4u;
     const std::optional<FaceGeometry> input_face_geometry =
-        return_indices ? std::nullopt
-                       : std::optional{FaceGeometry{
-                             .face_r_dim = face_r_dim_for_unpack, .num_faces = num_faces_in_input_tile_for_cb}};
+        return_indices
+            ? std::nullopt
+            : std::optional{FaceGeometry{.face_r_dim = raw_face_r, .num_faces = num_faces_in_input_tile_for_cb}};
 
     add_local_cb(in_cb_id_0, in_cb_pagesize, in_cb_npages, params.data_format, input_face_geometry);
     log_debug(tt::LogOp, "CB {} :: PS = {}, NP = {}", in_cb_id_0, in_cb_pagesize, in_cb_npages);

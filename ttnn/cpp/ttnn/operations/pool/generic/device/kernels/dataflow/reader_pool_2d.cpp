@@ -73,8 +73,7 @@ ALWI void read_kernel_with_top_left_index(uint32_t ind, uint32_t in_l1_read_base
                 zero_out_page(noc, in_cb);
             }
         }
-        // When unpack face_r_dim is aligned to a divisor of TILE_HEIGHT (see align_pool_unpack_face_r_dim), the
-        // CB holds TILE_HEIGHT rows but the kernel window may be smaller; pad with init so max/avg are correct.
+        // When the CB intentionally holds more rows than the kernel window, pad the extra rows with the init value.
         if constexpr (!is_large_kernel) {
             if (num_tilized_rows > total_elems_to_reduce) {
                 fill_with_val(get_write_ptr(in_cb_id), in_cb_sz, static_cast<uint16_t>(bf16_init_value));

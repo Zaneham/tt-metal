@@ -46,22 +46,6 @@ uint32_t get_bf16_pool_init_value(Pool2DType pool_type) {
     return std::bit_cast<uint16_t>(bfloat16::truncate(value));
 }
 
-uint32_t align_pool_unpack_face_r_dim(uint32_t raw_face_r) {
-    TT_ASSERT(raw_face_r >= 1 && raw_face_r <= tt::constants::FACE_HEIGHT);
-    // JIT unpack metadata derives num_faces_r_dim as tile_r_dim / face_r_dim
-    // (see compute_num_faces_rc_dims in tt_metal/jit_build/genfiles.cpp), so
-    // face_r_dim must divide TILE_HEIGHT. Round up raw kernel rows to the
-    // smallest supported face height instead of emitting invalid metadata for
-    // kernels like 3x1 or 5x1.
-    static constexpr uint32_t kValidFaceRDims[] = {1, 2, 4, 8, 16};
-    for (uint32_t d : kValidFaceRDims) {
-        if (d >= raw_face_r) {
-            return d;
-        }
-    }
-    return tt::constants::FACE_HEIGHT;
-}
-
 bool is_pool_op_one_scalar_per_core(
     Pool2DType pool_type,
     bool ceil_mode,
@@ -166,13 +150,9 @@ FactoryParameters get_factory_parameters(
     // for medium kernels with sizes 16 < kernel_size_hw < 32 we tilize an entire tile even if some rows are unused,
     // so the in_cb height must be equal to the TILE_HEIGHT, but for kernels spanning only one face we set the
     // face_r_dim to only tilize the necessary number of rows, thus we can make the in_cb height smaller
-    const uint32_t raw_face_r = std::min(kernel_size_hw, tt::constants::FACE_HEIGHT);
-    const uint32_t aligned_face_r_for_unpack = align_pool_unpack_face_r_dim(raw_face_r);
-    const bool need_unpack_pad_tilize_tile = (aligned_face_r_for_unpack != raw_face_r);
+    // JIT supports compact face metadata for these cases, so avoid padding small pool windows to a full tile.
     uint32_t num_tilized_rows =
-        need_unpack_pad_tilize_tile
-            ? tt::constants::TILE_HEIGHT
-            : (kernel_size_hw <= tt::constants::FACE_WIDTH ? kernel_size_hw : tt::constants::TILE_HEIGHT);
+        kernel_size_hw <= tt::constants::FACE_WIDTH ? kernel_size_hw : tt::constants::TILE_HEIGHT;
     uint32_t in_ntiles_c = (uint32_t)std::ceil((float)in_channels / num_shards_c / tt::constants::TILE_WIDTH);
     // Use ceiling division so WIDTH/BLOCK sharding with non-integer channels/core is handled
     // correctly — avoids false partial-tile detection when floor(channels/cores) < FACE_WIDTH.

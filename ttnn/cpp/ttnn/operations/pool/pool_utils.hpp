@@ -127,9 +127,6 @@ uint32_t get_bf16_pool_scalar(
     Pool2DType pool_type, uint32_t kernel_h, uint32_t kernel_w, std::optional<int32_t> divisor_override);
 uint32_t get_bf16_pool_init_value(Pool2DType pool_type);
 
-/// Smallest supported unpack face row count that is >= \p raw_face_r.
-/// The JIT requires tile height to be divisible by face_r_dim when deriving per-CB face metadata.
-uint32_t align_pool_unpack_face_r_dim(uint32_t raw_face_r);
 std::map<std::string, std::string> get_defines(Pool2DType pool_type);
 
 bool is_pool_op_one_scalar_per_core(
