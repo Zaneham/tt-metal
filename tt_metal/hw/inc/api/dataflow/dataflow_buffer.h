@@ -91,6 +91,22 @@ public:
     void pop_front(uint16_t num_entries) { pop_front_impl(num_entries); }
     // Explicit sync APIs end
 
+#if defined(ARCH_QUASAR) && !defined(COMPILE_FOR_TRISC)
+    // Test-only: pre-advance the implicit-sync counters to a near-wrap value
+    // so a small handful of subsequent transactions crosses the uint16 wrap
+    // boundary. The HW counter (posted/acked) and the matching kernel-side
+    // shadow state (loop_cnt, txn_id_index) must be advanced together so they
+    // remain in the same epoch — otherwise the prepare_implicit_*'s modular
+    // comparison can't detect "caught up." Used by D1.
+    //
+    // Call after the DFB is bound but BEFORE any reserve_back / async_read /
+    // async_write call on this DFB. Producer side updates posted; consumer
+    // side updates acked. Caller is responsible for matching the values on
+    // both sides so the ring still looks empty (posted - acked == 0).
+    void preload_posted_counter(uint16_t value);
+    void preload_acked_counter(uint16_t value);
+#endif
+
 #ifndef ARCH_QUASAR
 #ifndef COMPILE_FOR_TRISC
     bool pages_reservable_at_back(int32_t num_pages) const;

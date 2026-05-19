@@ -930,4 +930,386 @@ TEST_F(MeshDeviceFixture, TensixIntraTest1xDFB1Sx1SConfig) {
     validate_intra_tensix_dfb(program, logical_core, config);
 }
 
+// ===========================================================================
+// B-batch regression tests (host-side bug fixes shipped on this branch)
+// ===========================================================================
+
+// B2: Transaction-ID allocator boundaries
+// ---------------------------------------------------------------------------
+// Pins compute_optimal_txn_id_count() at tt_metal/impl/dataflow_buffer/dataflow_buffer.cpp:253.
+// This branch replaced a hardcoded `TXN_IDS_PER_SIDE = 2` with a dynamic
+// search that picks the smallest n in [2, NUM_TXN_IDS] such that
+//   num_entries % (n * num_prods_or_cons * num_tcs_per_risc) == 0
+// and falls back to 1 when no n in that range divides cleanly.
+//
+// For 1Sx1S configs with STRIDED access pattern, the divisor reduces to n,
+// so the chosen n depends only on num_entries:
+//   * even num_entries  → returns 2 (smallest match)
+//   * odd, div by 3     → returns 3 (n=2 fails, n=3 wins)
+//   * neither           → returns 1 (fallback)
+//
+// num_txn_ids lands in dfb->producer_txn_descriptor.num_txn_ids after finalize.
+//
+// All three cases run inside ONE TEST_F so the MeshDeviceFixture spawns aether
+// (Quasar) only once for the whole suite instead of once per case — what the
+// "host-only" computation needs is just a Program object, not a launched
+// kernel, but the fixture still opens a device which on Quasar = aether spawn.
+
+TEST_F(MeshDeviceFixture, B2_TxnIdAllocator_Boundaries_Config) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Implicit sync (and therefore the txn-id allocator) is Quasar-only";
+    }
+    struct Case {
+        uint16_t num_entries;
+        uint8_t expected_num_txn_ids;
+        const char* rationale;
+    };
+    const Case cases[] = {
+        {16, 2, "num_entries=16 → 16%2==0, smallest n in [2,4]"},
+        {15, 3, "num_entries=15 → 15%2=1 (skip), 15%3=0 → pick n=3"},
+        {7, 1, "num_entries=7 → no n in [2,4] divides cleanly → fallback 1"},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(
+            ::testing::Message() << "case num_entries=" << c.num_entries << " expected=" << (int)c.expected_num_txn_ids
+                                 << " (" << c.rationale << ")");
+        experimental::dfb::DataflowBufferConfig config{
+            .entry_size = 1024,
+            .num_entries = c.num_entries,
+            .producer_risc_mask = 0x1,
+            .num_producers = 1,
+            .pap = dfb::AccessPattern::STRIDED,
+            .consumer_risc_mask = 0x2,
+            .num_consumers = 1,
+            .cap = dfb::AccessPattern::STRIDED,
+            .enable_implicit_sync = true};
+        Program program = CreateProgram();
+        experimental::dfb::CreateDataflowBuffer(program, CoreCoord(0, 0), config);
+        program.impl().finalize_dataflow_buffer_configs();
+
+        auto dfbs = program.impl().dataflow_buffers_on_core(CoreCoord(0, 0));
+        ASSERT_EQ(dfbs.size(), 1u);
+        EXPECT_EQ(dfbs[0]->producer_txn_descriptor.num_txn_ids, c.expected_num_txn_ids);
+    }
+}
+
+// B4: Cached threshold field value
+// ---------------------------------------------------------------------------
+// Pins compute_txn_descriptor() at tt_metal/impl/dataflow_buffer/dataflow_buffer.cpp:185
+// which produces the `num_entries_to_process_threshold` value that gets cached
+// in LocalDFBInterface::threshold on the device (replacing a per-call register
+// read in the partial-tail spin loop, dataflow_buffer.inl:215).
+//
+// Formula:
+//   * STRIDED consumer / any producer:  threshold = num_entries / num_txn_ids
+//   * ALL consumer:                     threshold = num_consumers * (num_entries / num_txn_ids)
+// (ALL is different because wr_sent is a single global counter; the ISR must
+// not fire until *every* consumer in the fan-out has contributed its batch.)
+
+// All cases in ONE TEST_F so the fixture opens a device (= aether on Quasar)
+// only once.
+
+TEST_F(MeshDeviceFixture, B4_CachedThreshold_Config) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Implicit sync (and therefore threshold caching) is Quasar-only";
+    }
+
+    // ----- case 1: 1Sx1S non-ALL, threshold = num_entries / num_txn_ids -----
+    {
+        SCOPED_TRACE("case 1: 1Sx1S non-ALL, num_entries=16 → threshold should be 16/2 = 8");
+        experimental::dfb::DataflowBufferConfig config{
+            .entry_size = 1024,
+            .num_entries = 16,
+            .producer_risc_mask = 0x1,
+            .num_producers = 1,
+            .pap = dfb::AccessPattern::STRIDED,
+            .consumer_risc_mask = 0x2,
+            .num_consumers = 1,
+            .cap = dfb::AccessPattern::STRIDED,
+            .enable_implicit_sync = true};
+        Program program = CreateProgram();
+        experimental::dfb::CreateDataflowBuffer(program, CoreCoord(0, 0), config);
+        program.impl().finalize_dataflow_buffer_configs();
+
+        auto dfbs = program.impl().dataflow_buffers_on_core(CoreCoord(0, 0));
+        ASSERT_EQ(dfbs.size(), 1u);
+        const auto& d = dfbs[0];
+        ASSERT_EQ(d->producer_txn_descriptor.num_txn_ids, 2u);
+        ASSERT_EQ(d->consumer_txn_descriptor.num_txn_ids, 2u);
+        EXPECT_EQ(d->producer_txn_descriptor.num_entries_to_process_threshold, 8u);
+        EXPECT_EQ(d->consumer_txn_descriptor.num_entries_to_process_threshold, 8u);
+    }
+
+    // ----- case 2: 1Sx3A ALL-consumer, threshold = num_consumers * (num_entries/num_txn_ids) -----
+    // The ALL-consumer multiplier is the load-bearing piece the bug fix added.
+    //
+    // IMPORTANT: the host only computes the consumer_txn_descriptor when the
+    // consumer is DM-side (see dataflow_buffer.cpp:1297, gated on
+    // !consumer_is_tensix_only). For Tensix-side consumers the threshold
+    // stays at its default-initialized value of 0 because there's no NoC ISR
+    // threshold to program — Tensix uses its TC directly.
+    // So we MUST use DM consumers here to actually exercise the ALL-consumer
+    // threshold formula. DM→DM ALL implicit-sync is a runtime gap but the
+    // host-side compute still runs and produces the formula value, which is
+    // all this test inspects.
+    {
+        SCOPED_TRACE("case 2: 1S(DM)x3A(DM) ALL, num_entries=18 → producer 9, consumer 3*9=27");
+        experimental::dfb::DataflowBufferConfig config{
+            .entry_size = 1024,
+            .num_entries = 18,
+            .producer_risc_mask = 0x1,  // 1 DM producer
+            .num_producers = 1,
+            .pap = dfb::AccessPattern::STRIDED,
+            .consumer_risc_mask = 0x2 | 0x4 | 0x8,  // 3 DM consumers (so the ALL-consumer formula path runs)
+            .num_consumers = 3,
+            .cap = dfb::AccessPattern::ALL,
+            .enable_implicit_sync = true};
+        Program program = CreateProgram();
+        experimental::dfb::CreateDataflowBuffer(program, CoreCoord(0, 0), config);
+        program.impl().finalize_dataflow_buffer_configs();
+
+        auto dfbs = program.impl().dataflow_buffers_on_core(CoreCoord(0, 0));
+        ASSERT_EQ(dfbs.size(), 1u);
+        const auto& d = dfbs[0];
+        EXPECT_EQ(d->producer_txn_descriptor.num_entries_to_process_threshold, 9u);
+        EXPECT_EQ(d->consumer_txn_descriptor.num_entries_to_process_threshold, 27u);
+    }
+}
+
+// B5: 5-TCs-per-RISC capacity (1Sx5S DM→Tensix)
+// ---------------------------------------------------------------------------
+// Pins MAX_NUM_TILE_COUNTERS_TO_RR raised from 4 → 6 in
+// tt_metal/hw/inc/internal/tt-2xx/dataflow_buffer/dataflow_buffer_config.h.
+//
+// For 1Sx5S STRIDED, calculate_num_tile_counters() assigns the single producer
+// 5 TCs (one per consumer pair). Pre-fix that exceeded the 4-TC ceiling and
+// allocation would TT_FATAL. Post-fix the host allocator accepts 5 TCs cleanly.
+//
+// (DM→DM 6Sx1S or 1Sx6S would need 7 DM threads which Quasar can't provide;
+// 1Sx5S DM→Tensix is the tightest equivalent we can validate.)
+
+TEST_F(MeshDeviceFixture, B5_PerRiscTCCapacity_1Sx5S_DMTensix_Config) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Multi-DM TC stress test requires Quasar";
+    }
+    // 1 DM producer, 5 Tensix consumers. Producer carries 5 TCs (one per consumer).
+    // num_entries=20 satisfies divisibility for n*1*5 = 5n with n=2 (20%10=0).
+    experimental::dfb::DataflowBufferConfig config{
+        .entry_size = 1024,
+        .num_entries = 20,
+        .producer_risc_mask = 0x1,  // 1 DM
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .consumer_risc_mask = 0x100 | 0x200 | 0x400 | 0x800 | 0x1000,  // 5 Tensix (Neo0..Neo4)
+        .num_consumers = 5,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false};
+
+    Program program = CreateProgram();
+    experimental::dfb::CreateDataflowBuffer(program, CoreCoord(0, 0), config);
+    program.impl().finalize_dataflow_buffer_configs();
+
+    auto dfbs = program.impl().dataflow_buffers_on_core(CoreCoord(0, 0));
+    ASSERT_EQ(dfbs.size(), 1u);
+    const auto& dfb = dfbs[0];
+    ASSERT_FALSE(dfb->groups.empty());
+
+    // Find the producer risc config and check it carries 5 TCs (>4, requires
+    // post-fix MAX_NUM_TILE_COUNTERS_TO_RR >= 5).
+    bool found_producer = false;
+    for (const auto& rc : dfb->groups[0].hw_risc_configs) {
+        if (rc.is_producer) {
+            EXPECT_EQ(rc.config.num_tcs_to_rr, 5u) << "1Sx5S producer should carry 5 TCs (one per consumer pair); "
+                                                      "requires MAX_NUM_TILE_COUNTERS_TO_RR >= 5";
+            found_producer = true;
+        }
+    }
+    EXPECT_TRUE(found_producer) << "Expected exactly 1 producer risc config";
+}
+
+// =====================================================================================
+// B6 – B10: Negative DFB config tests.
+//
+// All five validations live in tt_metal/impl/dataflow_buffer/dataflow_buffer.cpp and
+// fire a TT_FATAL (which throws std::runtime_error) at host build time. These tests
+// confirm the rejection fires AND that the error message matches the expected reason
+// — a bare EXPECT_THROW would also catch unrelated throws (e.g., a device-init failure
+// masquerading as success), so we substring-check what() to pin the actual call-site.
+//
+// All five skip on non-Quasar to match the rest of this file's convention. The
+// TT_FATALs themselves are arch-agnostic (host-side validation, no device touch
+// required), but DFBs aren't generally usable outside Quasar yet, so the skip
+// keeps behavior consistent with the rest of the B-batch.
+// =====================================================================================
+
+namespace {
+// Helper: run `stmt`, expect it to throw std::runtime_error, and verify the
+// what() message contains `expected_substr`. The substring check is the
+// important part — it guarantees we're rejecting for the right reason.
+inline void expect_runtime_error_with(const std::function<void()>& stmt, const char* expected_substr) {
+    try {
+        stmt();
+        FAIL() << "Expected std::runtime_error containing \"" << expected_substr << "\" but no throw occurred";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find(expected_substr), std::string::npos)
+            << "Caught std::runtime_error but message did not contain expected substring.\n"
+            << "  expected substring: " << expected_substr << "\n"
+            << "  actual what():      " << e.what();
+    } catch (...) {
+        FAIL() << "Expected std::runtime_error but a different exception type was thrown";
+    }
+}
+}  // namespace
+
+// B6 — Producer access pattern = ALL is rejected.
+// Producers are always STRIDED in the current design; ALL is consumer-only.
+TEST_F(MeshDeviceFixture, B6_AllProducer_Rejected) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "DFB config validation tested on Quasar (matches rest of B-batch)";
+    }
+    Program program = CreateProgram();
+    CoreCoord logical_core(0, 0);
+    experimental::dfb::DataflowBufferConfig bad{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::ALL,  // <-- the offense
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false};
+    expect_runtime_error_with(
+        [&]() { experimental::dfb::CreateDataflowBuffer(program, logical_core, bad); },
+        "ALL producer pattern not supported");
+}
+
+// B7 — Mixing circular buffers and DFBs in the same Program is rejected.
+// Direction tested: CB created first, then DFB rejected. The reverse direction
+// (DFB-first → CB-second) is NOT symmetrically rejected by the host code —
+// add_circular_buffer only checks compiled_.empty(), not dataflow_buffers_.empty()
+// (see tt_metal/impl/program/program.cpp:1046–1048). That asymmetry is a real
+// gap, separately noted; this test pins the confirmed direction.
+TEST_F(MeshDeviceFixture, B7_CB_DFB_Mix_Rejected) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "DFB config validation tested on Quasar (matches rest of B-batch)";
+    }
+    Program program = CreateProgram();
+    CoreCoord logical_core(0, 0);
+
+    // Add a valid CB first.
+    CircularBufferConfig cb_cfg(2048, {{tt::CBIndex::c_0, tt::DataFormat::Float16_b}});
+    cb_cfg.set_page_size(tt::CBIndex::c_0, 1024);
+    CreateCircularBuffer(program, logical_core, cb_cfg);
+
+    // Now attempt a DFB — should be rejected because the program already has a CB.
+    experimental::dfb::DataflowBufferConfig dfb_cfg{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false};
+    expect_runtime_error_with(
+        [&]() { experimental::dfb::CreateDataflowBuffer(program, logical_core, dfb_cfg); },
+        "Cannot add dataflow buffer to a program with circular buffers");
+}
+
+// B8 — ALL consumer with num_consumers > 4 is rejected. The Remapper has 4
+// clientR slots, so any 1×N ALL fanout with N>4 must be rejected at config time.
+TEST_F(MeshDeviceFixture, B8_FiveAllConsumers_Rejected) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Remapper limit applies on Quasar (matches rest of B-batch)";
+    }
+    Program program = CreateProgram();
+    CoreCoord logical_core(0, 0);
+    experimental::dfb::DataflowBufferConfig bad{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 5,  // <-- 5 > Remapper's 4 clientR slots
+        .cap = dfb::AccessPattern::ALL,
+        .enable_implicit_sync = false};
+    expect_runtime_error_with(
+        [&]() { experimental::dfb::CreateDataflowBuffer(program, logical_core, bad); }, "at most 4 consumers");
+}
+
+// B9 — INTER tensix_scope is rejected. Only INTRA (same-Neo packer→unpacker
+// self-loop) is supported today; INTER (cross-Neo) is explicitly not yet
+// implemented.
+TEST_F(MeshDeviceFixture, B9_InterTensixScope_Rejected) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "tensix_scope is Quasar-only";
+    }
+    Program program = CreateProgram();
+    CoreCoord logical_core(0, 0);
+    experimental::dfb::DataflowBufferConfig bad{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .tensix_scope = experimental::dfb::TensixScope::INTER};  // <-- unsupported
+    expect_runtime_error_with(
+        [&]() { experimental::dfb::CreateDataflowBuffer(program, logical_core, bad); },
+        "Inter-tensix DFBs are not yet supported");
+}
+
+// B10 — num_entries divisibility against the txn_id allocator's fallback path.
+//
+//   compute_optimal_txn_id_count() scans n ∈ {2..NUM_TXN_IDS=4} for the smallest
+//   n satisfying  num_entries % (n * num_prods * num_tcs_per_risc) == 0
+//   and falls back to n=1 if none works. The TT_FATAL at compute_txn_descriptor()
+//   line 198 fires only when even n=1 fails (i.e., num_entries is not divisible
+//   by num_prods * num_tcs_per_risc).
+//
+// Two scopes:
+//   (10a) num_entries=10, num_prods=3, num_tcs=1  →  10 % {3,6,9,12} ≠ 0 at any n
+//         → fallback exhausted, TT_FATAL fires cleanly with the divisor in the
+//         message. Pins the "clean failure path" guarantee.
+//   (10b) num_entries=3,  num_prods=3, num_tcs=1  →  3 % 3 = 0 only at n=1
+//         (3 % 6 ≠ 0, 3 % 9 ≠ 0, 3 % 12 ≠ 0). Verifies the fallback to n=1
+//         actually succeeds and CreateDataflowBuffer does NOT throw.
+TEST_F(MeshDeviceFixture, B10_NumEntriesDivisibility) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Txn-id allocator is Quasar-only";
+    }
+
+    // ---- 10a: pathological num_entries, no n ∈ {1..4} divides ----
+    {
+        SCOPED_TRACE("10a: num_entries=10, 3 producers, 3 consumers — no n divides");
+        Program program = CreateProgram();
+        CoreCoord logical_core(0, 0);
+        experimental::dfb::DataflowBufferConfig bad{
+            .entry_size = 1024,
+            .num_entries = 10,  // 10 % (n * 3 * 1) ≠ 0 for any n
+            .num_producers = 3,
+            .pap = dfb::AccessPattern::STRIDED,
+            .num_consumers = 3,
+            .cap = dfb::AccessPattern::STRIDED,
+            .enable_implicit_sync = false};
+        expect_runtime_error_with(
+            [&]() { experimental::dfb::CreateDataflowBuffer(program, logical_core, bad); }, "must be divisible by");
+    }
+
+    // ---- 10b: only n=1 divides — fallback path should succeed silently ----
+    {
+        SCOPED_TRACE("10b: num_entries=3, only n=1 satisfies divisibility — fallback should succeed");
+        Program program = CreateProgram();
+        CoreCoord logical_core(0, 0);
+        experimental::dfb::DataflowBufferConfig ok{
+            .entry_size = 1024,
+            .num_entries = 3,  // 3 % (1*3*1) = 0; 3 % (n*3) ≠ 0 for n>1
+            .num_producers = 3,
+            .pap = dfb::AccessPattern::STRIDED,
+            .num_consumers = 3,
+            .cap = dfb::AccessPattern::STRIDED,
+            .enable_implicit_sync = false};
+        EXPECT_NO_THROW(experimental::dfb::CreateDataflowBuffer(program, logical_core, ok))
+            << "Expected fallback to n=1 to succeed for num_entries=3 with 3 producers/3 consumers";
+    }
+}
+
 }  // end namespace tt::tt_metal

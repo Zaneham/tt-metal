@@ -31,7 +31,9 @@
 #include "device_fixture.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/hw/inc/internal/tt-2xx/dataflow_buffer/dataflow_buffer_config.h"
+#include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/experimental/dataflow_buffer/dataflow_buffer.hpp>
+#include "impl/data_format/bfloat16_utils.hpp"
 #include "impl/program/program_impl.hpp"
 #include "impl/kernels/kernel.hpp"
 #include <tt-metalium/experimental/tensor/mesh_tensor.hpp>
@@ -123,8 +125,12 @@ void run_single_dfb_program(
     DFBPorCType producer_type,
     DFBPorCType consumer_type,
     const CoreRangeSet& core_range_set = CoreRangeSet(CoreRange(CoreCoord(0, 0), CoreCoord(0, 0))),
-    std::optional<uint32_t> num_entries_in_buffer = std::nullopt) {
-
+    std::optional<uint32_t> num_entries_in_buffer = std::nullopt,
+    // Quasar only: when set, bypasses the auto-allocator and places the DM consumer kernel on
+    // exactly these DM processors. Used by B1b to force DM0 to be idle while a subordinate DM
+    // runs the consumer — the original PR's fix scenario, which the auto-allocator can't produce
+    // (it always fills from DM0 up).
+    std::optional<std::set<DataMovementProcessor>> consumer_dm_processors_override = std::nullopt) {
     TT_FATAL(
         !(producer_type == DFBPorCType::TENSIX && consumer_type == DFBPorCType::TENSIX),
         "Both producer and consumer cannot be Tensix. At least one must be a DM kernel for NOC transfers.");
@@ -1151,10 +1157,23 @@ void run_sequential_dfbs_program(
     }
 }
 
+// Compute transformation applied by the TRISC between DFB_in and DFB_out.
+// Identity: output = input         (uses eltwise_copy.cpp;     all archs)
+// Relu:     output = max(0, input) (uses dfb_eltwise_relu.cpp; all archs incl. Quasar)
+enum class DfbTransform : uint8_t { Identity, Relu };
+
+// Runs a NOC -> DM_producer -> DFB_in -> TRISC -> DFB_out -> DM_consumer -> NOC pipeline.
+// In all modes the compute kernel uses the full unpack/math/pack pipeline so data physically
+// flows through the TRISC. Golden is computed in bf16 space and compared with tolerance.
+//
+// On WH/BH: only num_producers == num_consumers == 1 is supported (BRISC = producer, NCRISC =
+// consumer, 1 compute kernel). enable_implicit_sync is forced to false on WH/BH (read_in /
+// write_out are Quasar-only).
 void run_in_dfb_out_dfb_program(
     const std::shared_ptr<distributed::MeshDevice>& mesh_device,
     experimental::dfb::DataflowBufferConfig& dm2tensix_config,
-    experimental::dfb::DataflowBufferConfig& tensix2dm_config) {
+    experimental::dfb::DataflowBufferConfig& tensix2dm_config,
+    DfbTransform transform = DfbTransform::Identity) {
     TT_FATAL(
         dm2tensix_config.num_entries == tensix2dm_config.num_entries,
         "Num entries must be the same for in and out DFBs");
@@ -1424,30 +1443,59 @@ DFB_TEST_BUF(DM,       1Sx1S, DM,     DM,     1, STRIDED, 1, STRIDED, DFB_NO_EXT
 DFB_TEST    (DMTensix, 1Sx1S, DM,     TENSIX, 1, STRIDED, 1, STRIDED, DFB_NO_EXTRA_SKIP)
 DFB_TEST    (TensixDM, 1Sx1S, TENSIX, DM,     1, STRIDED, 1, STRIDED, DFB_NO_EXTRA_SKIP)
 
-// TEST_F(MeshDeviceFixture, DMTensixDMTest2xDFB1Sx1S) {
-//     if (devices_.at(0)->arch() != ARCH::QUASAR) {
-//         GTEST_SKIP() << "Skipping DFB test for WH/BH until DFB is backported";
-//     }
-//     experimental::dfb::DataflowBufferConfig dm2tensix_config{
-//         .entry_size = 1024,
-//         .num_entries = 16,
-//         .num_producers = 1,
-//         .pap = dfb::AccessPattern::STRIDED,
-//         .num_consumers = 1,
-//         .cap = dfb::AccessPattern::STRIDED,
-//         .enable_implicit_sync = false};
+// NOC -> DM(BRISC) -> DFB_in -> TRISC(eltwise_copy) -> DFB_out -> DM(NCRISC) -> NOC.
+// Enabled on WH/BH (1 producer + 1 consumer, explicit sync) and Quasar.
+// entry_size = 2048 = bfloat16 32x32 tile = one logical tile per entry, which matches
+// how eltwise_copy.cpp's copy_tile + pack_tile pipeline operates.
+TEST_F(MeshDeviceFixture, DMTensixDMTest2xDFB1Sx1S) {
+    experimental::dfb::DataflowBufferConfig dm2tensix_config{
+        .entry_size = 2048,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b};
 
-//     experimental::dfb::DataflowBufferConfig tensix2dm_config{
-//         .entry_size = 1024,
-//         .num_entries = 16,
-//         .num_producers = 1,
-//         .pap = dfb::AccessPattern::STRIDED,
-//         .num_consumers = 1,
-//             .cap = dfb::AccessPattern::STRIDED,
-//         .enable_implicit_sync = false};
+    experimental::dfb::DataflowBufferConfig tensix2dm_config{
+        .entry_size = 2048,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b};
 
-//     run_in_dfb_out_dfb_program(this->devices_.at(0), dm2tensix_config, tensix2dm_config);
-// }
+    run_in_dfb_out_dfb_program(this->devices_.at(0), dm2tensix_config, tensix2dm_config);
+}
+
+// Same pipeline but the compute kernel applies SFPU relu: output = max(0, input).
+// relu_tile is the one SFPU op currently ported on Quasar, so this test runs on all three archs.
+TEST_F(MeshDeviceFixture, DMTensixDMTest2xDFB1Sx1S_Relu) {
+    experimental::dfb::DataflowBufferConfig dm2tensix_config{
+        .entry_size = 2048,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b};
+
+    experimental::dfb::DataflowBufferConfig tensix2dm_config{
+        .entry_size = 2048,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b};
+
+    run_in_dfb_out_dfb_program(this->devices_.at(0), dm2tensix_config, tensix2dm_config, DfbTransform::Relu);
+}
 
 // TEST_F(MeshDeviceFixture, DMTensixDMTest1xDFB2Sx1S1xDFB1Sx2S) {
 //     if (devices_.at(0)->arch() != ARCH::QUASAR) {
@@ -1813,6 +1861,9 @@ TEST_P(DFBImplicitSyncParamFixture, DMTest4xDFB_3Sx3S) {
     if (devices_.at(0)->arch() != ARCH::QUASAR) {
         GTEST_SKIP() << "Skipping: sequential multi-DFB TC exhaustion test requires Quasar";
     }
+    // num_entries must be divisible by max(num_producers, num_consumers) per
+    // the host-side DFB validator. With 3 producers/consumers, 18 is the
+    // smallest multiple of 3 that's >= 16 (matches dfb_default_num_entries).
     experimental::dfb::DataflowBufferConfig config{
         .entry_size = 1024,
         .num_entries = 12,
@@ -1853,6 +1904,457 @@ TEST_P(DFBImplicitSyncParamFixture, DMTest4xDFB_Mixed) {
         .enable_implicit_sync = GetParam()};
     run_sequential_dfbs_program(
         this->devices_.at(0), {strided_cfg, strided_cfg, all_cfg, all_cfg});
+}
+
+// =====================================================================================
+// B-batch regression tests (runtime tests pinning bug fixes shipped on this branch)
+// =====================================================================================
+
+// B1: DM0-no-kernel regression
+// -------------------------------------------------------------------------------------
+// Pins the fix in tt_metal/hw/firmware/src/tt-2xx/dm.cc where
+// start_subordinate_kernel_run_early() now reports whether *any* subordinate
+// DM runs a user kernel. If subordinates do but DM0 itself doesn't (DM0 is
+// reserved for dispatch in slow-dispatch mode), DM0 must still call
+// setup_local_dfb_interfaces() so the implicit-sync ISR is programmed on its
+// side — otherwise the threshold register never fires and the subordinates
+// hang forever waiting for credits.
+//
+// Configuration: Tensix→DM 1Sx1S with implicit sync enabled.
+//   * Producer is a Tensix TRISC → no DM produces.
+//   * Consumer is one DM (placed by the Quasar runtime — typically DM1/etc, not DM0).
+//   * DM0 has no user kernel of its own.
+// If the dm.cc fix were missing, the implicit-sync ISR setup would be skipped
+// on DM0 and the test would hang at "Writing DFB config to core".
+//
+// Note: every existing TensixDM*ImplicitSyncTrue test already exercises this
+// path; this is the minimal direct test that names what it pins.
+TEST_F(MeshDeviceFixture, B1_DM0NoKernel_TensixDMImplicitSync) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Implicit sync is Quasar-only; the dm.cc fix is Quasar-specific";
+    }
+    experimental::dfb::DataflowBufferConfig config{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = true};
+    run_single_dfb_program(this->devices_.at(0), config, DFBPorCType::TENSIX, DFBPorCType::DM);
+}
+
+// B1b: DM0-idle-with-subordinate regression (the *original* PR fix scenario)
+// -------------------------------------------------------------------------------------
+// Companion to B1. The classic CreateKernel auto-allocator (GetProcessorsPerClusterQuasar)
+// fills DMs starting from DM0, so B1 — despite its name and original intent — actually
+// places the consumer on DM0 and exercises the "DM0 has a kernel, no subordinates run"
+// path through dm.cc. The *other* path the dm.cc fix needs to keep working is
+// "DM0 is idle, a subordinate DM runs a user kernel that touches DFBs" — which is the
+// scenario Metal 2.0 produces in production (it reserves DM0+DM1 for internal use).
+//
+// To reach that state from the classic API we have to bypass the auto-allocator and
+// hand-pick DM1 as the consumer's home; that's what consumer_dm_processors_override does.
+// If the dm.cc condition were ever narrowed back to (enables & DM0) only — dropping the
+// subordinate case — this test would hang at dfb.finish() because DM0 would never run
+// setup_local_dfb_interfaces() and the implicit-sync ISR registers would not be armed.
+TEST_F(MeshDeviceFixture, B1b_DM0IdleSubordinateRuns_TensixDMImplicitSync) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Implicit sync is Quasar-only; the dm.cc fix is Quasar-specific";
+    }
+    experimental::dfb::DataflowBufferConfig config{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = true};
+    // Force consumer onto DM1 so DM0 is idle but a subordinate runs the kernel.
+    std::set<DataMovementProcessor> dm1_only{DataMovementProcessor::RISCV_1};
+    run_single_dfb_program(
+        this->devices_.at(0),
+        config,
+        DFBPorCType::TENSIX,
+        DFBPorCType::DM,
+        /*core_range_set=*/CoreRangeSet(CoreRange(CoreCoord(0, 0), CoreCoord(0, 0))),
+        /*num_entries_in_buffer=*/std::nullopt,
+        /*consumer_dm_processors_override=*/dm1_only);
+}
+
+// B3: Tail-credit race exposure
+// -------------------------------------------------------------------------------------
+// Pins the rewritten handle_final_credits() in
+// tt_metal/hw/inc/internal/tt-2xx/dataflow_buffer.inl:215 — the old code gated
+// the rendezvous barrier on a counter value, which raced with the ISR firing
+// concurrently. The fix is an unconditional sync_threads() before deciding
+// whether to manually post tail credits.
+//
+// handle_final_credits runs at the END of every implicit-sync session
+// (DataflowBuffer::finish), so simply re-running the same 1Sx1S DM-DM
+// implicit-sync workload several times exercises the barrier path repeatedly.
+// If the race ever re-appears, one of the iterations will hang or fail.
+//
+// Iteration count is a deliberate compromise: 3 iterations on the Quasar
+// emulator costs ~6 minutes; on real Quasar silicon (when available) bump
+// kNumIters higher to expose lower-probability windows of the race.
+TEST_F(MeshDeviceFixture, B3_TailCreditRace_RepeatedImplicitSync_DMDM) {
+    if (devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Implicit sync is Quasar-only; tail-credit race fix is Quasar-specific";
+    }
+    constexpr int kNumIters = 3;
+    for (int i = 0; i < kNumIters; ++i) {
+        SCOPED_TRACE(::testing::Message() << "iteration " << (i + 1) << "/" << kNumIters);
+        experimental::dfb::DataflowBufferConfig config{
+            .entry_size = 1024,
+            .num_entries = 16,
+            .num_producers = 1,
+            .pap = dfb::AccessPattern::STRIDED,
+            .num_consumers = 1,
+            .cap = dfb::AccessPattern::STRIDED,
+            .enable_implicit_sync = true};
+        run_single_dfb_program(this->devices_.at(0), config, DFBPorCType::DM, DFBPorCType::DM);
+    }
+}
+
+// C1: INTRA self-loop at runtime with real DM-kernel bookends.
+// -------------------------------------------------------------------------------------
+// Confirms `tensix_scope = INTRA` works end-to-end in a fully dispatched program
+// (3 kernels: DM producer + compute + DM consumer; not just a host-side L1 prefill).
+//
+// Data flow:
+//   DRAM in_buffer
+//     → DM producer kernel NOC-reads each page into dfb_self's L1 ring (direct L1
+//       address; bypasses DFB API because dfb_self is INTRA-scope and DM kernels
+//       can't be its producer through the DFB API).
+//     → DM producer signals sem_input_ready.
+//   compute kernel waits sem_input_ready, then runs the dfb_t6_intra pattern on
+//   dfb_self (PACK +1, UNPACK +1, in place per L1 word; net L1 transform = +2),
+//   then signals sem_output_ready (from PACK side, after dfb_self.finish()).
+//   DM consumer kernel waits sem_output_ready, then NOC-writes each tile of
+//   dfb_self's L1 ring out to DRAM out_buffer.
+//
+// Verifies out_buffer == in_buffer + 2 per uint32 word.
+//
+// Why this test uses raw-L1 mutation instead of the standard SFPU pipeline
+// (copy_tile / relu_tile / pack_tile) on the INTRA DFB:
+//
+//   The originally-suspected reason — "binding an INTRA-scope DFB to a
+//   compute kernel that uses copy_tile / pack_tile corrupts the unpacker
+//   per-tile state machine" — was wrong / outdated. C2_DMTriscSelfLoopDM_DoubleRelu
+//   (added after this test) routes a 3-DFB pipeline (DM → INTRA self-loop → DM)
+//   through the real unpack/SFPU/pack path against an INTRA DFB and passes
+//   cleanly. So copy_tile/pack_tile on INTRA DFBs work fine.
+//
+//   The actual remaining LLK gap on Quasar: the unpacker's binary↔unary mode
+//   reconfig is incomplete. When a kernel calls `binary_op_init_common` and
+//   then later calls `copy_tile_to_dst_init_short` to switch back to unary,
+//   the subsequent `copy_tile` doesn't actually load srcA from L1 — dst stays
+//   at zero, and the rest of the pipeline cascades zeros. Verified via L1
+//   readback of both dfb_self and dfb_out post-run. Also note
+//   `copy_tile_to_dst_init_short_with_dt` is explicitly unimplemented on
+//   Quasar (tile_move_copy.h:75). Bottom line: kernels that mix SFPU (unary)
+//   and FPU binary ops on Quasar can't currently be written cleanly.
+//
+// This test stays with the raw-L1 mutation pattern as a known-good baseline
+// (no compute pipeline involved) and pairs DM↔compute via semaphores so the
+// DM ends own all NoC traffic.
+static void run_intra_selfloop_dm_bookended(
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device, uint32_t entry_size, uint32_t num_entries) {
+    if (mesh_device->get_devices()[0]->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "INTRA tensix_scope is Quasar-only";
+    }
+
+    IDevice* device = mesh_device->get_devices()[0];
+    Program program = CreateProgram();
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+    CoreCoord logical_core(0, 0);
+    CoreRangeSet core_range_set(CoreRange(logical_core, logical_core));
+
+    const uint32_t buffer_size = entry_size * num_entries;
+    const uint32_t words_per_entry = entry_size / sizeof(uint32_t);
+
+    distributed::DeviceLocalBufferConfig local_buffer_config{.page_size = entry_size, .buffer_type = BufferType::DRAM};
+    distributed::ReplicatedBufferConfig buffer_config{.size = buffer_size};
+    auto in_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+    auto out_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+
+    log_info(tt::LogTest, "In Buffer:  [address: {} B, size: {} B]", in_buffer->address(), in_buffer->size());
+    log_info(tt::LogTest, "Out Buffer: [address: {} B, size: {} B]", out_buffer->address(), out_buffer->size());
+
+    // --- Sole DFB: dfb_self (INTRA scope) ---
+    experimental::dfb::DataflowBufferConfig dfb_self_config{
+        .entry_size = entry_size,
+        .num_entries = num_entries,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .tensix_scope = experimental::dfb::TensixScope::INTRA};
+
+    // --- Semaphores for DM ↔ compute sync ---
+    const uint32_t sem_input_ready = CreateSemaphore(program, core_range_set, 0);
+    const uint32_t sem_output_ready = CreateSemaphore(program, core_range_set, 0);
+
+    // --- DM producer kernel ---
+    std::vector<uint32_t> producer_cta = {(uint32_t)in_buffer->address(), num_entries, entry_size, sem_input_ready};
+    tt::tt_metal::TensorAccessorArgs(in_buffer).append_to(producer_cta);
+    auto producer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_intra_dm_producer.cpp",
+        core_range_set,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = producer_cta});
+
+    // --- Compute kernel ---
+    std::vector<uint32_t> compute_cta = {num_entries, words_per_entry, sem_input_ready, sem_output_ready};
+    auto compute_kernel = CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/compute/dfb_intra_with_sync.cpp",
+        core_range_set,
+        experimental::quasar::QuasarComputeConfig{.num_threads_per_cluster = 1, .compile_args = compute_cta});
+
+    // --- DM consumer kernel ---
+    std::vector<uint32_t> consumer_cta = {(uint32_t)out_buffer->address(), num_entries, entry_size, sem_output_ready};
+    tt::tt_metal::TensorAccessorArgs(out_buffer).append_to(consumer_cta);
+    auto consumer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_intra_dm_consumer.cpp",
+        core_range_set,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = consumer_cta});
+
+    // --- Create and bind dfb_self. INTRA: same compute kernel as both producer and consumer. ---
+    auto dfb_self_id = experimental::dfb::CreateDataflowBuffer(program, core_range_set, dfb_self_config);
+    experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
+        program, dfb_self_id, compute_kernel, compute_kernel);
+
+    // --- Predict dfb_self's L1 ring address (it's the only DFB; sits at L1 base) ---
+    const uint32_t dfb_self_l1 = static_cast<uint32_t>(device->allocator()->get_base_allocator_addr(HalMemType::L1));
+
+    SetRuntimeArgs(program, producer_kernel, logical_core, {dfb_self_l1});
+    SetRuntimeArgs(program, consumer_kernel, logical_core, {dfb_self_l1});
+    // Compute kernel has no runtime args (semaphore ids are CTAs).
+
+    // --- Stimulus: random uint32 input ---
+    auto input = tt::test_utils::generate_uniform_random_vector<uint32_t>(0, 1000000, num_entries * words_per_entry);
+    distributed::WriteShard(mesh_device->mesh_command_queue(), in_buffer, input, zero_coord, true);
+
+    // Quasar: brief delay + readback to ensure DRAM write is committed before kernel launch.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::vector<uint32_t> rdback;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), rdback, in_buffer, zero_coord, true);
+    tt_driver_atomics::mfence();
+    EXPECT_EQ(rdback, input);
+
+    detail::LaunchProgram(device, program, true /*wait_until_cores_done*/);
+
+    std::vector<uint32_t> output;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), output, out_buffer, zero_coord, true);
+
+    std::vector<uint32_t> expected(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        expected[i] = input[i] + 2;
+    }
+    EXPECT_EQ(expected, output) << "DM → INTRA self-loop (+2) → DM identity-plus-2 mismatch";
+}
+
+TEST_F(MeshDeviceFixture, C1_DMIntraSelfLoopDM_PlusTwo) {
+    run_intra_selfloop_dm_bookended(this->devices_.at(0), /*entry_size=*/1024, /*num_entries=*/16);
+}
+
+// =====================================================================================
+// C2: DM → TRISC (inter) → TRISC self-loop (intra) → TRISC → DM (inter)
+//
+//   DRAM in_buffer
+//      ↓ (DM producer, NoC)
+//   DFB 0 (inter, DM → TRISC)
+//      ↓ (TRISC unpack via copy_tile)
+//   [SFPU relu_tile]                ← stage A
+//      ↓ (TRISC pack)
+//   DFB 1 (intra, TRISC self-loop)
+//      ↓ (TRISC unpack via copy_tile)
+//   [SFPU relu_tile]                ← stage B
+//      ↓ (TRISC pack)
+//   DFB 2 (inter, TRISC → DM)
+//      ↓ (DM consumer, NoC)
+//   DRAM out_buffer
+//
+// Both stages use the SFPU (relu); for positive bf16 inputs double-relu is
+// identity, so output ≈ input (bf16 tolerance).
+//
+// Mirrors C1's DM↔TRISC bookending but routes data through the real
+// unpack/SFPU/pack pipeline via the DFB API (vs. C1's raw-L1 mutation).
+//
+// Side benefit: this test demonstrates that the **unary** compute pipeline
+// (copy_tile / relu_tile / pack_tile) works correctly against an INTRA-scope
+// DFB — narrowing the "INTRA DFB + compute pipeline" gap historically called
+// out in C1's comment. The remaining LLK gap on Quasar is the **unary↔binary
+// unpack reconfig** (not specific to INTRA DFBs): if a kernel calls
+// `binary_op_init_common(...)` and then `copy_tile_to_dst_init_short(...)` to
+// switch back to unary, the subsequent `copy_tile` does not load srcA from
+// L1, dst stays at 0, and the pipeline cascades zeros. Diagnosed by host-
+// side L1 readback of dfb_self + dfb_out after an SFPU+FPU variant of this
+// kernel — both rings were zero post-run. The unary-only pipeline used here
+// avoids that switch and works fine. When the LLK reconfig is fixed, an
+// SFPU+FPU variant of this same pipeline should become testable.
+// =====================================================================================
+static void run_c2_dm_trisc_selfloop_dm_program(
+    const std::shared_ptr<distributed::MeshDevice>& mesh_device, uint32_t entry_size, uint32_t num_entries) {
+    if (mesh_device->get_devices()[0]->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "C2 INTRA-scope DFB self-loop requires Quasar";
+    }
+
+    Program program = CreateProgram();
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+    CoreCoord logical_core(0, 0);
+
+    const uint32_t buffer_size = entry_size * num_entries;
+    distributed::DeviceLocalBufferConfig local_buffer_config{.page_size = entry_size, .buffer_type = BufferType::DRAM};
+    distributed::ReplicatedBufferConfig buffer_config{.size = buffer_size};
+    auto in_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+    auto out_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+
+    log_info(tt::LogTest, "In Buffer:  [address: {} B, size: {} B]", in_buffer->address(), in_buffer->size());
+    log_info(tt::LogTest, "Out Buffer: [address: {} B, size: {} B]", out_buffer->address(), out_buffer->size());
+
+    // --- DFB 0: inter, DM → TRISC (DM producer fills, compute kernel unpacks) ---
+    experimental::dfb::DataflowBufferConfig dfb_in_config{
+        .entry_size = entry_size,
+        .num_entries = num_entries,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b};
+
+    // --- DFB 1: intra, TRISC self-loop (compute kernel both produces and consumes) ---
+    experimental::dfb::DataflowBufferConfig dfb_self_config{
+        .entry_size = entry_size,
+        .num_entries = num_entries,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b,
+        .tensix_scope = experimental::dfb::TensixScope::INTRA};
+
+    // --- DFB 2: inter, TRISC → DM (compute kernel packs, DM consumer drains) ---
+    experimental::dfb::DataflowBufferConfig dfb_out_config{
+        .entry_size = entry_size,
+        .num_entries = num_entries,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false,
+        .data_format = tt::DataFormat::Float16_b};
+
+    // --- DM producer kernel (reuse the standard producer; it binds to logical DFB id 0) ---
+    std::vector<uint32_t> producer_cta = {
+        (uint32_t)in_buffer->address(),
+        num_entries,
+        /*implicit_sync=*/0u};
+    tt::tt_metal::TensorAccessorArgs(in_buffer).append_to(producer_cta);
+    auto producer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_producer.cpp",
+        logical_core,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = producer_cta});
+
+    // --- Compute kernel: 3-DFB pipeline with two SFPU relu stages per tile ---
+    std::vector<uint32_t> compute_cta = {num_entries};
+    auto compute_kernel = CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/compute/dfb_c2_pipeline.cpp",
+        logical_core,
+        experimental::quasar::QuasarComputeConfig{.num_threads_per_cluster = 1, .compile_args = compute_cta});
+
+    // --- DM consumer kernel (reuse the standard consumer; takes logical DFB id as a runtime arg) ---
+    std::vector<uint32_t> consumer_cta = {
+        (uint32_t)out_buffer->address(),
+        num_entries,
+        /*blocked_consumer=*/0u,
+        /*implicit_sync=*/0u};
+    tt::tt_metal::TensorAccessorArgs(out_buffer).append_to(consumer_cta);
+    auto consumer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_consumer.cpp",
+        logical_core,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = consumer_cta});
+
+    // --- Create DFBs in id order (0, 1, 2) so the compute kernel's hardcoded ids line up ---
+    auto dfb_in_id = experimental::dfb::CreateDataflowBuffer(program, logical_core, dfb_in_config);
+    auto dfb_self_id = experimental::dfb::CreateDataflowBuffer(program, logical_core, dfb_self_config);
+    auto dfb_out_id = experimental::dfb::CreateDataflowBuffer(program, logical_core, dfb_out_config);
+
+    // --- Bind: DFB 0 = DM→T; DFB 1 = T→T (intra, same kernel both sides); DFB 2 = T→DM ---
+    experimental::dfb::BindDataflowBufferToProducerConsumerKernels(program, dfb_in_id, producer_kernel, compute_kernel);
+    experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
+        program, dfb_self_id, compute_kernel, compute_kernel);
+    experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
+        program, dfb_out_id, compute_kernel, consumer_kernel);
+
+    auto dfb_in = program.impl().get_dataflow_buffer(dfb_in_id);
+    auto dfb_out = program.impl().get_dataflow_buffer(dfb_out_id);
+
+    SetRuntimeArgs(
+        program,
+        producer_kernel,
+        logical_core,
+        {(uint32_t)dfb_in->config.producer_risc_mask, /*chunk_offset=*/0u, num_entries});
+    SetRuntimeArgs(
+        program,
+        consumer_kernel,
+        logical_core,
+        {(uint32_t)dfb_out->config.consumer_risc_mask,
+         (uint32_t)dfb_out_id,
+         /*chunk_offset=*/0u,
+         num_entries});
+    // Compute kernel takes no runtime args (per_core_tile_cnt is in CTA).
+
+    // bf16 stimulus in ±1.0 range — survives unpack/copy_tile/pack_tile round-trip.
+    auto input = create_random_vector_of_bfloat16(buffer_size, 1.0f, 0xC0FE);
+
+    // Inlined from the old execute_program_and_verify (MeshBuffer-based); main's
+    // helper now requires MeshTensor. We just need the WriteShard barrier and
+    // LaunchProgram here — verification is custom below.
+    distributed::WriteShard(mesh_device->mesh_command_queue(), in_buffer, input, zero_coord, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::vector<uint32_t> rdback_in;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), rdback_in, in_buffer, zero_coord, true);
+    tt_driver_atomics::mfence();
+    ASSERT_EQ(rdback_in, input) << "WriteShard did not complete before LaunchProgram";
+    detail::LaunchProgram(mesh_device->get_devices()[0], program, true /*wait_until_cores_done*/);
+
+    std::vector<uint32_t> output;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), output, out_buffer, zero_coord, true);
+
+    // Golden: relu(relu(input)) per bf16 element. relu is idempotent and is
+    // identity for non-negative inputs; for negative inputs, both relus clamp
+    // to 0. So golden = max(0, input) per element.
+    std::vector<uint32_t> golden(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        auto [lo_bf, hi_bf] = unpack_two_bfloat16_from_uint32(input[i]);
+        const float lo_out = std::fmax(0.0f, static_cast<float>(lo_bf));
+        const float hi_out = std::fmax(0.0f, static_cast<float>(hi_bf));
+        golden[i] = pack_two_bfloat16_into_uint32({bfloat16(lo_out), bfloat16(hi_out)});
+    }
+
+    auto compare = [](float a, float b) {
+        const float atol = 0.02f;
+        const float rtol = 0.05f;
+        float maxabs = std::fmax(std::fabs(a), std::fabs(b));
+        return std::fabs(a - b) <= atol || std::fabs(a - b) <= rtol * maxabs;
+    };
+    int argfail = -1;
+    bool pass = packed_uint32_t_vector_comparison(output, golden, compare, &argfail);
+    EXPECT_TRUE(pass) << "C2 DM→TRISC→intra-selfloop→TRISC→DM (SFPU relu×2) mismatch at position " << argfail;
+}
+
+TEST_F(MeshDeviceFixture, C2_DMTriscSelfLoopDM_DoubleRelu) {
+    run_c2_dm_trisc_selfloop_dm_program(this->devices_.at(0), /*entry_size=*/2048, /*num_entries=*/16);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -2183,6 +2685,375 @@ TEST_F(MeshDeviceFixture, TensixIntraAndRemapperTest_4Neo_DM1Sx4A) {
         detail::ReadFromDeviceL1(device, logical_core, l1_base, num_entries * entry_size, l1_data);
         EXPECT_EQ(input_remapper, l1_data) << "DM->Tensix strided x all DFB L1 mismatch";
     }
+}
+
+// D1: TC `posted` / `acked` wrap-point exposure with implicit sync.
+//
+// The `posted` and `acked` TC bitfields are uint16; once `posted` reaches
+// 65 535 and the ISR fires again, the hardware register rolls 0xFFFF→0x0000.
+// We want to catch firmware code that uses a wider shadow accumulator than
+// the 16-bit HW register — that bug fires the moment we cross the wrap, not
+// over thousands of operations.
+//
+// Naive approach: push 65 536+ real tiles through NOC. Works on silicon
+// (seconds) but takes many hours on the Quasar emulator (each NOC page is
+// multi-second on emu).
+//
+// What this test does instead: launch DM producer + DM consumer kernels that
+// each issue a single direct write to their TC's `posted` / `acked` HW
+// register, advancing both counters by kPreloadValue (= 65 530) in one
+// instruction *before* the normal kernel loop starts. The subsequent kPushTiles
+// real tiles then cross the wrap point (counter goes 65 530 → 65 530+kPushTiles,
+// wrapping at 65 536). The host's WriteShard / ReadShard only carries
+// kPushTiles tiles' worth of data, so DRAM traffic is tiny.
+//
+// Counter trajectory (kPreloadValue=65528, kPushTiles=32, per_tc=8):
+//   start (after preload):   posted = acked = 65 528,  ptxn/ctxn_loop_cnt = 8191
+//   tile 8 (just past wrap): posted = acked = 0,       loop_cnt = 8192
+//   tile 32 (end):           posted = acked = 24,      loop_cnt = 8195
+//
+// Catches the same bug class as the naive 65k-tile test, but runs in seconds
+// on the emulator. Also requires the modular-comparison fix at
+// dataflow_buffer.inl:319/349 (without that fix, prepare_implicit_read /
+// prepare_implicit_write spin forever at the first post-wrap loop boundary
+// because their absolute-counter check breaks at uint16 rollover).
+TEST_F(MeshDeviceFixture, D1_LongImplicitSync_PostCounterWrap) {
+    if (this->devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "Implicit sync is Quasar-only";
+    }
+
+    // 65528 = 8191 * 8 — exact multiple of num_entries_per_txn_id_per_tc (=8 in
+    // this config), so the kernel-side ptxn_id_loop_cnt_ lands on a clean
+    // boundary (8191) when posted=65528 and increments to 8192 exactly as
+    // posted wraps to 0. Picking a value that's not a multiple of per_tc would
+    // desync kernel and HW by an inter-batch offset.
+    constexpr uint32_t kPreloadValue = 65528;
+    constexpr uint32_t kPushTiles = 32;
+    constexpr uint32_t kEntrySize = 1024;
+    constexpr uint32_t kRingEntries = 16;
+
+    const auto& mesh_device = this->devices_.at(0);
+    IDevice* device = mesh_device->get_devices()[0];
+    Program program = CreateProgram();
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+    CoreCoord logical_core(0, 0);
+    CoreRangeSet core_range_set(CoreRange(logical_core, logical_core));
+
+    experimental::dfb::DataflowBufferConfig config{
+        .entry_size = kEntrySize,
+        .num_entries = kRingEntries,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = true};
+    auto dfb_id = experimental::dfb::CreateDataflowBuffer(program, core_range_set, config);
+    ASSERT_EQ(dfb_id, 0u) << "Preload kernels hardcode dfb id 0";
+
+    const uint32_t total_buffer_size = kPushTiles * kEntrySize;
+    distributed::DeviceLocalBufferConfig local_buffer_config{.page_size = kEntrySize, .buffer_type = BufferType::DRAM};
+    distributed::ReplicatedBufferConfig buffer_config{.size = total_buffer_size};
+    auto in_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+    auto out_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+
+    std::vector<uint32_t> producer_cta = {
+        (uint32_t)in_buffer->address(),
+        kPushTiles,
+        /*implicit_sync=*/1u,
+        /*kPreloadPostedValue=*/kPreloadValue};
+    tt::tt_metal::TensorAccessorArgs(in_buffer).append_to(producer_cta);
+    auto producer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_producer_with_tc_preload.cpp",
+        core_range_set,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = producer_cta});
+
+    std::vector<uint32_t> consumer_cta = {
+        (uint32_t)out_buffer->address(),
+        kPushTiles,
+        /*blocked_consumer=*/0u,
+        /*implicit_sync=*/1u,
+        /*kPreloadAckedValue=*/kPreloadValue};
+    tt::tt_metal::TensorAccessorArgs(out_buffer).append_to(consumer_cta);
+    auto consumer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_consumer_with_tc_preload.cpp",
+        core_range_set,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = consumer_cta});
+
+    experimental::dfb::BindDataflowBufferToProducerConsumerKernels(program, dfb_id, producer_kernel, consumer_kernel);
+
+    // Bind populates the DFB's INTERNAL config.producer_risc_mask /
+    // consumer_risc_mask; the local `config` variable here is a snapshot from
+    // before Bind and still has those fields = 0. Always read the masks from
+    // the DFB's internal copy via get_dataflow_buffer(id).
+    auto dfb_impl = program.impl().get_dataflow_buffer(dfb_id);
+    SetRuntimeArgs(
+        program,
+        producer_kernel,
+        logical_core,
+        {(uint32_t)dfb_impl->config.producer_risc_mask, /*chunk_offset=*/0u, kPushTiles});
+    SetRuntimeArgs(
+        program,
+        consumer_kernel,
+        logical_core,
+        {(uint32_t)dfb_impl->config.consumer_risc_mask, (uint32_t)dfb_id, /*chunk_offset=*/0u, kPushTiles});
+
+    auto input = create_random_vector_of_bfloat16(total_buffer_size, 1.0f, 0xD1D1);
+    distributed::WriteShard(mesh_device->mesh_command_queue(), in_buffer, input, zero_coord, true);
+
+    // TODO #38042 (mirroring execute_program_and_verify): WriteShard barrier
+    // isn't yet uplifted on Quasar. Without this sleep + readback, only tile 0
+    // makes it to DRAM before LaunchProgram fires, and the kernel reads zeros
+    // for tiles 1-31 — producing exactly the failure pattern (output[256+]=0).
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::vector<uint32_t> rdback_in;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), rdback_in, in_buffer, zero_coord, true);
+    tt_driver_atomics::mfence();
+    ASSERT_EQ(rdback_in, input) << "WriteShard did not complete before LaunchProgram";
+
+    detail::LaunchProgram(device, program, true /*wait_until_cores_done*/);
+
+    std::vector<uint32_t> output;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), output, out_buffer, zero_coord, true);
+
+    // On mismatch, find and log the first divergent uint32 + which tile / element
+    // it belongs to. Each tile is 1024 B = 256 uint32; helps localize whether the
+    // corruption is before-wrap (tile 0-7), at-wrap (tile 8), or after-wrap.
+    if (input != output) {
+        size_t first_diff = input.size();
+        for (size_t i = 0; i < input.size(); ++i) {
+            if (input[i] != output[i]) {
+                first_diff = i;
+                break;
+            }
+        }
+        constexpr size_t kU32PerTile = 1024 / sizeof(uint32_t);
+        size_t tile_idx = first_diff / kU32PerTile;
+        size_t in_tile_offset = first_diff % kU32PerTile;
+        log_info(
+            tt::LogTest,
+            "D1 mismatch at uint32 index {} (tile {}, element {} of {}). input[{}]=0x{:x} output[{}]=0x{:x}. "
+            "Wrap is at tile 8 (after preload=65528 + 8 ISR fires).",
+            first_diff,
+            tile_idx,
+            in_tile_offset,
+            kU32PerTile,
+            first_diff,
+            input[first_diff],
+            first_diff,
+            output[first_diff]);
+    }
+    EXPECT_EQ(input, output) << "Identity copy across uint16 TC-counter wrap point failed";
+}
+
+// D2: All-DM 6-producer × 2-consumer with ring wraparound. The existing
+// DMTensix 6Sx1S / 6Sx2S tests cover 6 DM producers, but only with a Tensix
+// consumer and tile count <= ring size (no wraparound under contention). This
+// test puts 6 producers and 2 consumers on DMs simultaneously (max concurrent
+// DM occupancy on Quasar — 8 DMs per node) and forces ~4 ring wraparounds
+// with 96 tiles through a 24-entry ring while all 8 DMs are hammering.
+//
+// Catches: NOC arbitration drops, TC-allocator clashes across 8 concurrent
+// trids, IP-register fired_trids collisions under heavy load.
+//
+// Split into two TEST_Fs (ImplicitOff / ImplicitOn) rather than a single
+// TEST_P with a bool param: TEST_P would run both variants back-to-back in
+// the same process, and the in-process device close → reopen path between
+// param values hangs on the Quasar emulator (the "cumulative-state flake"
+// that tt_test's 20s cooldown is meant to avoid — but the cooldown only
+// applies *between* tt_test invocations, not between TEST_P param values).
+// With two TEST_Fs, each variant becomes its own tt_test pick and gets a
+// fresh binary + cooldown.
+//
+// Tile count is kept small (96, not 1024) so the DRAM WriteShard / ReadShard
+// of the input/output buffers stays under 1 minute on the Quasar emulator
+// (each NOC page write is multi-second on emu). Concurrency stress comes from
+// 8 DMs running at once, not from volume — 4 wraps is plenty to expose race
+// bugs. Bump kTotalTiles when running on silicon for deeper stress.
+static void run_d2_all_dms_concurrent(const std::shared_ptr<distributed::MeshDevice>& mesh_device, bool implicit_sync) {
+    experimental::dfb::DataflowBufferConfig config{
+        .entry_size = 1024,
+        .num_entries = 24,
+        .num_producers = 6,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 2,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = implicit_sync};
+    constexpr uint32_t kTotalTiles = 96;
+    CoreRangeSet core_range_set(CoreRange(CoreCoord(0, 0), CoreCoord(0, 0)));
+    run_single_dfb_program(mesh_device, config, DFBPorCType::DM, DFBPorCType::DM, core_range_set, kTotalTiles);
+}
+
+TEST_F(MeshDeviceFixture, D2_AllDMsConcurrent_6Sx2S_ImplicitOff) {
+    if (this->devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "6 DM producers + 2 DM consumers requires Quasar (8 DMs/node)";
+    }
+    run_d2_all_dms_concurrent(this->devices_.at(0), /*implicit_sync=*/false);
+}
+
+TEST_F(MeshDeviceFixture, D2_AllDMsConcurrent_6Sx2S_ImplicitOn) {
+    if (this->devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "6 DM producers + 2 DM consumers requires Quasar (8 DMs/node)";
+    }
+    run_d2_all_dms_concurrent(this->devices_.at(0), /*implicit_sync=*/true);
+}
+
+// D3: Heterogeneous per-core HW config — forces a single DFB spanning two cores
+// to bin into TWO DfbGroups instead of one.
+//
+// All existing multi-core DFB tests use identical configs everywhere, so the host
+// always produces exactly one DfbGroup per DFB. If `hw_risc_configs_equal()` in
+// finalize_single_dfb_config() were to accidentally return true for unequal
+// per-core HW configs, no test would notice — every core would silently inherit
+// group[0]'s TC/Remapper allocation.
+//
+// Trick: create a "decoy" DFB on core A only. The decoy consumes a TC slot on
+// core A during finalize. Then create a "shared" DFB on cores A and B. The TC
+// allocator gives core A's shared producer a slot LATER in the TC pool than
+// core B's (because slot 0 on core A is already taken by the decoy), so the
+// resulting `packed_tile_counter` differs between the two cores → bin_into_group
+// splits them into two groups.
+//
+// Decoy is created first (becomes dfb id 0) so the standard dfb_consumer.cpp
+// can still receive the shared dfb id (1) via runtime arg, and the shared
+// producer uses dfb_producer_with_id.cpp (compile-time-configurable id).
+TEST_F(MeshDeviceFixture, D3_MultiCoreDFB_TwoGroupsViaDecoy) {
+    if (this->devices_.at(0)->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "TC-based grouping is Quasar-only";
+    }
+
+    const auto& mesh_device = this->devices_.at(0);
+    IDevice* device = mesh_device->get_devices()[0];
+
+    // The emu-quasar-1x3 simulator has only a single Tensix (logical (0,0)) —
+    // this test needs at least two distinct Tensixes to drive divergent TC
+    // allocation. Skip on any device with <2 worker cores.
+    CoreCoord grid = device->compute_with_storage_grid_size();
+    const uint32_t num_workers = grid.x * grid.y;
+    if (num_workers < 2) {
+        GTEST_SKIP() << "Need >= 2 Tensix cores; device has " << num_workers
+                     << " (single-Tensix emulator?). Run on silicon or a multi-Tensix sim.";
+    }
+    Program program = CreateProgram();
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+
+    // Two adjacent Tensixes — same convention as existing MultiCoreDMTest2Core_*.
+    CoreCoord core_a(0, 0);
+    CoreCoord core_b(1, 0);
+    CoreRangeSet decoy_range(CoreRange(core_a, core_a));
+    CoreRangeSet shared_range =
+        CoreRangeSet(std::vector<CoreRange>{CoreRange(core_a, core_a), CoreRange(core_b, core_b)});
+
+    // --- DFB-0: decoy on core A only (no kernel bindings; just claims a TC slot). ---
+    // Without kernel binding the masks would stay 0 and finalize would reject the DFB,
+    // so set them explicitly to DM0 producer / DM1 consumer.
+    experimental::dfb::DataflowBufferConfig decoy_config{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .producer_risc_mask = 0x1,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .consumer_risc_mask = 0x2,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false};
+    [[maybe_unused]] auto decoy_dfb_id = experimental::dfb::CreateDataflowBuffer(program, decoy_range, decoy_config);
+
+    // --- DFB-1: shared across A and B (real producer/consumer kernels). ---
+    experimental::dfb::DataflowBufferConfig shared_config{
+        .entry_size = 1024,
+        .num_entries = 16,
+        .num_producers = 1,
+        .pap = dfb::AccessPattern::STRIDED,
+        .num_consumers = 1,
+        .cap = dfb::AccessPattern::STRIDED,
+        .enable_implicit_sync = false};
+    auto shared_dfb_id = experimental::dfb::CreateDataflowBuffer(program, shared_range, shared_config);
+
+    // --- DRAM buffers: one slice per core. ---
+    const uint32_t entries_per_core = 16;
+    const uint32_t entry_size = shared_config.entry_size;
+    const uint32_t total_buffer_size = 2 * entries_per_core * entry_size;
+    distributed::DeviceLocalBufferConfig local_buffer_config{.page_size = entry_size, .buffer_type = BufferType::DRAM};
+    distributed::ReplicatedBufferConfig buffer_config{.size = total_buffer_size};
+    auto in_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+    auto out_buffer = distributed::MeshBuffer::create(buffer_config, local_buffer_config, mesh_device.get());
+
+    // --- Producer kernel: dfb_producer_with_id.cpp (uses shared_dfb_id, not the hardcoded 0). ---
+    std::vector<uint32_t> producer_cta = {
+        (uint32_t)in_buffer->address(),
+        entries_per_core,
+        /*implicit_sync=*/0u,
+        (uint32_t)shared_dfb_id};
+    tt::tt_metal::TensorAccessorArgs(in_buffer).append_to(producer_cta);
+    auto producer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_producer_with_id.cpp",
+        shared_range,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = producer_cta});
+
+    // --- Consumer kernel: standard dfb_consumer.cpp (takes id via RTA). ---
+    std::vector<uint32_t> consumer_cta = {
+        (uint32_t)out_buffer->address(),
+        entries_per_core,
+        /*blocked_consumer=*/0u,
+        /*implicit_sync=*/0u};
+    tt::tt_metal::TensorAccessorArgs(out_buffer).append_to(consumer_cta);
+    auto consumer_kernel = experimental::quasar::CreateKernel(
+        program,
+        "tests/tt_metal/tt_metal/test_kernels/dataflow/dfb_consumer.cpp",
+        shared_range,
+        experimental::quasar::QuasarDataMovementConfig{.num_threads_per_cluster = 1, .compile_args = consumer_cta});
+
+    experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
+        program, shared_dfb_id, producer_kernel, consumer_kernel);
+
+    // --- RTAs: each core gets a distinct chunk_offset so the two cores read/write
+    //     disjoint slices of the global DRAM buffers.
+    //     Producer/consumer masks must come from the DFB's INTERNAL config (set
+    //     by Bind), not from the local `shared_config` variable (snapshotted
+    //     before Bind and still 0). ---
+    auto shared_dfb_impl = program.impl().get_dataflow_buffer(shared_dfb_id);
+    const uint32_t shared_prod_mask = shared_dfb_impl->config.producer_risc_mask;
+    const uint32_t shared_cons_mask = shared_dfb_impl->config.consumer_risc_mask;
+    SetRuntimeArgs(program, producer_kernel, core_a, {shared_prod_mask, /*chunk_offset=*/0u, entries_per_core});
+    SetRuntimeArgs(
+        program, producer_kernel, core_b, {shared_prod_mask, /*chunk_offset=*/entries_per_core, entries_per_core});
+    SetRuntimeArgs(
+        program,
+        consumer_kernel,
+        core_a,
+        {shared_cons_mask, (uint32_t)shared_dfb_id, /*chunk_offset=*/0u, entries_per_core});
+    SetRuntimeArgs(
+        program,
+        consumer_kernel,
+        core_b,
+        {shared_cons_mask, (uint32_t)shared_dfb_id, /*chunk_offset=*/entries_per_core, entries_per_core});
+
+    auto input = create_constant_vector_of_bfloat16(total_buffer_size, 1.0f);
+    distributed::WriteShard(mesh_device->mesh_command_queue(), in_buffer, input, zero_coord, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    detail::LaunchProgram(device, program, true /*wait_until_cores_done*/);
+
+    // --- Assertion 1 (the point of the test): the shared DFB binned into 2 groups. ---
+    ASSERT_NE(shared_dfb_impl, nullptr);
+    EXPECT_EQ(shared_dfb_impl->groups.size(), 2u)
+        << "Expected the shared DFB to bin into 2 groups (one per core) because the decoy on core A "
+        << "shifts the TC slot allocation; saw groups.size()=" << shared_dfb_impl->groups.size();
+
+    // Each group should cover exactly one core.
+    if (shared_dfb_impl->groups.size() == 2u) {
+        for (const auto& group : shared_dfb_impl->groups) {
+            EXPECT_EQ(group.core_ranges.num_cores(), 1u) << "Each group should contain exactly one core";
+        }
+    }
+
+    // --- Assertion 2: end-to-end correctness on both cores. ---
+    std::vector<uint32_t> output;
+    distributed::ReadShard(mesh_device->mesh_command_queue(), output, out_buffer, zero_coord, true);
+    EXPECT_EQ(input, output) << "Heterogeneous-group pipeline must still produce identity output";
 }
 
 }  // end namespace tt::tt_metal
