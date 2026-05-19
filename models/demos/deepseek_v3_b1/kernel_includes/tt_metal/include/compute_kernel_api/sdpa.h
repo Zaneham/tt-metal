@@ -9,7 +9,6 @@
 #include "api/compute/tile_move_copy.h"
 #include "api/compute/pack_untilize.h"
 #include "api/compute/experimental/pack_block.h"
-#include "../../../../kernel_includes/tt_metal/include/compute_kernel_api/custom_pack_untilize.h"
 #include "../../../../kernel_includes/tt_metal/include/compute_kernel_api/sdpa_custom_mm.h"
 #include "../../../../kernel_includes/tt_metal/include/compute_kernel_api/sdpa_custom_mm_reuse_dest_srcb.h"
 #include "../../../../kernel_includes/tt_metal/include/compute_kernel_api/deepseek_compute_kernel_hw_startup.h"
@@ -618,7 +617,7 @@ ALWI void sdpa_tail(
     // Phase 2: Process all L blocks
     // Untilize requires operating on all blocks at once
     if constexpr (untilize) {
-        custom_pack_untilize_dest_init<block_size, num_blocks * block_size, false, TILE_C_DIM, dense>(cb_l_out);
+        pack_untilize_dest_init<block_size, num_blocks * block_size, false, TILE_C_DIM, dense>(cb_l_out);
         cb_reserve_back(cb_l_out, block_size * num_blocks);
     }
     // When normalize=true, first block uses regs still held from MS phase

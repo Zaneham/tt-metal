@@ -149,6 +149,7 @@ CircularBufferConfig::CircularBufferConfig(
     data_formats_(data_formats),
     page_sizes_(page_sizes),
     tiles_(tiles),
+    unpack_face_geometry_(unpack_face_geometry),
     buffer_indices_(buffer_indices),
     local_buffer_indices_(local_buffer_indices),
     remote_buffer_indices_(remote_buffer_indices),

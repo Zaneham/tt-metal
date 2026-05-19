@@ -75,7 +75,9 @@ public:
 
     CircularBufferConfig& set_tile_dims(uint8_t buffer_index, const Tile& tile);
 
-    /// Override unpack face row count and logical face count for this buffer index (feeds JIT unpack_tile_* arrays).
+    /// Override face row count and logical face count metadata for this buffer index.
+    /// This metadata feeds JIT tile-dimension arrays derived from the same descriptor fields, including
+    /// unpack_tile_* arrays as well as pack/untilize behavior when applicable.
     /// Use when operand geometry differs from \ref Tile (e.g. pool tilize on 32×32 pages with 2 logical faces).
     /// Requires tile height (default 32) divisible by \p face_r_dim (see jit_build/genfiles.cpp).
     CircularBufferConfig& set_unpack_face_geometry(uint8_t buffer_index, uint32_t face_r_dim, uint32_t num_faces);
