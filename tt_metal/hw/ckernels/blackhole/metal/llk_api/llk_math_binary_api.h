@@ -79,6 +79,7 @@ inline void llk_math_eltwise_binary(
 
     const std::uint32_t operand_id = get_operand_id(operand_A);
     ckernel::TensorShape tensor_shape = get_operand_tensor_shape(operand_id);
+    tensor_shape.set_face_r_dim(10);
 
     _llk_math_eltwise_binary_<
         eltwise_binary_type,

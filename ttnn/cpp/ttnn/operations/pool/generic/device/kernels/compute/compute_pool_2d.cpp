@@ -56,17 +56,13 @@ void kernel_main() {
 
     constexpr uint32_t face_r_dim = window_size_hw < FACE_HEIGHT ? window_size_hw : FACE_HEIGHT;
     constexpr bool last_tile_is_partial = in_c % TILE_WIDTH != 0;
-
     constexpr uint32_t num_faces_in_input_tile =
         (max_sticks_for_reduction < TILE_HEIGHT || window_size_hw <= FACE_HEIGHT) ? 2 : 4;
     constexpr uint32_t num_faces_in_output_tile = 2;
     constexpr uint32_t num_faces_in_last_output_tile = last_tile_is_partial && in_c % TILE_WIDTH <= FACE_WIDTH ? 1 : 2;
     constexpr uint32_t num_out_sticks = 1;
-#ifdef ARCH_BLACKHOLE
-    constexpr uint32_t num_out_sticks_tile = 16;
-#else
     constexpr uint32_t num_out_sticks_tile = num_out_sticks;
-#endif
+
     constexpr bool is_avg_pool = REDUCE_OP == PoolType::AVG;
     // average pool with large kernels requires fp32 accumulation so we can only reduce 4 tiles at a time,
     // otherwise we can reduce 8 tiles at a time.
@@ -211,10 +207,6 @@ void kernel_main() {
 
                     tilize_stick_counter = 0;
 
-                    if constexpr (num_faces_in_input_tile != TILE_NUM_FACES) {
-                        UNPACK((llk_unpack_hw_configure<DST_ACCUM_MODE>(
-                            in_cb_id_0, in_scalar_cb_id_0, face_r_dim, num_faces_in_input_tile)));
-                    }
                     UNPACK((llk_unpack_tilizeA_B_init<neginf_srca_maxpool, true, false, zero_srca_avgpool>(
                         in_cb_id_0, in_scalar_cb_id_0, tiles_to_reduce, num_faces_in_input_tile, face_r_dim, 1)));
                     // init math for reduction again since FPU gets reprogrammed by tilize
@@ -225,8 +217,10 @@ void kernel_main() {
 #endif
 
                     constexpr uint32_t PACKER_FACE_R_DIM_STICK = 1;  // face_r_dim = 1 => one-row faces (stick packing)
-                    PACK((llk_pack_untilize_hw_configure_disaggregated<DST_ACCUM_MODE, false /*untilize*/>(
-                        pre_tilize_cb_id, PACKER_FACE_R_DIM_STICK, num_faces_in_output_tile)));
+                    if constexpr (is_output_block_format) {
+                        PACK((llk_pack_untilize_hw_configure_disaggregated<DST_ACCUM_MODE, false /*untilize*/>(
+                            pre_tilize_cb_id, PACKER_FACE_R_DIM_STICK, num_faces_in_output_tile)));
+                    }
                     PACK((llk_pack_untilize_init<max_tiles_per_iter, max_tiles_per_iter, false, false, TILE_C_DIM>(
                         pre_tilize_cb_id, PACKER_FACE_R_DIM_STICK, num_faces_in_output_tile)));
                 }
