@@ -159,8 +159,6 @@ void kernel_main() {
             tile_regs_acquire();
             for (uint32_t chunk = 0; chunk < interm_reduction_chunks; chunk++) {
                 curr_in_cb.wait_front(1);
-                unpack_reconfig_A_B_block<DST_ACCUM_MODE>(
-                    in_cb_id_0, curr_in_cb_id, in_scalar_cb_id_0, curr_scalar_cb_id);
                 unpack_tilizeA_B_block<neginf_srca_maxpool, true, false, zero_srca_avgpool>(
                     curr_in_cb_id,
                     curr_scalar_cb_id,

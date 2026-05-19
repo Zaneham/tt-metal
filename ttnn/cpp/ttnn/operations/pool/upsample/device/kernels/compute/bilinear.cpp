@@ -47,7 +47,6 @@ inline void reduce_h_fused(
     constexpr uint32_t scalar_tile_idx = 0;  // Tile index for scalar CB (only 1 tile of weights loaded)
     constexpr uint32_t num_faces = 2;  // Unpack 2 faces (top faces contain 4 rows needed for bilinear interpolation)
 
-    unpack_reconfig_A_B_block<DST_ACCUM_MODE>(base_in_cb_id, in_cb_id, base_scalar_cb_id, in_scalar_cb_id);
     unpack_tilizeA_B_block<use_neginf_srcA, reload_srcB, zero_srcA, zero_srcA_reduce>(
         in_cb_id, in_scalar_cb_id, tiles_per_reduction, scalar_tile_idx);
     for (uint32_t c_i = 0; c_i < tiles_per_reduction; ++c_i) {

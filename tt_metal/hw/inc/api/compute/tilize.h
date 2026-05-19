@@ -181,35 +181,6 @@ ALWI void tilize_block(
 }
 
 #ifndef ARCH_QUASAR
-// clang-format off
-/**
- * Unpacks and tilizes a block from two input CBs.
- *
- * Return value: None
- *
- * | Param Type | Name             | Description                              | Type         | Valid Range | Required |
- * |------------|------------------|------------------------------------------|--------------|-------------|----------|
- * | Template   | neginf_srcA      | NegInf source A flag                     | bool         | true/false  | False    |
- * | Template   | reload_srcB      | Reload source B flag                     | std::uint32_t| true/false  | False    |
- * | Template   | zero_srcA        | Zero source A flag                       | bool         | true/false  | False    |
- * | Template   | zero_srcA_reduce | Zero source A for reduce flag            | bool         | true/false  | False    |
- * | Function   | icb0             | Input circular buffer A identifier       | uint32_t     | 0 to 31     | True     |
- * | Function   | icb1             | Input circular buffer B identifier       | uint32_t     | 0 to 31     | True     |
- * | Function   | block            | Size of tile block to work on            | uint32_t     | > 0         | True     |
- * | Function   | tile_idx_b       | Tile index for source B                  | uint32_t     | >= 0        | True     |
- *
- * Operand A face geometry is read from circular-buffer unpack metadata.
- */
-// clang-format on
-template <bool dst_accum_mode>
-ALWI void unpack_reconfig_A_B_block(
-    const std::uint32_t old_icb0,
-    const std::uint32_t new_icb0,
-    const std::uint32_t old_icb1,
-    const std::uint32_t new_icb1) {
-    UNPACK((llk_unpack_reconfig_data_format_srca<dst_accum_mode, p_dim_stride_target::IGNORE>(old_icb0, new_icb0)));
-    UNPACK((llk_unpack_reconfig_data_format_srcb<dst_accum_mode, p_dim_stride_target::IGNORE>(old_icb1, new_icb1)));
-}
 
 // clang-format off
 /**
