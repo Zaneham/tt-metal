@@ -299,20 +299,20 @@ class PassthroughStage(StageKind):
         else:
             up_fifo = down_fifo = TOKEN_META_FIFO_SIZE
             up_page = down_page = TOKEN_META_PAGE_SIZE_BYTES
-        # if self._host_loopback:
-        #     # d2h_core must differ from PIPELINE_CORE_COORD: both land on the same chip
-        #     # (no_loopback sets exit_node_coord = entry_node_coord), so using the same
-        #     # core would dispatch two persistent kernels to the same Tensix.
-        #     loopback = LoopbackConfig.host_loopback(
-        #         HostIoPlacement(
-        #             h2d_core=PIPELINE_CORE_COORD,
-        #             d2h_core=SECOND_PIPELINE_CORE_COORD,
-        #             fwd_d2d_core=PIPELINE_CORE_COORD,
-        #             lb_d2d_core=PIPELINE_CORE_COORD,
-        #         )
-        #     )
-        # else:
-        loopback = LoopbackConfig.fabric_loopback(HostIoPlacement.default(PIPELINE_CORE_COORD))
+        if self._host_loopback:
+            # d2h_core must differ from PIPELINE_CORE_COORD: both land on the same chip
+            # (no_loopback sets exit_node_coord = entry_node_coord), so using the same
+            # core would dispatch two persistent kernels to the same Tensix.
+            loopback = LoopbackConfig.host_loopback(
+                HostIoPlacement(
+                    h2d_core=PIPELINE_CORE_COORD,
+                    d2h_core=SECOND_PIPELINE_CORE_COORD,
+                    fwd_d2d_core=PIPELINE_CORE_COORD,
+                    lb_d2d_core=PIPELINE_CORE_COORD,
+                )
+            )
+        else:
+            loopback = LoopbackConfig.fabric_loopback(HostIoPlacement.default(PIPELINE_CORE_COORD))
         return PipelineBlock(
             mesh_device,
             PIPELINE_CORE_COORD,
@@ -348,7 +348,7 @@ class SpecLMHeadStage(StageKind):
         *,
         fp32_dest_acc_en: bool = True,
         persistent_mode: bool = True,
-        spec_weights: DeepSeekV3SpecWeights | None = None,
+        spec_weights: DeepSeekV3SpecWeights | DeepSeekV3LMHeadWeights | None = None,
         mtp_level: int = 1,
     ) -> None:
         self._fp32_dest_acc_en = fp32_dest_acc_en
@@ -883,9 +883,6 @@ class BaseLMHeadStage(StageKind):
 
         lmhead_input_socket = pipeline_block.get_downstream_socket() if pipeline_block.has_exit else None
         lmhead_output_socket = pipeline_block.get_upstream_socket()
-
-        logger.info(f"LMHead input socket: {lmhead_input_socket}")
-        logger.info(f"LMHead output socket: {lmhead_output_socket}")
 
         device_grid_size = mesh_device.compute_with_storage_grid_size()
         worker_crs = ttnn.CoreRangeSet(

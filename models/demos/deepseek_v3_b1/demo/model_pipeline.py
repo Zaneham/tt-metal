@@ -40,12 +40,11 @@ class ModelPipeline:
         moe_layer_id_override: int | None = None,
         io_socket_descriptor_prefix: str | None = None,
         num_slots: int = 64,
-        num_mtp_levels: int = 1,
         relaxed_acceptance_delta: float = 0.6,
         top_k: int = 1,
         top_p: float = 1.0,
         temperature: float = 0.6,
-        enable_speculative_decode: bool = True,
+        num_mtp_levels: int = 1,
         enable_sram_hot_experts: bool = False,
         sram_hot_experts_ceiling: int = 64,
         bspm_dir: Path | None = None,
@@ -57,7 +56,6 @@ class ModelPipeline:
             weights_mode,
             lm_head_fp32_dest_acc_en,
             lm_head_persistent_mode,
-            enable_speculative_decode,
         )
         if not is_slow_dispatch():
             raise RuntimeError(
@@ -73,8 +71,8 @@ class ModelPipeline:
         if num_procs not in (4, 16, 64, 80):
             raise RuntimeError(f"Pod pipeline requires 4, 16, 64, or 80 distributed processes; got {num_procs}")
         ttnn.enable_asynchronous_slow_dispatch(self.mesh_device)
-        self.enable_speculative_decode = enable_speculative_decode
 
+        # Each host loads/creates only the weights for its stage via the provider.
         if weights_mode == "real":
             if cache_path is None:
                 raise ValueError("weights_mode='real' requires cache_path")
@@ -107,7 +105,7 @@ class ModelPipeline:
                     sram_assigner=CompressedTensorAssigner(formats=["bfp4"]),
                     worker_l1_size=_worker_l1_size_for_rank(
                         num_procs,
-                        enable_speculative_decode=enable_speculative_decode,
+                        num_mtp_levels,
                     ),
                     bspm_dir=bspm_dir,
                     bspm_variant=bspm_variant,
@@ -366,7 +364,7 @@ class ModelPipeline:
         Each cycle writes 1+N tokens (base + N specs) and reads 1+N result pages.
         Acceptance walks the chain; the pivot result seeds the next cycle.
         """
-        if not self.enable_speculative_decode:
+        if self._num_mtp_levels == 0:
             return self.run_inference_base_decode(
                 prompt_token_ids=prompt_token_ids,
                 max_new_tokens=max_new_tokens,
