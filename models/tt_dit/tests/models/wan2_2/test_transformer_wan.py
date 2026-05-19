@@ -43,10 +43,12 @@ ROPE_MAX_SEQ_LEN = 1024
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _make_parallel_config(mesh_device, sp_axis, tp_axis):
+def _make_parallel_config(mesh_device, sp_axis, tp_axis, sp_topology=None):
     return DiTParallelConfig(
         tensor_parallel=ParallelFactor(mesh_axis=tp_axis, factor=tuple(mesh_device.shape)[tp_axis]),
-        sequence_parallel=ParallelFactor(mesh_axis=sp_axis, factor=tuple(mesh_device.shape)[sp_axis]),
+        sequence_parallel=ParallelFactor(
+            mesh_axis=sp_axis, factor=tuple(mesh_device.shape)[sp_axis], topology=sp_topology
+        ),
         cfg_parallel=None,
     )
 
@@ -432,7 +434,7 @@ def test_wan_transformer_inner_step(
         # SP=4, TP=2
         [(4, 8), (2, 4), 1, 0, 4, True, line_params, ttnn.Topology.Linear, True],
         # SP=4, TP=4
-        [(4, 8), (4, 4), 1, 0, 4, False, line_params, ttnn.Topology.Linear, True],
+        [(4, 8), (4, 4), 1, 0, 4, False, ring_params, ttnn.Topology.Ring, True],
         # SP=4, TP=8
         [(4, 8), (4, 8), 0, 1, 4, False, ring_params, ttnn.Topology.Ring, True],
         # SP=8, TP=4
@@ -506,7 +508,7 @@ def test_mesh_sweep_1536p_wan22_block(
     parent_mesh = mesh_device
     mesh_device = parent_mesh.create_submesh(ttnn.MeshShape(*mesh_shape))
 
-    parallel_config = _make_parallel_config(mesh_device, sp_axis, tp_axis)
+    parallel_config = _make_parallel_config(mesh_device, sp_axis, tp_axis, ttnn.Topology.Linear)
     ccl_manager = _make_ccl_manager(mesh_device, num_links, topology)
 
     parent_torch_model = TorchWanTransformer3DModel.from_pretrained(
