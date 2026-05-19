@@ -7,6 +7,13 @@
 #include "../dm_common.hpp"
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
+#include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/semaphore_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 
 namespace tt::tt_metal {
 
@@ -75,59 +82,149 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const Multic
 
     CoreRangeSet dst_core_range_set({CoreRange(test_config.dst_grid_start, dst_grid_end)});
 
-    // Create semaphore on all cores that will access it (senders and receivers)
+    // Sender core set (union of all sender cores).
     CoreRangeSet sender_core_range_set;
     for (const auto& sender_core : test_config.sender_cores) {
         sender_core_range_set = sender_core_range_set.merge(CoreRangeSet({CoreRange(sender_core)}));
     }
     CoreRangeSet all_cores = dst_core_range_set.merge(sender_core_range_set);
-    uint32_t sem_id = CreateSemaphore(program, all_cores, 0);
 
-    // Kernel paths
-    std::string kernels_dir = "tests/tt_metal/tt_metal/data_movement/multicast_atomics/kernels/";
-    std::string sender_kernel_filename = "multicast_atomic_sender";
-    std::string receiver_kernel_filename = "multicast_atomic_receiver";
     if (test_config.use_2_0_api) {
-        sender_kernel_filename += "_2_0";
-        receiver_kernel_filename += "_2_0";
-    }
-    std::string sender_kernel_path = kernels_dir + sender_kernel_filename + ".cpp";
-    std::string receiver_kernel_path = kernels_dir + receiver_kernel_filename + ".cpp";
+        using namespace tt::tt_metal::experimental::metal2_host_api;
 
-    // Create sender kernels
-    for (const auto& sender_core : test_config.sender_cores) {
-        vector<uint32_t> sender_compile_args = {
-            sem_id,
-            test_config.num_of_transactions,
-            test_config.atomic_inc_value,
-            num_dests,
-            physical_dst_start.x,
-            physical_dst_start.y,
-            physical_dst_end.x,
-            physical_dst_end.y,
-            test_config.test_id};
+        SemaphoreSpec atomic_sem{
+            .unique_id = "atomic_sem",
+            .target_nodes = all_cores,
+            .initial_value = 0,
+        };
+
+        KernelSpec::CompileTimeArgBindings sender_cta_bindings = {
+            {"num_of_transactions", (uint32_t)test_config.num_of_transactions},
+            {"atomic_inc_value", (uint32_t)test_config.atomic_inc_value},
+            {"num_dests", (uint32_t)num_dests},
+            {"test_id", (uint32_t)test_config.test_id}};
+
+        KernelSpec sender_spec{
+            .unique_id = "sender",
+            .source =
+                KernelSpec::SourceFilePath{
+                    "tests/tt_metal/tt_metal/data_movement/multicast_atomics/kernels/multicast_atomic_sender_2_0.cpp"},
+            .num_threads = 1,
+            .semaphore_bindings = {KernelSpec::SemaphoreBinding{
+                .semaphore_spec_name = atomic_sem.unique_id, .accessor_name = "sem_name"}},
+            .compile_time_arg_bindings = sender_cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = 4},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_0,
+                            .noc = test_config.noc_id,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        KernelSpec::CompileTimeArgBindings receiver_cta_bindings = {
+            {"expected_value", (uint32_t)expected_value}, {"test_id", (uint32_t)test_config.test_id}};
+
+        KernelSpec receiver_spec{
+            .unique_id = "receiver",
+            .source = KernelSpec::SourceFilePath{"tests/tt_metal/tt_metal/data_movement/multicast_atomics/kernels/"
+                                                 "multicast_atomic_receiver_2_0.cpp"},
+            .num_threads = 1,
+            .semaphore_bindings = {KernelSpec::SemaphoreBinding{
+                .semaphore_spec_name = atomic_sem.unique_id, .accessor_name = "sem_name"}},
+            .compile_time_arg_bindings = receiver_cta_bindings,
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_1,
+                            .noc = test_config.noc_id,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "multicast_atomic_test",
+            .kernels = {sender_spec, receiver_spec},
+            .semaphores = {atomic_sem},
+            .work_units =
+                {
+                    WorkUnitSpec{
+                        .unique_id = "sender_wu",
+                        .kernels = {sender_spec.unique_id},
+                        .target_nodes = sender_core_range_set,
+                    },
+                    WorkUnitSpec{
+                        .unique_id = "receiver_wu",
+                        .kernels = {receiver_spec.unique_id},
+                        .target_nodes = dst_core_range_set,
+                    },
+                },
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams sender_run_params{.kernel_spec_name = sender_spec.unique_id};
+        for (const auto& sender_core : test_config.sender_cores) {
+            sender_run_params.runtime_varargs.push_back(
+                {sender_core,
+                 {(uint32_t)physical_dst_start.x,
+                  (uint32_t)physical_dst_start.y,
+                  (uint32_t)physical_dst_end.x,
+                  (uint32_t)physical_dst_end.y}});
+        }
+        run_params.kernel_run_params.push_back(sender_run_params);
+
+        // Receiver has no runtime varargs but must still be registered.
+        ProgramRunParams::KernelRunParams receiver_run_params{.kernel_spec_name = receiver_spec.unique_id};
+        for (const auto& dst_core : dst_cores) {
+            receiver_run_params.runtime_varargs.push_back({dst_core, {}});
+        }
+        run_params.kernel_run_params.push_back(receiver_run_params);
+
+        SetProgramRunParameters(program, run_params);
+    } else {
+        // Legacy host path (WH/BH).
+        uint32_t sem_id = CreateSemaphore(program, all_cores, 0);
+
+        for (const auto& sender_core : test_config.sender_cores) {
+            vector<uint32_t> sender_compile_args = {
+                sem_id,
+                test_config.num_of_transactions,
+                test_config.atomic_inc_value,
+                num_dests,
+                physical_dst_start.x,
+                physical_dst_start.y,
+                physical_dst_end.x,
+                physical_dst_end.y,
+                test_config.test_id};
+
+            CreateKernel(
+                program,
+                "tests/tt_metal/tt_metal/data_movement/multicast_atomics/kernels/multicast_atomic_sender.cpp",
+                sender_core,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_0,
+                    .noc = test_config.noc_id,
+                    .compile_args = sender_compile_args});
+        }
+
+        vector<uint32_t> receiver_compile_args = {sem_id, expected_value, test_config.test_id};
 
         CreateKernel(
             program,
-            sender_kernel_path,
-            sender_core,
+            "tests/tt_metal/tt_metal/data_movement/multicast_atomics/kernels/multicast_atomic_receiver.cpp",
+            dst_core_range_set,
             DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0,
+                .processor = DataMovementProcessor::RISCV_1,
                 .noc = test_config.noc_id,
-                .compile_args = sender_compile_args});
+                .compile_args = receiver_compile_args});
     }
-
-    // Create receiver kernels on all destination cores
-    vector<uint32_t> receiver_compile_args = {sem_id, expected_value, test_config.test_id};
-
-    CreateKernel(
-        program,
-        receiver_kernel_path,
-        dst_core_range_set,
-        DataMovementConfig{
-            .processor = DataMovementProcessor::RISCV_1,
-            .noc = test_config.noc_id,
-            .compile_args = receiver_compile_args});
 
     // Assign unique runtime ID
     log_info(LogTest, "Running Test ID: {}, Runtime ID: {}", test_config.test_id, unit_tests::dm::runtime_host_id);

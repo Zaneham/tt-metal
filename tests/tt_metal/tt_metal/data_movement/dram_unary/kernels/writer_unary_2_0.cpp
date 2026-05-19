@@ -3,27 +3,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "experimental/kernel_args.h"
 #include "api/dataflow/endpoints.h"
 #include "api/dataflow/noc_semaphore.h"
 #include "internal/dataflow/dataflow_api_common.h"
 
 // L1 to DRAM write
 void kernel_main() {
-    constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
-    constexpr uint32_t num_of_transactions = get_named_compile_time_arg_val("num_transactions");
-    constexpr uint32_t pages_per_transaction = get_named_compile_time_arg_val("pages_per_tx");
-    constexpr uint32_t bytes_per_page = get_named_compile_time_arg_val("bytes_per_page");
-    constexpr uint32_t dram_addr = get_named_compile_time_arg_val("dram_addr");
-    constexpr uint32_t dram_channel = get_named_compile_time_arg_val("dram_channel");
-    constexpr uint32_t local_l1_addr = get_named_compile_time_arg_val("l1_addr");
-    constexpr uint32_t sem_id = get_named_compile_time_arg_val("sem_id");
-    constexpr uint32_t virtual_channel = get_named_compile_time_arg_val("vc");
+    // True compile-time constants
+    constexpr uint32_t test_id = get_arg(args::test_id);
+    constexpr uint32_t bytes_per_page = get_arg(args::bytes_per_page);
+    constexpr uint32_t dram_channel = get_arg(args::dram_channel);
+    constexpr uint32_t local_l1_addr = get_arg(args::l1_addr);
+    constexpr uint32_t virtual_channel = get_arg(args::vc);
 
-    constexpr uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
+    // Sweep params + per-iteration dram_addr via varargs.
+    //   [0] num_of_transactions, [1] pages_per_transaction, [2] dram_addr
+    uint32_t num_of_transactions = get_vararg(0);
+    uint32_t pages_per_transaction = get_vararg(1);
+    uint32_t dram_addr = get_vararg(2);
+    uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
 
     Noc noc(noc_index);
     UnicastEndpoint unicast_endpoint;
-    Semaphore semaphore(sem_id);
+    Semaphore semaphore(sem::dram_sync);
     constexpr AllocatorBankType bank_type = AllocatorBankType::DRAM;
 
     // Wait for semaphore to be set by the reader

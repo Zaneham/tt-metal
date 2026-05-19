@@ -1,0 +1,122 @@
+// SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+#include "api/dataflow/dataflow_api.h"
+#include "internal/risc_attribs.h"
+#include "experimental/kernel_args.h"
+
+void kernel_main() {
+    constexpr uint32_t test_id = get_arg(args::test_id);
+    constexpr uint32_t num_writes = get_arg(args::num_writes);
+    constexpr uint32_t write_value_base = get_arg(args::write_val_base);
+    constexpr uint32_t use_posted_writes = get_arg(args::use_posted);
+    constexpr uint32_t same_destination = get_arg(args::same_dest);
+    constexpr uint32_t same_value = get_arg(args::same_value);
+    constexpr uint32_t dest_l1_addr = get_arg(args::dest_l1_addr);
+    constexpr uint32_t addr_stride = get_arg(args::addr_stride);
+    constexpr uint32_t packed_receiver_coords = get_arg(args::receiver_coords);
+    constexpr uint32_t noc_id = get_arg(args::noc_id);
+
+    // Extract receiver coordinates
+    uint32_t receiver_x = (packed_receiver_coords >> 16) & 0xFFFF;
+    uint32_t receiver_y = packed_receiver_coords & 0xFFFF;
+
+    {
+        DeviceZoneScopedN("RISCV0");
+
+        if constexpr (same_destination) {
+            uint64_t dest_noc_addr = get_noc_addr(receiver_x, receiver_y, dest_l1_addr);
+
+            // Setup state once
+            if constexpr (same_value) {
+                // When writing same value, set it in the state and reuse it
+                if constexpr (use_posted_writes) {
+                    noc_inline_dw_write_set_state<true, true>(
+                        dest_noc_addr, write_value_base, 0xF, write_at_cmd_buf, noc_id);
+                } else {
+                    noc_inline_dw_write_set_state<false, true>(
+                        dest_noc_addr, write_value_base, 0xF, write_at_cmd_buf, noc_id);
+                }
+
+                for (uint32_t i = 0; i < num_writes; i++) {
+                    if constexpr (use_posted_writes) {
+                        noc_inline_dw_write_with_state<false, true, true, false, false>(
+                            0, 0, write_at_cmd_buf, noc_id);
+                    } else {
+                        noc_inline_dw_write_with_state<false, true, false, false, false>(
+                            0, 0, write_at_cmd_buf, noc_id);
+                    }
+                }
+            } else {
+                if constexpr (use_posted_writes) {
+                    noc_inline_dw_write_set_state<true, false>(dest_noc_addr, 0, 0xF, write_at_cmd_buf, noc_id);
+                } else {
+                    noc_inline_dw_write_set_state<false, false>(dest_noc_addr, 0, 0xF, write_at_cmd_buf, noc_id);
+                }
+
+                for (uint32_t i = 0; i < num_writes; i++) {
+                    if constexpr (use_posted_writes) {
+                        noc_inline_dw_write_with_state<false, true, true, false, true>(
+                            write_value_base + i, 0, write_at_cmd_buf, noc_id);
+                    } else {
+                        noc_inline_dw_write_with_state<false, true, false, false, true>(
+                            write_value_base + i, 0, write_at_cmd_buf, noc_id);
+                    }
+                }
+            }
+
+        } else {
+            uint64_t base_noc_addr = get_noc_addr(receiver_x, receiver_y, dest_l1_addr);
+
+            if constexpr (same_value) {
+                if constexpr (use_posted_writes) {
+                    noc_inline_dw_write_set_state<true, true>(
+                        base_noc_addr, write_value_base, 0xF, write_at_cmd_buf, noc_id);
+                } else {
+                    noc_inline_dw_write_set_state<false, true>(
+                        base_noc_addr, write_value_base, 0xF, write_at_cmd_buf, noc_id);
+                }
+
+                for (uint32_t i = 0; i < num_writes; i++) {
+                    uint32_t current_local_addr = dest_l1_addr + (i * addr_stride);
+                    if constexpr (use_posted_writes) {
+                        noc_inline_dw_write_with_state<true, true, true, false, false>(
+                            0, current_local_addr, write_at_cmd_buf, noc_id);
+                    } else {
+                        noc_inline_dw_write_with_state<true, true, false, false, false>(
+                            0, current_local_addr, write_at_cmd_buf, noc_id);
+                    }
+                }
+            } else {
+                if constexpr (use_posted_writes) {
+                    noc_inline_dw_write_set_state<true, false>(base_noc_addr, 0, 0xF, write_at_cmd_buf, noc_id);
+                } else {
+                    noc_inline_dw_write_set_state<false, false>(base_noc_addr, 0, 0xF, write_at_cmd_buf, noc_id);
+                }
+
+                for (uint32_t i = 0; i < num_writes; i++) {
+                    uint32_t current_local_addr = dest_l1_addr + (i * addr_stride);
+                    if constexpr (use_posted_writes) {
+                        noc_inline_dw_write_with_state<true, true, true, false, true>(
+                            write_value_base + i, current_local_addr, write_at_cmd_buf, noc_id);
+                    } else {
+                        noc_inline_dw_write_with_state<true, true, false, false, true>(
+                            write_value_base + i, current_local_addr, write_at_cmd_buf, noc_id);
+                    }
+                }
+            }
+        }
+
+        noc_async_write_barrier();
+    }
+
+    DeviceTimestampedData("Test id", test_id);
+    DeviceTimestampedData("Stateful", 1);
+    DeviceTimestampedData("Posted writes", use_posted_writes);
+    DeviceTimestampedData("Number of transactions", num_writes);
+    DeviceTimestampedData("Transaction size in bytes", 32);
+    DeviceTimestampedData("Same destination", same_destination);
+    DeviceTimestampedData("Same value", same_value);
+    DeviceTimestampedData("NoC Index", noc_id);
+}

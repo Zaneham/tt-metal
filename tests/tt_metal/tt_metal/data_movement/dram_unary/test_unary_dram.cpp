@@ -7,6 +7,12 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
+#include <tt-metalium/experimental/metal2_host_api/semaphore_spec.hpp>
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -61,31 +67,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramCo
     // Redundant but as an extra measure add a check to ensure both addresses are within DRAM bounds
     // Checks also needed for L1 maybe
 
-    // Initialize semaphore ID
     CoreRangeSet core_range_set = CoreRangeSet({CoreRange(test_config.core_coord)});
-    const uint32_t sem_id = CreateSemaphore(program, core_range_set, 0);
-
-    // Compile-time arguments for kernels
-    std::unordered_map<std::string, uint32_t> reader_compile_args = {
-        {"test_id", (uint32_t)test_config.test_id},
-        {"num_transactions", (uint32_t)test_config.num_of_transactions},
-        {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
-        {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
-        {"dram_addr", (uint32_t)input_dram_address},
-        {"dram_channel", (uint32_t)test_config.dram_channel},
-        {"l1_addr", (uint32_t)l1_address},
-        {"sem_id", (uint32_t)sem_id}};
-
-    std::unordered_map<std::string, uint32_t> writer_compile_args = {
-        {"test_id", (uint32_t)test_config.test_id},
-        {"num_transactions", (uint32_t)test_config.num_of_transactions},
-        {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
-        {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
-        {"dram_addr", (uint32_t)output_dram_address},
-        {"dram_channel", (uint32_t)test_config.dram_channel},
-        {"l1_addr", (uint32_t)l1_address},
-        {"sem_id", (uint32_t)sem_id},
-        {"vc", (uint32_t)test_config.virtual_channel}};
 
     // Kernels
     std::string kernels_dir = "tests/tt_metal/tt_metal/data_movement/dram_unary/kernels/";
@@ -98,38 +80,160 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramCo
     std::string reader_kernel_path = kernels_dir + reader_kernel_filename + ".cpp";
     std::string writer_kernel_path = kernels_dir + writer_kernel_filename + ".cpp";
 
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        experimental::quasar::CreateKernel(
-            program,
-            reader_kernel_path,
-            test_config.core_coord,
-            experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .named_compile_args = reader_compile_args});
+    if (test_config.use_2_0_api) {
+        // Metal 2.0 host path: MakeProgramFromSpec.
+        // Sweep params (num_transactions / pages_per_tx) + writer's per-iteration dram_addr
+        // are varargs to avoid JIT cache reuse with stale CTAs.
+        // Semaphore must be declared in ProgramSpec — CreateSemaphore on a temporary Program
+        // before MakeProgramFromSpec would be discarded when program is reassigned.
+        using namespace tt::tt_metal::experimental::metal2_host_api;
 
-        experimental::quasar::CreateKernel(
-            program,
-            writer_kernel_path,
-            test_config.core_coord,
-            experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .named_compile_args = writer_compile_args});
+        SemaphoreSpec rw_sync_sem{
+            .unique_id = "dram_unary_rw_sync",
+            .target_nodes = core_range_set,
+            .initial_value = 0,
+        };
+
+        KernelSpec::CompileTimeArgBindings reader_cta = {
+            {"test_id", (uint32_t)test_config.test_id},
+            {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+            {"dram_addr", (uint32_t)input_dram_address},
+            {"dram_channel", (uint32_t)test_config.dram_channel},
+            {"l1_addr", (uint32_t)l1_address},
+        };
+
+        KernelSpec::CompileTimeArgBindings writer_cta = {
+            {"test_id", (uint32_t)test_config.test_id},
+            {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+            {"dram_channel", (uint32_t)test_config.dram_channel},
+            {"l1_addr", (uint32_t)l1_address},
+            {"vc", (uint32_t)test_config.virtual_channel},
+        };
+
+        KernelSpec reader_spec{
+            .unique_id = "reader",
+            .source = KernelSpec::SourceFilePath{reader_kernel_path},
+            .num_threads = 1,
+            .semaphore_bindings = {KernelSpec::SemaphoreBinding{
+                .semaphore_spec_name = rw_sync_sem.unique_id, .accessor_name = "dram_sync"}},
+            .compile_time_arg_bindings = reader_cta,
+            .runtime_arguments_schema = {.num_runtime_varargs = 2},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_1,
+                            .noc = NOC::RISCV_1_default,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        KernelSpec writer_spec{
+            .unique_id = "writer",
+            .source = KernelSpec::SourceFilePath{writer_kernel_path},
+            .num_threads = 1,
+            .semaphore_bindings = {KernelSpec::SemaphoreBinding{
+                .semaphore_spec_name = rw_sync_sem.unique_id, .accessor_name = "dram_sync"}},
+            .compile_time_arg_bindings = writer_cta,
+            .runtime_arguments_schema = {.num_runtime_varargs = 3},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_0,
+                            .noc = NOC::RISCV_0_default,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "dram_unary_test",
+            .kernels = {reader_spec, writer_spec},
+            .semaphores = {rw_sync_sem},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {reader_spec.unique_id, writer_spec.unique_id},
+                .target_nodes = core_range_set,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams reader_run{.kernel_spec_name = reader_spec.unique_id};
+        reader_run.runtime_varargs.push_back(
+            {test_config.core_coord,
+             {(uint32_t)test_config.num_of_transactions, (uint32_t)test_config.pages_per_transaction}});
+        run_params.kernel_run_params.push_back(reader_run);
+
+        ProgramRunParams::KernelRunParams writer_run{.kernel_spec_name = writer_spec.unique_id};
+        writer_run.runtime_varargs.push_back(
+            {test_config.core_coord,
+             {(uint32_t)test_config.num_of_transactions,
+              (uint32_t)test_config.pages_per_transaction,
+              (uint32_t)output_dram_address}});
+        run_params.kernel_run_params.push_back(writer_run);
+        SetProgramRunParameters(program, run_params);
     } else {
-        CreateKernel(
-            program,
-            reader_kernel_path,
-            test_config.core_coord,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_1,
-                .noc = NOC::RISCV_1_default,
-                .named_compile_args = reader_compile_args});
+        const uint32_t sem_id = CreateSemaphore(program, core_range_set, 0);
 
-        CreateKernel(
-            program,
-            writer_kernel_path,
-            test_config.core_coord,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0,
-                .noc = NOC::RISCV_0_default,
-                .named_compile_args = writer_compile_args});
+        // Legacy host paths (WH/BH + experimental Quasar).
+        std::unordered_map<std::string, uint32_t> reader_compile_args = {
+            {"test_id", (uint32_t)test_config.test_id},
+            {"num_transactions", (uint32_t)test_config.num_of_transactions},
+            {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
+            {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+            {"dram_addr", (uint32_t)input_dram_address},
+            {"dram_channel", (uint32_t)test_config.dram_channel},
+            {"l1_addr", (uint32_t)l1_address},
+            {"sem_id", (uint32_t)sem_id}};
+
+        std::unordered_map<std::string, uint32_t> writer_compile_args = {
+            {"test_id", (uint32_t)test_config.test_id},
+            {"num_transactions", (uint32_t)test_config.num_of_transactions},
+            {"pages_per_tx", (uint32_t)test_config.pages_per_transaction},
+            {"bytes_per_page", (uint32_t)test_config.bytes_per_page},
+            {"dram_addr", (uint32_t)output_dram_address},
+            {"dram_channel", (uint32_t)test_config.dram_channel},
+            {"l1_addr", (uint32_t)l1_address},
+            {"sem_id", (uint32_t)sem_id},
+            {"vc", (uint32_t)test_config.virtual_channel}};
+
+        if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+            experimental::quasar::CreateKernel(
+                program,
+                reader_kernel_path,
+                test_config.core_coord,
+                experimental::quasar::QuasarDataMovementConfig{
+                    .num_threads_per_cluster = 1, .named_compile_args = reader_compile_args});
+
+            experimental::quasar::CreateKernel(
+                program,
+                writer_kernel_path,
+                test_config.core_coord,
+                experimental::quasar::QuasarDataMovementConfig{
+                    .num_threads_per_cluster = 1, .named_compile_args = writer_compile_args});
+        } else {
+            CreateKernel(
+                program,
+                reader_kernel_path,
+                test_config.core_coord,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_1,
+                    .noc = NOC::RISCV_1_default,
+                    .named_compile_args = reader_compile_args});
+
+            CreateKernel(
+                program,
+                writer_kernel_path,
+                test_config.core_coord,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_0,
+                    .noc = NOC::RISCV_0_default,
+                    .named_compile_args = writer_compile_args});
+        }
     }
 
     // Assign unique id
@@ -325,13 +429,28 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMDirectedIdeal) {
 
 /* ========== Test case for varying transaction numbers and sizes with 2.0 API; Test id = 40 ========== */
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMPacketSizes2_0) {
-    unit_tests::dm::dram::packet_sizes_test(
-        get_mesh_device(),
-        40,      // Test case ID
-        {0, 0},  // Core coordinates (default)
-        0,       // DRAM channel (default)
-        true     // Use 2.0 API
-    );
+    auto mesh_device = get_mesh_device();
+    if (mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        // Quasar emulator: full sweep is too slow (same as legacy
+        // TensixDataMovementDRAMPacketSizes timed out). Run a single small config to
+        // exercise the Metal 2.0 host path + DRAM read/write+ semaphore handshake.
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::dram::DramConfig test_config = {
+            .test_id = 40,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 4,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .core_coord = {0, 0},
+            .dram_channel = 0,
+            .virtual_channel = 0,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::dram::run_dm(mesh_device, test_config));
+        return;
+    }
+    unit_tests::dm::dram::packet_sizes_test(mesh_device, 40, {0, 0}, 0, true);
 }
 
 }  // namespace tt::tt_metal

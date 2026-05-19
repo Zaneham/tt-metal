@@ -11,6 +11,11 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 #include <distributed/mesh_device_impl.hpp>
 
 namespace tt::tt_metal {
@@ -88,15 +93,6 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToO
     uint32_t packed_subordinate_core_coordinates =
         physical_subordinate_core.x << 16 | (physical_subordinate_core.y & 0xFFFF);
 
-    // Compile-time arguments for kernels
-    vector<uint32_t> sender_compile_args = {
-        (uint32_t)l1_base_address,
-        (uint32_t)test_config.num_of_transactions,
-        (uint32_t)bytes_per_transaction,
-        (uint32_t)test_config.test_id,
-        (uint32_t)packed_subordinate_core_coordinates,
-        (uint32_t)test_config.num_virtual_channels};
-
     // Kernels
     std::string kernels_dir = "tests/tt_metal/tt_metal/data_movement/one_to_one/kernels/";
     std::string sender_kernel_filename = "sender";
@@ -105,24 +101,76 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToO
     }
     std::string sender_kernel_path = kernels_dir + sender_kernel_filename + ".cpp";
 
-    // Create kernel - branch by architecture
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        // Quasar path: Use experimental API with named compile-time args
+    // Shared named CTAs (used by both legacy host paths AND, for the Metal 2.0 host
+    // path, as CTA bindings — except num_tx / tx_size which sweep across iterations
+    // in packet_sizes_test and must therefore be runtime varargs on the Metal 2.0
+    // path to avoid JIT cache invalidation (Option C).
+    const std::unordered_map<std::string, uint32_t> base_named_args = {
+        {"l1_addr", l1_base_address},
+        {"test_id", test_config.test_id},
+        {"dest_coords", packed_subordinate_core_coordinates},
+        {"num_vc", test_config.num_virtual_channels}};
+
+    if (test_config.use_2_0_api) {
+        // Metal 2.0 host path: MakeProgramFromSpec + WorkUnitSpec + ProgramRunParams.
+        using namespace tt::tt_metal::experimental::metal2_host_api;
+
+        KernelSpec::CompileTimeArgBindings cta_bindings(base_named_args.begin(), base_named_args.end());
+
+        KernelSpec sender_spec{
+            .unique_id = "sender",
+            .source = KernelSpec::SourceFilePath{sender_kernel_path},
+            .num_threads = 1,
+            .compile_time_arg_bindings = cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = 2},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_0,
+                            .noc = test_config.noc_id,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        CoreRangeSet master_core_set({CoreRange(test_config.master_core_coord)});
+        ProgramSpec spec{
+            .program_id = "one_to_one_test",
+            .kernels = {sender_spec},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {sender_spec.unique_id},
+                .target_nodes = master_core_set,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams sender_run_params{.kernel_spec_name = sender_spec.unique_id};
+        sender_run_params.runtime_varargs.push_back(
+            {test_config.master_core_coord,
+             {(uint32_t)test_config.num_of_transactions, (uint32_t)bytes_per_transaction}});
+        run_params.kernel_run_params.push_back(sender_run_params);
+        SetProgramRunParameters(program, run_params);
+    } else if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+        // Legacy Quasar host path: experimental::quasar::CreateKernel with named CTAs.
+        // All six named args (incl. num_tx, tx_size) are CTAs in the legacy path.
+        std::unordered_map<std::string, uint32_t> legacy_named_args = base_named_args;
+        legacy_named_args["num_tx"] = test_config.num_of_transactions;
+        legacy_named_args["tx_size"] = bytes_per_transaction;
         experimental::quasar::CreateKernel(
             program,
             sender_kernel_path,
             test_config.master_core_coord,
             experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1,
-                .named_compile_args = {
-                    {"l1_addr", l1_base_address},
-                    {"num_tx", test_config.num_of_transactions},
-                    {"tx_size", bytes_per_transaction},
-                    {"test_id", test_config.test_id},
-                    {"dest_coords", packed_subordinate_core_coordinates},
-                    {"num_vc", test_config.num_virtual_channels}}});
+                .num_threads_per_cluster = 1, .named_compile_args = legacy_named_args});
     } else {
-        // WH/BH path: Use legacy API
+        // Legacy WH/BH host path.
+        std::unordered_map<std::string, uint32_t> legacy_named_args = base_named_args;
+        legacy_named_args["num_tx"] = test_config.num_of_transactions;
+        legacy_named_args["tx_size"] = bytes_per_transaction;
         CreateKernel(
             program,
             sender_kernel_path,
@@ -130,13 +178,7 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToO
             DataMovementConfig{
                 .processor = DataMovementProcessor::RISCV_0,
                 .noc = test_config.noc_id,
-                .named_compile_args = {
-                    {"l1_addr", l1_base_address},
-                    {"num_tx", test_config.num_of_transactions},
-                    {"tx_size", bytes_per_transaction},
-                    {"test_id", test_config.test_id},
-                    {"dest_coords", packed_subordinate_core_coordinates},
-                    {"num_vc", test_config.num_virtual_channels}}});
+                .named_compile_args = legacy_named_args});
     }
 
     // Assign unique id
@@ -439,10 +481,39 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToOneCustom) {
 }
 
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToOnePacketSizes2_0) {
-    // Test ID
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    if (device->arch() == ARCH::QUASAR) {
+        // Quasar emulator (1x3 or 2x3): pick a subordinate that exists on the grid
+        // and run a single small config. The full sweep is too large for the
+        // emulator; this config still exercises MakeProgramFromSpec + varargs.
+        auto grid = device->compute_with_storage_grid_size();
+        CoreCoord subordinate;
+        if (grid.x >= 2) {
+            subordinate = {1, 0};  // 2x3 layout: adjacent core in next column
+        } else if (grid.y >= 2) {
+            subordinate = {0, 1};  // 1x3 layout: adjacent core in next row
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_core::OneToOneConfig test_config = {
+            .test_id = 158,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = subordinate,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 4,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_core::run_dm(mesh_device, test_config));
+        return;
+    }
+    // WH/BH: full sweep using Metal 2.0 host path.
     uint32_t test_id = 158;
-
-    unit_tests::dm::core_to_core::packet_sizes_test(get_mesh_device(), test_id, CoreCoord(0, 0), CoreCoord(1, 1), true);
+    unit_tests::dm::core_to_core::packet_sizes_test(mesh_device, test_id, CoreCoord(0, 0), CoreCoord(1, 1), true);
 }
 
 }  // namespace tt::tt_metal

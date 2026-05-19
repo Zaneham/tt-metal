@@ -11,6 +11,11 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 #include <distributed/mesh_device_impl.hpp>
 
 namespace tt::tt_metal {
@@ -66,12 +71,6 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
     uint32_t master_l1_address = master_l1_info.base_address;
     uint32_t subordinate_l1_address = subordinate_l1_info.base_address;
 
-    // Compile-time arguments for kernels
-    std::unordered_map<std::string, uint32_t> compile_args = {
-        {"num_packets", (uint32_t)test_config.num_packets},
-        {"packet_size", (uint32_t)test_config.packet_size_bytes},
-        {"test_id", (uint32_t)test_config.test_id}};
-
     std::string kernels_dir = "tests/tt_metal/tt_metal/data_movement/one_packet/kernels/";
     std::string read_kernel_filename = "read_one_packet";
     std::string write_kernel_filename = "write_one_packet";
@@ -85,53 +84,112 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OnePac
     }
     kernels_dir += ".cpp";
 
-    // Kernel
-    tt::tt_metal::KernelHandle kernel;
-    if (test_config.read) {
-        if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-            kernel = experimental::quasar::CreateKernel(
-                program,
-                kernels_dir,
-                master_core_set,
-                experimental::quasar::QuasarDataMovementConfig{
-                    .num_threads_per_cluster = 1, .named_compile_args = compile_args});
-        } else {
-            kernel = CreateKernel(
-                program,
-                kernels_dir,
-                master_core_set,
-                DataMovementConfig{
-                    .processor = DataMovementProcessor::RISCV_1,
-                    .noc = NOC::RISCV_1_default,
-                    .named_compile_args = compile_args});
-        }
-    } else {
-        if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-            kernel = experimental::quasar::CreateKernel(
-                program,
-                kernels_dir,
-                master_core_set,
-                experimental::quasar::QuasarDataMovementConfig{
-                    .num_threads_per_cluster = 1, .named_compile_args = compile_args});
-        } else {
-            kernel = CreateKernel(
-                program,
-                kernels_dir,
-                master_core_set,
-                DataMovementConfig{
-                    .processor = DataMovementProcessor::RISCV_0,
-                    .noc = NOC::RISCV_0_default,
-                    .named_compile_args = compile_args});
-        }
-    }
-
-    // Runtime Arguments
     CoreCoord physical_subordinate_core = device->worker_core_from_logical_core(test_config.subordinate_core_coord);
-    SetRuntimeArgs(
-        program,
-        kernel,
-        master_core_set,
-        {master_l1_address, subordinate_l1_address, physical_subordinate_core.x, physical_subordinate_core.y});
+
+    if (test_config.use_2_0) {
+        // Metal 2.0 host path: MakeProgramFromSpec.
+        // num_packets / packet_size sweep across iterations -> varargs to avoid JIT cache reuse.
+        using namespace tt::tt_metal::experimental::metal2_host_api;
+
+        KernelSpec::CompileTimeArgBindings cta_bindings = {{"test_id", (uint32_t)test_config.test_id}};
+
+        const DataMovementProcessor proc =
+            test_config.read ? DataMovementProcessor::RISCV_1 : DataMovementProcessor::RISCV_0;
+        const NOC noc = test_config.read ? NOC::RISCV_1_default : NOC::RISCV_0_default;
+
+        KernelSpec kspec{
+            .unique_id = "one_packet_kernel",
+            .source = KernelSpec::SourceFilePath{kernels_dir},
+            .num_threads = 1,
+            .compile_time_arg_bindings = cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = 6},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = proc,
+                            .noc = noc,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "one_packet_test",
+            .kernels = {kspec},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {kspec.unique_id},
+                .target_nodes = master_core_set,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams krp{.kernel_spec_name = kspec.unique_id};
+        krp.runtime_varargs.push_back(
+            {test_config.master_core_coord,
+             {(uint32_t)test_config.num_packets,
+              (uint32_t)test_config.packet_size_bytes,
+              master_l1_address,
+              subordinate_l1_address,
+              (uint32_t)physical_subordinate_core.x,
+              (uint32_t)physical_subordinate_core.y}});
+        run_params.kernel_run_params.push_back(krp);
+        SetProgramRunParameters(program, run_params);
+    } else {
+        // Legacy host paths (WH/BH + experimental Quasar).
+        std::unordered_map<std::string, uint32_t> compile_args = {
+            {"num_packets", (uint32_t)test_config.num_packets},
+            {"packet_size", (uint32_t)test_config.packet_size_bytes},
+            {"test_id", (uint32_t)test_config.test_id}};
+
+        tt::tt_metal::KernelHandle kernel;
+        if (test_config.read) {
+            if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+                kernel = experimental::quasar::CreateKernel(
+                    program,
+                    kernels_dir,
+                    master_core_set,
+                    experimental::quasar::QuasarDataMovementConfig{
+                        .num_threads_per_cluster = 1, .named_compile_args = compile_args});
+            } else {
+                kernel = CreateKernel(
+                    program,
+                    kernels_dir,
+                    master_core_set,
+                    DataMovementConfig{
+                        .processor = DataMovementProcessor::RISCV_1,
+                        .noc = NOC::RISCV_1_default,
+                        .named_compile_args = compile_args});
+            }
+        } else {
+            if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+                kernel = experimental::quasar::CreateKernel(
+                    program,
+                    kernels_dir,
+                    master_core_set,
+                    experimental::quasar::QuasarDataMovementConfig{
+                        .num_threads_per_cluster = 1, .named_compile_args = compile_args});
+            } else {
+                kernel = CreateKernel(
+                    program,
+                    kernels_dir,
+                    master_core_set,
+                    DataMovementConfig{
+                        .processor = DataMovementProcessor::RISCV_0,
+                        .noc = NOC::RISCV_0_default,
+                        .named_compile_args = compile_args});
+            }
+        }
+
+        SetRuntimeArgs(
+            program,
+            kernel,
+            master_core_set,
+            {master_l1_address, subordinate_l1_address, physical_subordinate_core.x, physical_subordinate_core.y});
+    }
 
     // Assign unique id
     log_info(tt::LogTest, "Running Test ID: {}, Run ID: {}", test_config.test_id, unit_tests::dm::runtime_host_id);
@@ -378,24 +436,42 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteDirectedIdeal) 
 
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketReadSizes_2_0) {
     auto mesh_device = get_mesh_device();
-    auto* device = mesh_device->get_device(0);
-    // Physical Constraints
+    auto* device = mesh_device->impl().get_device(0);
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
 
-    // Parameters
-    uint32_t max_packet_size_bytes =
-        device->arch() == tt::ARCH::BLACKHOLE ? 16 * 1024 : 8 * 1024;  // 16 kB for BH, 8 kB for WH
-    uint32_t max_packets = 256;
+    if (device->arch() == ARCH::QUASAR) {
+        auto grid = device->compute_with_storage_grid_size();
+        CoreCoord subordinate;
+        if (grid.x >= 2) {
+            subordinate = {1, 0};
+        } else if (grid.y >= 2) {
+            subordinate = {0, 1};
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        unit_tests::dm::one_packet::OnePacketConfig test_config = {
+            .test_id = 84,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = subordinate,
+            .num_packets = 4,
+            .packet_size_bytes = page_size_bytes,
+            .read = true,
+            .use_2_0 = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
+        return;
+    }
 
-    // Cores
+    // WH/BH: full sweep with Metal 2.0 host path.
+    uint32_t max_packet_size_bytes = device->arch() == tt::ARCH::BLACKHOLE ? 16 * 1024 : 8 * 1024;
+    uint32_t max_packets = 256;
     CoreCoord master_core_coord = {0, 0};
     CoreCoord subordinate_core_coord = {0, 1};
 
     for (uint32_t num_packets = 1; num_packets <= max_packets; num_packets *= 4) {
         for (uint32_t packet_size_bytes = page_size_bytes; packet_size_bytes <= max_packet_size_bytes;
              packet_size_bytes *= 2) {
-            // Test config
             unit_tests::dm::one_packet::OnePacketConfig test_config = {
                 .test_id = 84,
                 .master_core_coord = master_core_coord,
@@ -405,9 +481,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketReadSizes_2_0) {
                 .read = true,
                 .use_2_0 = true,
             };
-
-            // Run
-            EXPECT_TRUE(run_dm(mesh_device, test_config));
+            EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
         }
     }
 }
@@ -415,23 +489,41 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketReadSizes_2_0) {
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteSizes_2_0) {
     auto mesh_device = get_mesh_device();
     auto* device = mesh_device->impl().get_device(0);
-
-    // Physical Constraints
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
 
-    // Parameters
-    uint32_t max_packet_size_bytes =
-        device->arch() == tt::ARCH::BLACKHOLE ? 16 * 1024 : 8 * 1024;  // 16 kB for BH, 8 kB for WH
+    if (device->arch() == ARCH::QUASAR) {
+        auto grid = device->compute_with_storage_grid_size();
+        CoreCoord subordinate;
+        if (grid.x >= 2) {
+            subordinate = {1, 0};
+        } else if (grid.y >= 2) {
+            subordinate = {0, 1};
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        unit_tests::dm::one_packet::OnePacketConfig test_config = {
+            .test_id = 85,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = subordinate,
+            .num_packets = 4,
+            .packet_size_bytes = page_size_bytes,
+            .read = false,
+            .use_2_0 = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    // WH/BH: full sweep with Metal 2.0 host path.
+    uint32_t max_packet_size_bytes = device->arch() == tt::ARCH::BLACKHOLE ? 16 * 1024 : 8 * 1024;
     uint32_t max_packets = 257;
-    // Cores
     CoreCoord master_core_coord = {0, 0};
     CoreCoord subordinate_core_coord = {0, 1};
 
     for (uint32_t num_packets = 1; num_packets <= max_packets; num_packets *= 4) {
         for (uint32_t packet_size_bytes = page_size_bytes; packet_size_bytes <= max_packet_size_bytes;
              packet_size_bytes *= 2) {
-            // Test config
             unit_tests::dm::one_packet::OnePacketConfig test_config = {
                 .test_id = 85,
                 .master_core_coord = master_core_coord,
@@ -441,9 +533,7 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteSizes_2_0) {
                 .read = false,
                 .use_2_0 = true,
             };
-
-            // Run
-            EXPECT_TRUE(run_dm(mesh_device, test_config));
+            EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
         }
     }
 }

@@ -13,6 +13,11 @@
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <tt-metalium/mesh_buffer.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 #include <distributed/mesh_device_impl.hpp>
 
 namespace tt::tt_metal {
@@ -84,13 +89,21 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramSh
     // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
     vector<uint32_t> packed_golden = packed_input;
 
+    // For the test-88 path (use_2_0 && !use_trid), num_of_transactions and pages_per_bank
+    // sweep across iterations of the gtest loop and therefore cannot be CTAs --- the
+    // kernel would bake them in as constexpr and the JIT-build cache would reuse a stale
+    // binary on subsequent iterations. They are passed as runtime varargs instead.
+    const bool pass_loop_vars_as_varargs = test_config.use_2_0 && !test_config.use_trid;
+
     // Compile-time arguments for kernel
     std::unordered_map<std::string, uint32_t> reader_compile_args = {
-        {"num_transactions", (uint32_t)test_config.num_of_transactions},
         {"num_banks", (uint32_t)test_config.num_banks},
-        {"pages_per_bank", (uint32_t)test_config.pages_per_bank},
         {"page_size", (uint32_t)test_config.page_size_bytes},
         {"test_id", (uint32_t)test_config.test_id}};
+    if (!pass_loop_vars_as_varargs) {
+        reader_compile_args["num_transactions"] = (uint32_t)test_config.num_of_transactions;
+        reader_compile_args["pages_per_bank"] = (uint32_t)test_config.pages_per_bank;
+    }
 
     string kernel_path = "tests/tt_metal/tt_metal/data_movement/dram_sharded/kernels/dram_sharded_read";
     if (test_config.use_trid) {
@@ -99,35 +112,93 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const DramSh
     }
     if (test_config.use_2_0) {
         kernel_path += "_2_0";
-        reader_compile_args["num_trids"] = (uint32_t)test_config.num_of_trids;
+        if (!test_config.use_trid) {
+            reader_compile_args["num_trids"] = 16u;
+        }
     }
     kernel_path += ".cpp";
 
-    // Create kernel on reader cores - branch by architecture
-    KernelHandle reader_kernel;
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        // Quasar path: Use experimental API
-        reader_kernel = experimental::quasar::CreateKernel(
-            program,
-            kernel_path,
-            test_config.cores,
-            experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .named_compile_args = reader_compile_args});
-    } else {
-        // WH/BH path: Use legacy API
-        reader_kernel = CreateKernel(
-            program,
-            kernel_path,
-            test_config.cores,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_0,
-                .noc = NOC::RISCV_0_default,
-                .named_compile_args = reader_compile_args});
-    }
-
     uint32_t l1_addr = get_l1_address_and_size(mesh_device, corerange_to_cores(test_config.cores)[0]).base_address;
-    std::vector<uint32_t> reader_run_time_args = {input_buffer_address, l1_addr};
-    tt::tt_metal::SetRuntimeArgs(program, reader_kernel, test_config.cores, reader_run_time_args);
+
+    if (test_config.use_2_0) {
+        // Metal 2.0 path: MakeProgramFromSpec
+        using namespace tt::tt_metal::experimental::metal2_host_api;
+
+        KernelSpec::CompileTimeArgBindings cta_bindings(reader_compile_args.begin(), reader_compile_args.end());
+
+        // Runtime vararg slot count matches the kernel:
+        //   2 if all loop params are CTAs (test 89, trid path, single-shot):  [0]src, [1]l1
+        //   4 if loop-varying params are passed as varargs (test 88):         [0]src, [1]l1, [2]ntx, [3]ppb
+        const uint32_t num_runtime_varargs = pass_loop_vars_as_varargs ? 4u : 2u;
+
+        KernelSpec reader_spec{
+            .unique_id = "reader",
+            .source = KernelSpec::SourceFilePath{kernel_path},
+            .num_threads = 1,
+            .compile_time_arg_bindings = cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = num_runtime_varargs},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_0,
+                            .noc = NOC::RISCV_0_default,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "dram_sharded_test",
+            .kernels = {reader_spec},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {reader_spec.unique_id},
+                .target_nodes = test_config.cores,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams reader_run_params{.kernel_spec_name = reader_spec.unique_id};
+        for (auto& core : corerange_to_cores(test_config.cores)) {
+            if (pass_loop_vars_as_varargs) {
+                reader_run_params.runtime_varargs.push_back(
+                    {core,
+                     {input_buffer_address,
+                      l1_addr,
+                      (uint32_t)test_config.num_of_transactions,
+                      (uint32_t)test_config.pages_per_bank}});
+            } else {
+                reader_run_params.runtime_varargs.push_back({core, {input_buffer_address, l1_addr}});
+            }
+        }
+        run_params.kernel_run_params.push_back(reader_run_params);
+        SetProgramRunParameters(program, run_params);
+    } else {
+        // Legacy path: quasar::CreateKernel / CreateKernel + SetRuntimeArgs
+        KernelHandle reader_kernel;
+        if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+            reader_kernel = experimental::quasar::CreateKernel(
+                program,
+                kernel_path,
+                test_config.cores,
+                experimental::quasar::QuasarDataMovementConfig{
+                    .num_threads_per_cluster = 1, .named_compile_args = reader_compile_args});
+        } else {
+            reader_kernel = CreateKernel(
+                program,
+                kernel_path,
+                test_config.cores,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_0,
+                    .noc = NOC::RISCV_0_default,
+                    .named_compile_args = reader_compile_args});
+        }
+        std::vector<uint32_t> reader_run_time_args = {input_buffer_address, l1_addr};
+        tt::tt_metal::SetRuntimeArgs(program, reader_kernel, test_config.cores, reader_run_time_args);
+    }
 
     // Assign unique id
     log_info(tt::LogTest, "Running Test ID: {}, Run ID: {}", test_config.test_id, unit_tests::dm::runtime_host_id);
@@ -296,8 +367,11 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadTileNumbers2_0
     DataFormat l1_data_format = DataFormat::Float16_b;
     uint32_t page_size_bytes = tt::tile_size(l1_data_format);
     uint32_t num_banks = mesh_device->num_dram_channels();
-    uint32_t max_num_pages = 32;
-    uint32_t max_transactions = 256;
+
+    // Cap sweep on Quasar emulator to avoid timeouts.
+    const bool is_quasar = MetalContext::instance().get_cluster().arch() == ARCH::QUASAR;
+    uint32_t max_num_pages = is_quasar ? 8u : 32u;
+    uint32_t max_transactions = is_quasar ? 16u : 256u;
 
     // Cores
     CoreRange core_range({0, 0}, {0, 0});

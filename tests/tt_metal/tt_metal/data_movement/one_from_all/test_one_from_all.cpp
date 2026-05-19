@@ -7,6 +7,11 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -34,6 +39,7 @@ struct OneFromAllConfig {
     DataFormat l1_data_format = DataFormat::Invalid;
     NOC noc_id = NOC::RISCV_1_default;
     uint32_t num_virtual_channels = 1;
+    bool use_2_0_api = false;  // Use Device 2.0 API
 
     // TODO: Add the following parameters
     //  1. Virtual Channel
@@ -87,44 +93,99 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneFro
     // Assigns a "safe" L1 local address for the master and subordinate cores
     uint32_t l1_base_address = master_l1_info.base_address;
 
-    // Compile-time arguments for kernels
-    std::unordered_map<std::string, uint32_t> gatherer_compile_args = {
-        {"l1_addr", (uint32_t)l1_base_address},
-        {"num_transactions", (uint32_t)test_config.num_of_transactions},
-        {"tx_size", (uint32_t)transaction_size_bytes},
-        {"test_id", (uint32_t)test_config.test_id},
-        {"num_subordinates", (uint32_t)total_subordinate_cores},
-        {"num_vc", (uint32_t)test_config.num_virtual_channels}};
-
-    // Kernels
-    KernelHandle gatherer_kernel;
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        gatherer_kernel = experimental::quasar::CreateKernel(
-            program,
-            "tests/tt_metal/tt_metal/data_movement/one_from_all/kernels/gatherer.cpp",
-            master_core_set,
-            experimental::quasar::QuasarDataMovementConfig{
-                .num_threads_per_cluster = 1, .named_compile_args = gatherer_compile_args});
-    } else {
-        gatherer_kernel = CreateKernel(
-            program,
-            "tests/tt_metal/tt_metal/data_movement/one_from_all/kernels/gatherer.cpp",
-            master_core_set,
-            DataMovementConfig{
-                .processor = DataMovementProcessor::RISCV_1,
-                .noc = test_config.noc_id,
-                .named_compile_args = gatherer_compile_args});
-    }
-
-    // Runtime Arguments
-    vector<uint32_t> master_runtime_args;
-
+    // Pre-compute subordinate physical coords (used by both legacy and Metal 2.0 paths).
+    vector<uint32_t> subordinate_phys_coords;
+    subordinate_phys_coords.reserve(total_subordinate_cores * 2);
     for (auto& core : sub_core_list) {
         CoreCoord physical_core = device->worker_core_from_logical_core(core);
-        master_runtime_args.push_back(physical_core.x);
-        master_runtime_args.push_back(physical_core.y);
+        subordinate_phys_coords.push_back(physical_core.x);
+        subordinate_phys_coords.push_back(physical_core.y);
     }
-    SetRuntimeArgs(program, gatherer_kernel, master_core_set, master_runtime_args);
+
+    if (test_config.use_2_0_api) {
+        using namespace tt::tt_metal::experimental::metal2_host_api;
+
+        KernelSpec::CompileTimeArgBindings cta_bindings = {
+            {"l1_addr", (uint32_t)l1_base_address},
+            {"test_id", (uint32_t)test_config.test_id},
+            {"num_subordinates", (uint32_t)total_subordinate_cores},
+            {"num_vc", (uint32_t)test_config.num_virtual_channels}};
+
+        const uint32_t num_runtime_varargs = 2 + (uint32_t)(total_subordinate_cores * 2);
+
+        KernelSpec gatherer_spec{
+            .unique_id = "gatherer",
+            .source =
+                KernelSpec::SourceFilePath{
+                    "tests/tt_metal/tt_metal/data_movement/one_from_all/kernels/gatherer_2_0.cpp"},
+            .num_threads = 1,
+            .compile_time_arg_bindings = cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = num_runtime_varargs},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_1,
+                            .noc = test_config.noc_id,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "one_from_all_test",
+            .kernels = {gatherer_spec},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {gatherer_spec.unique_id},
+                .target_nodes = master_core_set,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        vector<uint32_t> varargs;
+        varargs.reserve(num_runtime_varargs);
+        varargs.push_back((uint32_t)test_config.num_of_transactions);
+        varargs.push_back((uint32_t)transaction_size_bytes);
+        varargs.insert(varargs.end(), subordinate_phys_coords.begin(), subordinate_phys_coords.end());
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams gatherer_run_params{.kernel_spec_name = gatherer_spec.unique_id};
+        gatherer_run_params.runtime_varargs.push_back({test_config.master_core_coord, varargs});
+        run_params.kernel_run_params.push_back(gatherer_run_params);
+        SetProgramRunParameters(program, run_params);
+    } else {
+        // Legacy host paths (WH/BH + experimental Quasar).
+        std::unordered_map<std::string, uint32_t> gatherer_compile_args = {
+            {"l1_addr", (uint32_t)l1_base_address},
+            {"num_transactions", (uint32_t)test_config.num_of_transactions},
+            {"tx_size", (uint32_t)transaction_size_bytes},
+            {"test_id", (uint32_t)test_config.test_id},
+            {"num_subordinates", (uint32_t)total_subordinate_cores},
+            {"num_vc", (uint32_t)test_config.num_virtual_channels}};
+
+        KernelHandle gatherer_kernel;
+        if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+            gatherer_kernel = experimental::quasar::CreateKernel(
+                program,
+                "tests/tt_metal/tt_metal/data_movement/one_from_all/kernels/gatherer.cpp",
+                master_core_set,
+                experimental::quasar::QuasarDataMovementConfig{
+                    .num_threads_per_cluster = 1, .named_compile_args = gatherer_compile_args});
+        } else {
+            gatherer_kernel = CreateKernel(
+                program,
+                "tests/tt_metal/tt_metal/data_movement/one_from_all/kernels/gatherer.cpp",
+                master_core_set,
+                DataMovementConfig{
+                    .processor = DataMovementProcessor::RISCV_1,
+                    .noc = test_config.noc_id,
+                    .named_compile_args = gatherer_compile_args});
+        }
+
+        SetRuntimeArgs(program, gatherer_kernel, master_core_set, subordinate_phys_coords);
+    }
 
     // Assign unique id
     log_info(LogTest, "Running Test ID: {}, Run ID: {}", test_config.test_id, unit_tests::dm::runtime_host_id);
@@ -451,6 +512,126 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromAllCustom) {
         num_of_transactions,
         pages_per_transaction,
         num_virtual_channels);
+}
+
+/* ========== Metal 2.0 variants ========== */
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromAllPacketSizes_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    if (arch_ == ARCH::QUASAR) {
+        // sub_grid_size {2, 1} requires at least 2 columns in the compute grid.
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: sub_grid_size {2, 1} requires >= 2 columns, but grid has "
+                         << device->compute_with_storage_grid_size().x << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_from_all::OneFromAllConfig test_config = {
+            .test_id = 115,
+            .master_core_coord = {0, 0},
+            .sub_start_core_coord = {0, 0},
+            .sub_grid_size = {2, 1},
+            .num_of_transactions = 4,
+            .transaction_size_pages = 1,
+            .page_size_bytes = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_from_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    // WH/BH full sweep.
+    uint32_t test_id = 115;
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord subordinate_start_coord = {0, 0};
+    CoreCoord subordinate_grid_size = {
+        device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
+
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    uint32_t max_transactions = 256;
+    uint32_t max_transaction_size_pages = arch_ == ARCH::BLACKHOLE ? 1024 : 2048;
+    NOC noc_id = NOC::RISCV_1_default;
+
+    for (uint32_t num_of_transactions = 1; num_of_transactions <= max_transactions; num_of_transactions *= 4) {
+        for (uint32_t transaction_size_pages = 1; transaction_size_pages <= max_transaction_size_pages;
+             transaction_size_pages *= 2) {
+            if (transaction_size_pages > max_transmittable_pages) {
+                continue;
+            }
+            unit_tests::dm::core_from_all::OneFromAllConfig test_config = {
+                .test_id = test_id,
+                .master_core_coord = master_core_coord,
+                .sub_start_core_coord = subordinate_start_coord,
+                .sub_grid_size = subordinate_grid_size,
+                .num_of_transactions = num_of_transactions,
+                .transaction_size_pages = transaction_size_pages,
+                .page_size_bytes = page_size_bytes,
+                .l1_data_format = DataFormat::Float16_b,
+                .noc_id = noc_id,
+                .use_2_0_api = true,
+            };
+            EXPECT_TRUE(unit_tests::dm::core_from_all::run_dm(mesh_device, test_config));
+        }
+    }
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromAllDirectedIdeal_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    if (arch_ == ARCH::QUASAR) {
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: sub_grid_size {2, 1} requires >= 2 columns.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_from_all::OneFromAllConfig test_config = {
+            .test_id = 130,
+            .master_core_coord = {0, 0},
+            .sub_start_core_coord = {0, 0},
+            .sub_grid_size = {2, 1},
+            .num_of_transactions = 4,
+            .transaction_size_pages = 1,
+            .page_size_bytes = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_from_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    // WH/BH ideal config.
+    uint32_t test_id = 130;
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord subordinate_start_coord = {0, 0};
+    CoreCoord subordinate_grid_size = {
+        device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
+
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+    size_t total_subordinate_cores = subordinate_grid_size.x * subordinate_grid_size.y;
+    uint32_t num_of_transactions = 1;
+    uint32_t transaction_size_pages = max_transmittable_pages / (num_of_transactions * total_subordinate_cores);
+
+    unit_tests::dm::core_from_all::OneFromAllConfig test_config = {
+        .test_id = test_id,
+        .master_core_coord = master_core_coord,
+        .sub_start_core_coord = subordinate_start_coord,
+        .sub_grid_size = subordinate_grid_size,
+        .num_of_transactions = num_of_transactions,
+        .transaction_size_pages = transaction_size_pages,
+        .page_size_bytes = page_size_bytes,
+        .l1_data_format = DataFormat::Float16_b,
+        .noc_id = NOC::RISCV_1_default,
+        .use_2_0_api = true,
+    };
+    EXPECT_TRUE(unit_tests::dm::core_from_all::run_dm(mesh_device, test_config));
 }
 
 }  // namespace tt::tt_metal

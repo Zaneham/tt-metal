@@ -3,16 +3,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "experimental/kernel_args.h"
 #include "api/dataflow/endpoints.h"
 
 void kernel_main() {
 #ifdef KERNEL_COMPILE_TIME_ARG_MAP
     // Metal 2.0 API: use named compile-time args (all architectures)
-    constexpr uint32_t l1_local_addr = get_named_compile_time_arg_val("l1_addr");
-    constexpr uint32_t num_transactions = get_named_compile_time_arg_val("num_tx");
-    constexpr uint32_t transaction_size = get_named_compile_time_arg_val("tx_size");
-    constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
-    constexpr uint32_t packed_dest_core_coordinates = get_named_compile_time_arg_val("dest_coords");
+    constexpr uint32_t l1_local_addr = get_arg(args::l1_addr);
+    constexpr uint32_t num_transactions = get_arg(args::num_tx);
+    constexpr uint32_t transaction_size = get_arg(args::tx_size);
+    constexpr uint32_t test_id = get_arg(args::test_id);
+    constexpr uint32_t packed_dest_core_coordinates = get_arg(args::dest_coords);
 #else
     // Legacy API: use indexed compile-time args
     constexpr uint32_t l1_local_addr = get_compile_time_arg_val(0);

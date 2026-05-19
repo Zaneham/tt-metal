@@ -11,6 +11,11 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 #include <distributed/mesh_device_impl.hpp>
 
 namespace tt::tt_metal {
@@ -35,6 +40,7 @@ struct TransactionIdConfig {
     bool one_packet = false;
     bool stateful = false;
     bool read_after_write = true;
+    bool use_2_0_api = false;  // Use Device 2.0 API
 
     // TODO: Add the following parameters
     //  1. Posted flag
@@ -110,10 +116,56 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const Transa
             kernel_path += "_stateful";
         }
     }
+    if (test_config.use_2_0_api) {
+        kernel_path += "_2_0";
+    }
     kernel_path += ".cpp";
 
-    // Create kernel - branch by architecture
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+    if (test_config.use_2_0_api) {
+        using namespace tt::tt_metal::experimental::metal2_host_api;
+
+        KernelSpec::CompileTimeArgBindings cta_bindings = {
+            {"l1_addr", l1_base_address},
+            {"test_id", test_config.test_id},
+            {"sub0_coords", packed_sub0_core_coordinates},
+            {"sub1_coords", packed_sub1_core_coordinates}};
+
+        KernelSpec sender_spec{
+            .unique_id = "trid_sender",
+            .source = KernelSpec::SourceFilePath{kernel_path},
+            .num_threads = 1,
+            .compile_time_arg_bindings = cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = 2},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_0,
+                            .noc = test_config.noc_id,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "transaction_id_test",
+            .kernels = {sender_spec},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {sender_spec.unique_id},
+                .target_nodes = master_core_set,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams sender_run_params{.kernel_spec_name = sender_spec.unique_id};
+        sender_run_params.runtime_varargs.push_back(
+            {test_config.master_core_coord, {(uint32_t)test_config.num_of_trids, (uint32_t)bytes_per_transaction}});
+        run_params.kernel_run_params.push_back(sender_run_params);
+        SetProgramRunParameters(program, run_params);
+    } else if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
         // Quasar path: Use experimental API with named compile-time args
         experimental::quasar::CreateKernel(
             program,
@@ -475,6 +527,302 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdWriteAfterReadOn
 
             // Run
             EXPECT_TRUE(run_dm(mesh_device, test_config));
+        }
+    }
+}
+
+/* ========== Metal 2.0 variants ========== */
+
+namespace unit_tests::dm::transaction_id {
+// Helper: returns true if Quasar emulator can run a 3-core transaction_id test, otherwise GTEST_SKIP-ready.
+inline bool quasar_grid_ok(IDevice* device) {
+    auto grid = device->compute_with_storage_grid_size();
+    return grid.x * grid.y >= 3;
+}
+}  // namespace unit_tests::dm::transaction_id
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdReadAfterWrite_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord sub0_core_coord = {0, device->compute_with_storage_grid_size().y - 1};
+    CoreCoord sub1_core_coord = {device->compute_with_storage_grid_size().x - 1, 0};
+
+    if (arch_ == ARCH::QUASAR) {
+        auto grid_dbg = device->compute_with_storage_grid_size();
+        if (!unit_tests::dm::transaction_id::quasar_grid_ok(device)) {
+            GTEST_SKIP() << "Skipping: need 3 distinct cores but grid is only " << grid_dbg.x << "x" << grid_dbg.y;
+        }
+        unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+            .test_id = 700,
+            .master_core_coord = master_core_coord,
+            .sub0_core_coord = sub0_core_coord,
+            .sub1_core_coord = sub1_core_coord,
+            .num_of_trids = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    // WH/BH full sweep
+    uint32_t max_pages_per_transaction = arch_ == ARCH::BLACKHOLE ? 1024 : 2048;
+    for (uint32_t num_of_trids = 1; num_of_trids <= 16; num_of_trids *= 2) {
+        for (uint32_t pages_per_transaction = 1; pages_per_transaction <= max_pages_per_transaction;
+             pages_per_transaction *= 2) {
+            if (pages_per_transaction * num_of_trids > max_transmittable_pages) {
+                continue;
+            }
+            unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+                .test_id = 700,
+                .master_core_coord = master_core_coord,
+                .sub0_core_coord = sub0_core_coord,
+                .sub1_core_coord = sub1_core_coord,
+                .num_of_trids = num_of_trids,
+                .pages_per_transaction = pages_per_transaction,
+                .bytes_per_page = bytes_per_page,
+                .l1_data_format = DataFormat::Float16_b,
+                .use_2_0_api = true,
+            };
+            EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        }
+    }
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdReadAfterWriteOnePacket_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord sub0_core_coord = {0, device->compute_with_storage_grid_size().y - 1};
+    CoreCoord sub1_core_coord = {device->compute_with_storage_grid_size().x - 1, 0};
+
+    if (arch_ == ARCH::QUASAR) {
+        if (!unit_tests::dm::transaction_id::quasar_grid_ok(device)) {
+            GTEST_SKIP() << "Skipping: need 3 distinct cores on Quasar emulator";
+        }
+        unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+            .test_id = 701,
+            .master_core_coord = master_core_coord,
+            .sub0_core_coord = sub0_core_coord,
+            .sub1_core_coord = sub1_core_coord,
+            .num_of_trids = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .one_packet = true,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    uint32_t max_pages_per_transaction = 256;
+    for (uint32_t num_of_trids = 1; num_of_trids <= 16; num_of_trids *= 2) {
+        for (uint32_t pages_per_transaction = 1; pages_per_transaction <= max_pages_per_transaction;
+             pages_per_transaction *= 2) {
+            if (pages_per_transaction * num_of_trids > max_transmittable_pages) {
+                continue;
+            }
+            unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+                .test_id = 701,
+                .master_core_coord = master_core_coord,
+                .sub0_core_coord = sub0_core_coord,
+                .sub1_core_coord = sub1_core_coord,
+                .num_of_trids = num_of_trids,
+                .pages_per_transaction = pages_per_transaction,
+                .bytes_per_page = bytes_per_page,
+                .l1_data_format = DataFormat::Float16_b,
+                .one_packet = true,
+                .use_2_0_api = true,
+            };
+            EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        }
+    }
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdReadAfterWriteOnePacketStateful_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord sub0_core_coord = {0, device->compute_with_storage_grid_size().y - 1};
+    CoreCoord sub1_core_coord = {device->compute_with_storage_grid_size().x - 1, 0};
+
+    if (arch_ == ARCH::QUASAR) {
+        if (!unit_tests::dm::transaction_id::quasar_grid_ok(device)) {
+            GTEST_SKIP() << "Skipping: need 3 distinct cores on Quasar emulator";
+        }
+        unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+            .test_id = 702,
+            .master_core_coord = master_core_coord,
+            .sub0_core_coord = sub0_core_coord,
+            .sub1_core_coord = sub1_core_coord,
+            .num_of_trids = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .one_packet = true,
+            .stateful = true,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    uint32_t max_pages_per_transaction = 256;
+    for (uint32_t num_of_trids = 1; num_of_trids <= 16; num_of_trids *= 2) {
+        for (uint32_t pages_per_transaction = 1; pages_per_transaction <= max_pages_per_transaction;
+             pages_per_transaction *= 2) {
+            if (pages_per_transaction * num_of_trids > max_transmittable_pages) {
+                continue;
+            }
+            unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+                .test_id = 702,
+                .master_core_coord = master_core_coord,
+                .sub0_core_coord = sub0_core_coord,
+                .sub1_core_coord = sub1_core_coord,
+                .num_of_trids = num_of_trids,
+                .pages_per_transaction = pages_per_transaction,
+                .bytes_per_page = bytes_per_page,
+                .l1_data_format = DataFormat::Float16_b,
+                .one_packet = true,
+                .stateful = true,
+                .use_2_0_api = true,
+            };
+            EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        }
+    }
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdWriteAfterRead_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord sub0_core_coord = {0, device->compute_with_storage_grid_size().y - 1};
+    CoreCoord sub1_core_coord = {device->compute_with_storage_grid_size().x - 1, 0};
+
+    if (arch_ == ARCH::QUASAR) {
+        if (!unit_tests::dm::transaction_id::quasar_grid_ok(device)) {
+            GTEST_SKIP() << "Skipping: need 3 distinct cores on Quasar emulator";
+        }
+        unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+            .test_id = 710,
+            .master_core_coord = master_core_coord,
+            .sub0_core_coord = sub0_core_coord,
+            .sub1_core_coord = sub1_core_coord,
+            .num_of_trids = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .read_after_write = false,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    uint32_t max_pages_per_transaction = arch_ == ARCH::BLACKHOLE ? 1024 : 2048;
+    for (uint32_t num_of_trids = 1; num_of_trids <= 16; num_of_trids *= 2) {
+        for (uint32_t pages_per_transaction = 1; pages_per_transaction <= max_pages_per_transaction;
+             pages_per_transaction *= 2) {
+            if (pages_per_transaction * num_of_trids > max_transmittable_pages) {
+                continue;
+            }
+            unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+                .test_id = 710,
+                .master_core_coord = master_core_coord,
+                .sub0_core_coord = sub0_core_coord,
+                .sub1_core_coord = sub1_core_coord,
+                .num_of_trids = num_of_trids,
+                .pages_per_transaction = pages_per_transaction,
+                .bytes_per_page = bytes_per_page,
+                .l1_data_format = DataFormat::Float16_b,
+                .read_after_write = false,
+                .use_2_0_api = true,
+            };
+            EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        }
+    }
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementTransactionIdWriteAfterReadOnePacketStateful_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto arch_ = device->arch();
+
+    auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+        unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord sub0_core_coord = {0, device->compute_with_storage_grid_size().y - 1};
+    CoreCoord sub1_core_coord = {device->compute_with_storage_grid_size().x - 1, 0};
+
+    if (arch_ == ARCH::QUASAR) {
+        if (!unit_tests::dm::transaction_id::quasar_grid_ok(device)) {
+            GTEST_SKIP() << "Skipping: need 3 distinct cores on Quasar emulator";
+        }
+        unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+            .test_id = 711,
+            .master_core_coord = master_core_coord,
+            .sub0_core_coord = sub0_core_coord,
+            .sub1_core_coord = sub1_core_coord,
+            .num_of_trids = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .one_packet = true,
+            .stateful = true,
+            .read_after_write = false,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    uint32_t max_pages_per_transaction = 256;
+    for (uint32_t num_of_trids = 1; num_of_trids <= 16; num_of_trids *= 2) {
+        for (uint32_t pages_per_transaction = 1; pages_per_transaction <= max_pages_per_transaction;
+             pages_per_transaction *= 2) {
+            if (pages_per_transaction * num_of_trids > max_transmittable_pages) {
+                continue;
+            }
+            unit_tests::dm::transaction_id::TransactionIdConfig test_config = {
+                .test_id = 711,
+                .master_core_coord = master_core_coord,
+                .sub0_core_coord = sub0_core_coord,
+                .sub1_core_coord = sub1_core_coord,
+                .num_of_trids = num_of_trids,
+                .pages_per_transaction = pages_per_transaction,
+                .bytes_per_page = bytes_per_page,
+                .l1_data_format = DataFormat::Float16_b,
+                .one_packet = true,
+                .stateful = true,
+                .read_after_write = false,
+                .use_2_0_api = true,
+            };
+            EXPECT_TRUE(unit_tests::dm::transaction_id::run_dm(mesh_device, test_config));
         }
     }
 }

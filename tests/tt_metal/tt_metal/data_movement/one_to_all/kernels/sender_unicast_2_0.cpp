@@ -3,24 +3,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "experimental/kernel_args.h"
 #include "api/dataflow/endpoints.h"
 #include "api/debug/dprint.h"
 
 // L1 to L1 send
 void kernel_main() {
-    constexpr uint32_t mst_base_addr = get_named_compile_time_arg_val("mst_base_addr");
-    constexpr uint32_t sub_base_addr = get_named_compile_time_arg_val("sub_base_addr");
-    constexpr uint32_t num_of_transactions = get_named_compile_time_arg_val("num_transactions");
-    constexpr uint32_t pages_per_transaction = get_named_compile_time_arg_val("pages_per_tx");
-    constexpr uint32_t bytes_per_page = get_named_compile_time_arg_val("bytes_per_page");
-    constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
-    constexpr uint32_t num_subordinates = get_named_compile_time_arg_val("num_subordinates");
-    constexpr uint32_t num_virtual_channels = get_named_compile_time_arg_val("num_vc");
+    constexpr uint32_t mst_base_addr = get_arg(args::mst_base_addr);
+    constexpr uint32_t sub_base_addr = get_arg(args::sub_base_addr);
+    constexpr uint32_t bytes_per_page = get_arg(args::bytes_per_page);
+    constexpr uint32_t test_id = get_arg(args::test_id);
+    constexpr uint32_t num_subordinates = get_arg(args::num_subordinates);
+    constexpr uint32_t num_virtual_channels = get_arg(args::num_vc);
 
-    // Derivative values
-    constexpr uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
-    constexpr uint32_t bytes = bytes_per_transaction * num_of_transactions;
-    constexpr uint32_t bytes_transferred = bytes * num_subordinates;
+    // Sweep-varying args are runtime varargs (avoids JIT cache invalidation in
+    // packet_sizes_test). Layout: [0]=num_of_transactions, [1]=pages_per_transaction,
+    // [2..2+num_subordinates-1]=packed subordinate coords.
+    const uint32_t num_of_transactions = get_vararg(0);
+    const uint32_t pages_per_transaction = get_vararg(1);
+    const uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
 
     Noc noc(noc_index);
     UnicastEndpoint unicast_endpoint;
@@ -29,7 +30,7 @@ void kernel_main() {
         DeviceZoneScopedN("RISCV0");
 
         for (uint32_t subordinate_num = 0; subordinate_num < num_subordinates; subordinate_num++) {
-            uint32_t dest_coord_packed = get_arg_val<uint32_t>(subordinate_num);
+            uint32_t dest_coord_packed = get_vararg(2 + subordinate_num);
             uint32_t dest_coord_x = dest_coord_packed >> 16;
             uint32_t dest_coord_y = dest_coord_packed & 0xFFFF;
 

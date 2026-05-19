@@ -7,9 +7,6 @@
 #include "api/dataflow/dataflow_api.h"
 #include "tensix_types.h"
 
-// #include "api/debug/dprint.h"
-// #include "api/debug/dprint_pages.h"
-
 // DRAM to L1 read
 void kernel_main() {
     uint32_t src_addr = get_arg_val<uint32_t>(0);

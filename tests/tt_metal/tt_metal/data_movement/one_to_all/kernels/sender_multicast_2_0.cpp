@@ -3,33 +3,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "experimental/kernel_args.h"
 #include "api/dataflow/endpoints.h"
 #include "api/debug/dprint.h"
 
 // L1 to L1 send
 void kernel_main() {
-    constexpr uint32_t mst_base_addr = get_named_compile_time_arg_val("mst_base_addr");
-    constexpr uint32_t sub_base_addr = get_named_compile_time_arg_val("sub_base_addr");
-    constexpr uint32_t num_of_transactions = get_named_compile_time_arg_val("num_transactions");
-    constexpr uint32_t pages_per_transaction = get_named_compile_time_arg_val("pages_per_tx");
-    constexpr uint32_t bytes_per_page = get_named_compile_time_arg_val("bytes_per_page");
-    constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
-    constexpr uint32_t num_subordinates = get_named_compile_time_arg_val("num_subordinates");
-    constexpr bool is_linked = get_named_compile_time_arg_val("is_linked");
-    constexpr bool loopback = get_named_compile_time_arg_val("loopback");
-    uint32_t start_x = get_named_compile_time_arg_val("start_x");
-    uint32_t start_y = get_named_compile_time_arg_val("start_y");
-    uint32_t end_x = get_named_compile_time_arg_val("end_x");
-    uint32_t end_y = get_named_compile_time_arg_val("end_y");
+    constexpr uint32_t mst_base_addr = get_arg(args::mst_base_addr);
+    constexpr uint32_t sub_base_addr = get_arg(args::sub_base_addr);
+    constexpr uint32_t bytes_per_page = get_arg(args::bytes_per_page);
+    constexpr uint32_t test_id = get_arg(args::test_id);
+    constexpr uint32_t num_subordinates = get_arg(args::num_subordinates);
+    constexpr bool is_linked = get_arg(args::is_linked);
+    constexpr bool loopback = get_arg(args::loopback);
+    uint32_t start_x = get_arg(args::start_x);
+    uint32_t start_y = get_arg(args::start_y);
+    uint32_t end_x = get_arg(args::end_x);
+    uint32_t end_y = get_arg(args::end_y);
 
     // Specific for Multicast Schemes
-    constexpr uint32_t multicast_scheme_type = get_named_compile_time_arg_val("mcast_scheme_type");
-    constexpr uint32_t sub_grid_size_x = get_named_compile_time_arg_val("sub_grid_size_x");
-    constexpr uint32_t sub_grid_size_y = get_named_compile_time_arg_val("sub_grid_size_y");
+    constexpr uint32_t multicast_scheme_type = get_arg(args::mcast_scheme_type);
+    constexpr uint32_t sub_grid_size_x = get_arg(args::sub_grid_size_x);
+    constexpr uint32_t sub_grid_size_y = get_arg(args::sub_grid_size_y);
 
-    // Derivative values
-    constexpr uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
-    constexpr uint32_t bytes = bytes_per_transaction * num_of_transactions;
+    // Sweep-varying args are runtime varargs (avoids JIT cache invalidation in
+    // packet_sizes_test). Layout: [0]=num_of_transactions, [1]=pages_per_transaction.
+    const uint32_t num_of_transactions = get_vararg(0);
+    const uint32_t pages_per_transaction = get_vararg(1);
+    const uint32_t bytes_per_transaction = pages_per_transaction * bytes_per_page;
 
     if (noc_index == 1) {
         std::swap(start_x, end_x);

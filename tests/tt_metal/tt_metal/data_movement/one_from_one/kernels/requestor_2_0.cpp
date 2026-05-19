@@ -3,19 +3,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "experimental/kernel_args.h"
 #include "api/dataflow/endpoints.h"
 #include "api/debug/dprint.h"
 
 // L1 to L1 request
 void kernel_main() {
-    constexpr uint32_t l1_local_addr = get_named_compile_time_arg_val("l1_addr");
-    constexpr uint32_t num_of_transactions = get_named_compile_time_arg_val("num_transactions");
-    constexpr uint32_t transaction_size_bytes = get_named_compile_time_arg_val("tx_size");
-    constexpr uint32_t test_id = get_named_compile_time_arg_val("test_id");
-    constexpr uint32_t num_virtual_channels = get_named_compile_time_arg_val("num_vc");
+    // True compile-time constants
+    constexpr uint32_t l1_local_addr = get_arg(args::l1_addr);
+    constexpr uint32_t test_id = get_arg(args::test_id);
+    constexpr uint32_t num_virtual_channels = get_arg(args::num_vc);
 
-    uint32_t responder_x_coord = get_arg_val<uint32_t>(0);
-    uint32_t responder_y_coord = get_arg_val<uint32_t>(1);
+    // Runtime varargs (sweep params + per-call runtime coords).
+    //   [0] num_of_transactions, [1] transaction_size_bytes, [2] responder_x, [3] responder_y
+    uint32_t num_of_transactions = get_vararg(0);
+    uint32_t transaction_size_bytes = get_vararg(1);
+    uint32_t responder_x_coord = get_vararg(2);
+    uint32_t responder_y_coord = get_vararg(3);
 
     Noc noc(noc_index);
     UnicastEndpoint unicast_endpoint;

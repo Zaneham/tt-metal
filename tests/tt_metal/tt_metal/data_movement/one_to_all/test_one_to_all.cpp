@@ -10,6 +10,11 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/experimental/host_api.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/kernel_spec.hpp>
+#include <tt-metalium/experimental/metal2_host_api/node_coord.hpp>
+#include <tt-metalium/experimental/metal2_host_api/program_run_params.hpp>
 #include "tt_metal/test_utils/comparison.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
@@ -218,9 +223,71 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToA
         sender_named_args["num_vc"] = (uint32_t)test_config.num_virtual_channels;
     }
 
-    // Create sender kernel - branch by architecture
-    KernelHandle sender_kernel;
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+    // Metal 2.0 host path (non-semaphore variants only): MakeProgramFromSpec + WorkUnitSpec
+    // + ProgramRunParams. Sweep-varying params (num_of_transactions, pages_per_transaction)
+    // are runtime varargs to avoid JIT cache invalidation (Option C). All other CTAs remain
+    // as named compile-time arg bindings, identical to the legacy named_compile_args map.
+    // Semaphore-based _2_0 tests are not currently enabled by any test entry point, so the
+    // semaphore + receiver_sem kernels are not migrated here.
+    const bool metal_2_0_active = test_config.use_2_0_api && !test_config.use_semaphore;
+    KernelHandle sender_kernel = 0;  // legacy paths overwrite; Metal 2.0 path doesn't use this
+    if (metal_2_0_active) {
+        using namespace tt::tt_metal::experimental::metal2_host_api;
+
+        // Sweep-varying params are runtime varargs; strip them from the CTA bindings.
+        std::unordered_map<std::string, uint32_t> cta_named_args = sender_named_args;
+        cta_named_args.erase("num_transactions");
+        cta_named_args.erase("pages_per_tx");
+        KernelSpec::CompileTimeArgBindings cta_bindings(cta_named_args.begin(), cta_named_args.end());
+
+        // Vararg count: 2 (num_transactions, pages_per_tx) + per-subordinate coords for unicast.
+        const uint32_t num_runtime_varargs =
+            2 + (test_config.is_multicast ? 0 : (uint32_t)sub_worker_coordinates.size());
+
+        KernelSpec sender_spec{
+            .unique_id = "sender",
+            .source = KernelSpec::SourceFilePath{sender_kernel_path},
+            .num_threads = 1,
+            .compile_time_arg_bindings = cta_bindings,
+            .runtime_arguments_schema = {.num_runtime_varargs = num_runtime_varargs},
+            .config_spec =
+                DataMovementConfiguration{
+                    .gen1_data_movement_config =
+                        DataMovementConfiguration::Gen1DataMovementConfig{
+                            .processor = DataMovementProcessor::RISCV_0,
+                            .noc = test_config.noc_id,
+                        },
+                    .gen2_data_movement_config = DataMovementConfiguration::Gen2DataMovementConfig{},
+                },
+        };
+
+        ProgramSpec spec{
+            .program_id = "one_to_all_test",
+            .kernels = {sender_spec},
+            .work_units = {WorkUnitSpec{
+                .unique_id = "work_unit",
+                .kernels = {sender_spec.unique_id},
+                .target_nodes = mst_logical_core_set,
+            }},
+        };
+
+        program = MakeProgramFromSpec(*mesh_device, spec);
+
+        // Build varargs: [num_tx, pages_per_tx, (unicast only) subordinate coords...]
+        std::vector<uint32_t> varargs = {
+            (uint32_t)test_config.num_of_transactions, (uint32_t)test_config.pages_per_transaction};
+        if (!test_config.is_multicast) {
+            varargs.insert(varargs.end(), sub_worker_coordinates.begin(), sub_worker_coordinates.end());
+        }
+
+        ProgramRunParams run_params;
+        ProgramRunParams::KernelRunParams sender_run_params{.kernel_spec_name = sender_spec.unique_id};
+        for (auto& mst_logical_core : corerange_to_cores(mst_logical_core_set)) {
+            sender_run_params.runtime_varargs.push_back({mst_logical_core, varargs});
+        }
+        run_params.kernel_run_params.push_back(sender_run_params);
+        SetProgramRunParameters(program, run_params);
+    } else if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
         sender_kernel = experimental::quasar::CreateKernel(
             program,
             sender_kernel_path,
@@ -282,15 +349,17 @@ bool run_dm(const shared_ptr<distributed::MeshDevice>& mesh_device, const OneToA
         SetRuntimeArgs(program, receiver_kernel, sub_logical_core_set, {});
     }
 
-    // Runtime Arguments
-    vector<uint32_t> sender_runtime_args = {};
+    // Runtime Arguments (legacy paths only; Metal 2.0 already set varargs via SetProgramRunParameters)
+    if (!metal_2_0_active) {
+        vector<uint32_t> sender_runtime_args = {};
 
-    if (!test_config.is_multicast) {  // Unicast Sender Runtime Arguments
-        sender_runtime_args.insert(
-            sender_runtime_args.end(), sub_worker_coordinates.begin(), sub_worker_coordinates.end());
+        if (!test_config.is_multicast) {  // Unicast Sender Runtime Arguments
+            sender_runtime_args.insert(
+                sender_runtime_args.end(), sub_worker_coordinates.begin(), sub_worker_coordinates.end());
+        }
+
+        SetRuntimeArgs(program, sender_kernel, mst_logical_core_set, sender_runtime_args);
     }
-
-    SetRuntimeArgs(program, sender_kernel, mst_logical_core_set, sender_runtime_args);
 
     // Assign unique id
 
@@ -368,6 +437,13 @@ void directed_ideal_test(
     // Adjustable Parameters (Ideal: Less transactions, more data per transaction)
     uint32_t pages_per_transaction = 256 * pages_override_factor;
     uint32_t num_of_transactions = 256;
+
+    // Quasar emulator cap: a 256x256 sweep takes far too long under emulation.
+    // Keep the Metal 2.0 host path exercised but with a tiny single-shot workload.
+    if (use_2_0_api && MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
+        pages_per_transaction = 1;
+        num_of_transactions = 4;
+    }
 
     unit_tests::dm::core_to_all::OneToAllConfig test_config = {
         .test_id = test_case_id,
@@ -1116,6 +1192,33 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllUnicastPacketSizes2_0
     CoreCoord sub_start_core_coord = {0, 0};
     CoreCoord sub_grid_size = {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
 
+    // Quasar emulator: full packet-size sweep across the whole grid times-out. Run a single
+    // small config to exercise the Metal 2.0 host path + sender_unicast_2_0 kernel.
+    if (device->arch() == ARCH::QUASAR) {
+        if (sub_grid_size.x < 2 && sub_grid_size.y < 1) {
+            GTEST_SKIP() << "Skipping: emulator grid too small for one_to_all unicast 2_0";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+            .test_id = test_case_id,
+            .mst_core_coord = mst_core_coord,
+            .sub_start_core_coord = sub_start_core_coord,
+            .sub_grid_size = sub_grid_size,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .noc_id = NOC::NOC_0,
+            .loopback = false,
+            .is_multicast = false,
+            .is_linked = false,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
     unit_tests::dm::core_to_all::packet_sizes_test(
         mesh_device, test_case_id, is_multicast, is_linked, mst_core_coord, sub_start_core_coord, sub_grid_size, true);
 }
@@ -1173,6 +1276,33 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastPacketSizes2
     CoreCoord sub_start_core_coord = {0, 0};
     CoreCoord sub_grid_size = {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
 
+    // Quasar emulator: full packet-size sweep across the whole grid times-out. Run a single
+    // small config to exercise the Metal 2.0 host path + sender_multicast_2_0 kernel.
+    if (device->arch() == ARCH::QUASAR) {
+        if (sub_grid_size.x < 2 || sub_grid_size.y < 1) {
+            GTEST_SKIP() << "Skipping: emulator grid too small for one_to_all multicast 2_0";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+            .test_id = test_case_id,
+            .mst_core_coord = mst_core_coord,
+            .sub_start_core_coord = sub_start_core_coord,
+            .sub_grid_size = sub_grid_size,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .noc_id = NOC::NOC_0,
+            .loopback = false,
+            .is_multicast = true,
+            .is_linked = false,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
     unit_tests::dm::core_to_all::packet_sizes_test(
         mesh_device, test_case_id, is_multicast, is_linked, mst_core_coord, sub_start_core_coord, sub_grid_size, true);
 }
@@ -1229,6 +1359,33 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastLinkedPacket
     CoreCoord mst_core_coord = {0, 0};
     CoreCoord sub_start_core_coord = {0, 0};
     CoreCoord sub_grid_size = {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
+
+    // Quasar emulator: full packet-size sweep across the whole grid times-out. Run a single
+    // small config to exercise the Metal 2.0 host path + sender_multicast_2_0 kernel (linked).
+    if (device->arch() == ARCH::QUASAR) {
+        if (sub_grid_size.x < 2 || sub_grid_size.y < 1) {
+            GTEST_SKIP() << "Skipping: emulator grid too small for one_to_all multicast linked 2_0";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+            .test_id = test_case_id,
+            .mst_core_coord = mst_core_coord,
+            .sub_start_core_coord = sub_start_core_coord,
+            .sub_grid_size = sub_grid_size,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .noc_id = NOC::NOC_0,
+            .loopback = false,
+            .is_multicast = true,
+            .is_linked = true,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_all::run_dm(mesh_device, test_config));
+        return;
+    }
 
     unit_tests::dm::core_to_all::packet_sizes_test(
         mesh_device, test_case_id, is_multicast, is_linked, mst_core_coord, sub_start_core_coord, sub_grid_size, true);
