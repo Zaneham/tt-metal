@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <tt-metalium/work_split.hpp>
+#include "ttnn/cpp/ttnn/kernel_lib/reduce_helpers_host.hpp"
 #include "ttnn/operations/moreh/moreh_norm/device/moreh_norm_device_operation.hpp"
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include "ttnn/operations/moreh/moreh_helper_functions.hpp"
@@ -106,6 +107,7 @@ MorehNormOperation::ProgramFactoryHOther::cached_program_t MorehNormOperation::P
     ////////////////////////////////////////////////////////////////////////////
     std::map<std::string, std::string> compute_defines{};
     compute_defines["REDUCE_DIM"] = "ReduceDim::REDUCE_COL";
+    compute_defines["REDUCE_FORMAT"] = ttnn::kernel_lib::reduce_format_define(cb_data_format);
     if (p == 0.0) {
         compute_defines["REDUCE_OP"] = "PoolType::SUM";
         compute_defines["IS_ZERO"] = "1";
