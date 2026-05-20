@@ -20,6 +20,20 @@
  * LLK UNPACK COMMON
  *************************************************************************/
 
+/**
+ * Configure the unpacker hardware for operands A and B.
+ *
+ * Face geometry (face_r_dim, num_faces) and tile size for both operands are
+ * derived from the CB metadata associated with each operand id. This is the
+ * primary entry point: callers no longer need to thread face geometry through
+ * the API, since per-CB face geometry is recorded in the CB descriptor at
+ * program creation time.
+ *
+ * @tparam is_fp32_dest_acc_en   Enable FP32 accumulation in the destination register.
+ * @tparam disable_src_zero_flag When true, disables the source-zero optimisation flag.
+ * @param  unpA_operand          Operand index for unpack source A (In0).
+ * @param  unpB_operand          Operand index for unpack source B (In1).
+ */
 template <bool is_fp32_dest_acc_en, bool disable_src_zero_flag = false>
 inline void llk_unpack_hw_configure(const std::uint32_t unpA_operand, const std::uint32_t unpB_operand) {
     // In0 -> unpA
@@ -52,6 +66,15 @@ inline void llk_unpack_hw_configure(const std::uint32_t unpA_operand, const std:
         unpB_tile_size);
 }
 
+/**
+ * Single-operand convenience overload that configures both unpack sources from
+ * the same operand id. Equivalent to calling the two-operand overload with
+ * unpA_operand == unpB_operand.
+ *
+ * @tparam is_fp32_dest_acc_en   Enable FP32 accumulation in the destination register.
+ * @tparam disable_src_zero_flag When true, disables the source-zero optimisation flag.
+ * @param  unpA_operand          Operand index used for both unpack source A and B.
+ */
 template <bool is_fp32_dest_acc_en, bool disable_src_zero_flag = false>
 inline void llk_unpack_hw_configure(const std::uint32_t unpA_operand) {
     llk_unpack_hw_configure<is_fp32_dest_acc_en, disable_src_zero_flag>(unpA_operand, unpA_operand);

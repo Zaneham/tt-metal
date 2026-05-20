@@ -31,8 +31,6 @@ void kernel_main() {
 #ifdef ARCH_QUASAR
     constexpr uint32_t per_core_block_cnt = get_arg(args::per_core_block_cnt);
     constexpr uint32_t per_core_block_tile_cnt = get_arg(args::per_core_block_tile_cnt);
-    constexpr uint32_t num_faces = get_arg(args::num_faces);
-    constexpr uint32_t num_rows_per_face = get_arg(args::num_rows_per_face);
     DataflowBuffer dfb_in0(dfb::in);
     DataflowBuffer dfb_out0(dfb::out);
 #else

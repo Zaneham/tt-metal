@@ -55,7 +55,7 @@ struct TileDescriptor {
 
 struct FaceGeometry {
     uint32_t face_r_dim = constants::FACE_HEIGHT;
-    uint32_t num_faces = constants::TILE_HEIGHT / constants::FACE_HEIGHT;
+    uint32_t num_faces = constants::TILE_HW / constants::FACE_HW;
 
     constexpr operator std::pair<uint32_t, uint32_t>() const { return {face_r_dim, num_faces}; }
 };

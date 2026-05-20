@@ -631,8 +631,16 @@ static tt::tt_metal::ProgramDescriptor pool2d_multi_core_sharded_with_halo_v2_im
 
     if (cb_sizes.has_pre_tilize) {
         pre_tilize_cb_id = next_cb_index++;
+        // pre_tilize_cb is the destination of pack_untilize (stick-packed: face_r_dim=1),
+        // and is later consumed by fast_tilize whose unpack path takes face geometry as
+        // runtime parameters (not from CB metadata), so the same per-CB face_geometry is
+        // safe for both producer and consumer.
         add_local_cb(
-            pre_tilize_cb_id, cb_sizes.pre_tilize_cb_pagesize, cb_sizes.pre_tilize_cb_npages, params.data_format);
+            pre_tilize_cb_id,
+            cb_sizes.pre_tilize_cb_pagesize,
+            cb_sizes.pre_tilize_cb_npages,
+            params.data_format,
+            pack_untilize_face_geometry);
         log_debug(
             tt::LogOp,
             "CB {} :: PS = {}, NP = {}",
