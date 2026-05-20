@@ -214,7 +214,8 @@ void directed_ideal_test(
     uint32_t test_id,
     CoreCoord master_core_coord,
     CoreCoord subordinate_core_coord,
-    NOC noc_id = NOC::RISCV_1_default) {
+    NOC noc_id = NOC::RISCV_1_default,
+    bool use_2_0_api = false) {
     // Physical Constraints
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
@@ -234,6 +235,7 @@ void directed_ideal_test(
         .page_size_bytes = page_size_bytes,
         .l1_data_format = DataFormat::Float16_b,
         .noc_id = noc_id,
+        .use_2_0_api = use_2_0_api,
     };
 
     // Run
@@ -489,6 +491,38 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOnePacketSizes2_0) {
     }
     uint32_t test_id = 159;
     unit_tests::dm::core_from_core::packet_sizes_test(mesh_device, test_id, CoreCoord(0, 0), CoreCoord(1, 1), true);
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromOneDirectedIdeal2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    if (device->arch() == ARCH::QUASAR) {
+        auto grid = device->compute_with_storage_grid_size();
+        CoreCoord subordinate;
+        if (grid.x >= 2) {
+            subordinate = {1, 0};
+        } else if (grid.y >= 2) {
+            subordinate = {0, 1};
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_from_core::OneFromOneConfig test_config = {
+            .test_id = 161,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = subordinate,
+            .num_of_transactions = 4,
+            .transaction_size_pages = 1,
+            .page_size_bytes = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_from_core::run_dm(mesh_device, test_config));
+        return;
+    }
+    unit_tests::dm::core_from_core::directed_ideal_test(
+        mesh_device, 161, CoreCoord(0, 0), CoreCoord(0, 1), NOC::RISCV_1_default, true);
 }
 
 }  // namespace tt::tt_metal

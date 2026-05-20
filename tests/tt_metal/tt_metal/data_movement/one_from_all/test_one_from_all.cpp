@@ -241,7 +241,8 @@ void directed_ideal_test(
     CoreCoord master_core_coord,
     CoreCoord subordinate_start_coord,
     CoreCoord subordinate_grid_size,
-    NOC noc_id = NOC::RISCV_1_default) {
+    NOC noc_id = NOC::RISCV_1_default,
+    bool use_2_0_api = false) {
     // Physical Constraints
     auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
@@ -264,6 +265,7 @@ void directed_ideal_test(
         .page_size_bytes = page_size_bytes,
         .l1_data_format = DataFormat::Float16_b,
         .noc_id = noc_id,
+        .use_2_0_api = use_2_0_api,
     };
 
     // Run
@@ -318,14 +320,16 @@ void virtual_channels_test(
     uint32_t test_id,
     CoreCoord master_core_coord,
     CoreCoord subordinate_start_coord,
-    CoreCoord subordinate_grid_size) {
+    CoreCoord subordinate_grid_size,
+    bool use_2_0_api = false) {
     // Physical Constraints
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
 
-    std::uint32_t max_num_pages_per_transaction = 1 << 12;
-    std::uint32_t num_of_transactions = 256;  // Constant value
-    std::uint32_t max_num_virtual_channels = 4;
+    const bool is_quasar = mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR;
+    std::uint32_t max_num_pages_per_transaction = is_quasar ? 4u : (1u << 12);
+    std::uint32_t num_of_transactions = is_quasar ? 4u : 256u;
+    std::uint32_t max_num_virtual_channels = is_quasar ? 2u : 4u;
 
     // Loop through:
     // 1. NOCs (NOC_0, NOC_1)
@@ -352,6 +356,7 @@ void virtual_channels_test(
                     .l1_data_format = DataFormat::Float16_b,
                     .noc_id = noc_id,
                     .num_virtual_channels = num_virtual_channels,
+                    .use_2_0_api = use_2_0_api,
                 };
 
                 // Run
@@ -370,7 +375,8 @@ void custom_test(
     uint32_t num_of_transactions,
     uint32_t pages_per_transaction,
     uint32_t num_virtual_channels,
-    NOC noc_id = NOC::RISCV_1_default) {
+    NOC noc_id = NOC::RISCV_1_default,
+    bool use_2_0_api = false) {
     // Physical Constraints
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
@@ -393,6 +399,7 @@ void custom_test(
         .l1_data_format = DataFormat::Float16_b,
         .noc_id = noc_id,
         .num_virtual_channels = num_virtual_channels,
+        .use_2_0_api = use_2_0_api,
     };
 
     // Run
@@ -632,6 +639,67 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromAllDirectedIdeal_2_0) 
         .use_2_0_api = true,
     };
     EXPECT_TRUE(unit_tests::dm::core_from_all::run_dm(mesh_device, test_config));
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromAllVirtualChannels_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: sub_grid_size {2, 1} requires >= 2 columns.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_from_all::OneFromAllConfig test_config = {
+            .test_id = 162,
+            .master_core_coord = {0, 0},
+            .sub_start_core_coord = {0, 0},
+            .sub_grid_size = {2, 1},
+            .num_of_transactions = 4,
+            .transaction_size_pages = 1,
+            .page_size_bytes = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .noc_id = NOC::NOC_0,
+            .num_virtual_channels = 2,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_from_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    unit_tests::dm::core_from_all::virtual_channels_test(
+        mesh_device,
+        162,
+        {0, 0},
+        {0, 0},
+        {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y},
+        true);
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneFromAllCustom_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: sub_grid_size {2, 1} requires >= 2 columns.";
+        }
+        unit_tests::dm::core_from_all::custom_test(mesh_device, 163, {0, 0}, {0, 0}, {2, 1}, 4, 1, 2, NOC::NOC_0, true);
+        return;
+    }
+
+    unit_tests::dm::core_from_all::custom_test(
+        mesh_device,
+        163,
+        {0, 0},
+        {0, 0},
+        {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y},
+        256,
+        1,
+        4,
+        NOC::RISCV_1_default,
+        true);
 }
 
 }  // namespace tt::tt_metal

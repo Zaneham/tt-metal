@@ -236,7 +236,8 @@ void directed_ideal_test(
     uint32_t test_id,
     CoreCoord master_core_coord = {0, 0},
     CoreCoord subordinate_core_coord = {0, 1},
-    uint32_t num_virtual_channels = 1) {
+    uint32_t num_virtual_channels = 1,
+    bool use_2_0_api = false) {
     // Physical Constraints
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
         tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
@@ -259,7 +260,8 @@ void directed_ideal_test(
         .pages_per_transaction = pages_per_transaction,
         .bytes_per_page = bytes_per_page,
         .l1_data_format = DataFormat::Float16_b,
-        .num_virtual_channels = num_virtual_channels};
+        .num_virtual_channels = num_virtual_channels,
+        .use_2_0_api = use_2_0_api};
 
     // Run
     EXPECT_TRUE(run_dm(mesh_device, test_config));
@@ -514,6 +516,37 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToOnePacketSizes2_0) {
     // WH/BH: full sweep using Metal 2.0 host path.
     uint32_t test_id = 158;
     unit_tests::dm::core_to_core::packet_sizes_test(mesh_device, test_id, CoreCoord(0, 0), CoreCoord(1, 1), true);
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToOneDirectedIdeal2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    if (device->arch() == ARCH::QUASAR) {
+        auto grid = device->compute_with_storage_grid_size();
+        CoreCoord subordinate;
+        if (grid.x >= 2) {
+            subordinate = {1, 0};
+        } else if (grid.y >= 2) {
+            subordinate = {0, 1};
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_core::OneToOneConfig test_config = {
+            .test_id = 160,
+            .master_core_coord = {0, 0},
+            .subordinate_core_coord = subordinate,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_core::run_dm(mesh_device, test_config));
+        return;
+    }
+    unit_tests::dm::core_to_core::directed_ideal_test(mesh_device, 160, CoreCoord(0, 0), CoreCoord(0, 1), 1, true);
 }
 
 }  // namespace tt::tt_metal

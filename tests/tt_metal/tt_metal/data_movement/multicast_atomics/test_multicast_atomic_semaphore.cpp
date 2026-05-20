@@ -450,4 +450,100 @@ TEST_F(GenericMeshDeviceFixture, MulticastAtomicLargerIncrement_2_0) {
     EXPECT_TRUE(unit_tests::dm::multicast_atomics::run_dm(mesh_device, config));
 }
 
+TEST_F(GenericMeshDeviceFixture, MulticastAtomicMultiSource_2_0) {
+    uint32_t test_id = 329;
+
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->get_device(0);
+
+    auto grid_size = device->compute_with_storage_grid_size();
+    if (grid_size.x < 5 || grid_size.y < 4) {
+        GTEST_SKIP() << "Grid size too small for this test (need at least 5x4)";
+    }
+
+    unit_tests::dm::multicast_atomics::MulticastAtomicConfig config = {
+        .test_id = test_id,
+        .sender_cores = {{4, 0}, {4, 1}, {4, 2}, {4, 3}},
+        .dst_grid_start = {0, 0},
+        .dst_grid_size = {3, 4},
+        .num_of_transactions = 1,
+        .atomic_inc_value = 1,
+        .noc_id = NOC::NOC_0,
+        .use_2_0_api = true};
+
+    EXPECT_TRUE(unit_tests::dm::multicast_atomics::run_dm(mesh_device, config));
+}
+
+TEST_F(GenericMeshDeviceFixture, MulticastAtomicSingleSourceNOC1_2_0) {
+    uint32_t test_id = 330;
+
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->get_device(0);
+
+    auto grid_size = device->compute_with_storage_grid_size();
+    if (grid_size.x < 5 || grid_size.y < 4) {
+        GTEST_SKIP() << "Grid size too small for this test (need at least 5x4)";
+    }
+
+    unit_tests::dm::multicast_atomics::MulticastAtomicConfig config = {
+        .test_id = test_id,
+        .sender_cores = {{4, 0}},
+        .dst_grid_start = {0, 0},
+        .dst_grid_size = {3, 4},
+        .num_of_transactions = 1,
+        .atomic_inc_value = 1,
+        .noc_id = NOC::NOC_1,
+        .use_2_0_api = true};
+
+    EXPECT_TRUE(unit_tests::dm::multicast_atomics::run_dm(mesh_device, config));
+}
+
+TEST_F(GenericMeshDeviceFixture, MulticastAtomicMultiSourceNOC1_2_0) {
+    uint32_t test_id = 331;
+
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->get_device(0);
+
+    auto grid_size = device->compute_with_storage_grid_size();
+    if (grid_size.x < 5 || grid_size.y < 4) {
+        GTEST_SKIP() << "Grid size too small for this test (need at least 5x4)";
+    }
+
+    unit_tests::dm::multicast_atomics::MulticastAtomicConfig config = {
+        .test_id = test_id,
+        .sender_cores = {{4, 0}, {4, 1}, {4, 2}, {4, 3}},
+        .dst_grid_start = {0, 0},
+        .dst_grid_size = {3, 4},
+        .num_of_transactions = 1,
+        .atomic_inc_value = 1,
+        .noc_id = NOC::NOC_1,
+        .use_2_0_api = true};
+
+    EXPECT_TRUE(unit_tests::dm::multicast_atomics::run_dm(mesh_device, config));
+}
+
+TEST_F(GenericMeshDeviceFixture, MulticastAtomicLargerIncrementNOC1_2_0) {
+    uint32_t test_id = 332;
+
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->get_device(0);
+
+    auto grid_size = device->compute_with_storage_grid_size();
+    if (grid_size.x < 5 || grid_size.y < 4) {
+        GTEST_SKIP() << "Grid size too small for this test (need at least 5x4)";
+    }
+
+    unit_tests::dm::multicast_atomics::MulticastAtomicConfig config = {
+        .test_id = test_id,
+        .sender_cores = {{4, 0}, {4, 1}, {4, 2}, {4, 3}},
+        .dst_grid_start = {0, 0},
+        .dst_grid_size = {3, 4},
+        .num_of_transactions = 3,
+        .atomic_inc_value = 5,
+        .noc_id = NOC::NOC_1,
+        .use_2_0_api = true};
+
+    EXPECT_TRUE(unit_tests::dm::multicast_atomics::run_dm(mesh_device, config));
+}
+
 }  // namespace tt::tt_metal

@@ -291,7 +291,8 @@ void directed_ideal_test(
     uint32_t test_case_id,
     CoreCoord core_coord = {0, 0},
     uint32_t dram_channel = 0,
-    uint32_t virtual_channel = 0) {
+    uint32_t virtual_channel = 0,
+    bool use_2_0_api = false) {
     // Physical Constraints
     auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
         unit_tests::dm::compute_physical_constraints(mesh_device);
@@ -299,6 +300,10 @@ void directed_ideal_test(
     // Parameters
     uint32_t num_of_transactions = 256;
     uint32_t pages_per_transaction = max_transmittable_pages;
+    if (use_2_0_api && mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        num_of_transactions = 4;
+        pages_per_transaction = 4;
+    }
 
     // Test config
     unit_tests::dm::dram::DramConfig test_config = {
@@ -309,7 +314,8 @@ void directed_ideal_test(
         .l1_data_format = DataFormat::Float16_b,
         .core_coord = core_coord,
         .dram_channel = dram_channel,
-        .virtual_channel = virtual_channel};
+        .virtual_channel = virtual_channel,
+        .use_2_0_api = use_2_0_api};
 
     // Run
     EXPECT_TRUE(run_dm(mesh_device, test_config));
@@ -451,6 +457,61 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMPacketSizes2_0) {
         return;
     }
     unit_tests::dm::dram::packet_sizes_test(mesh_device, 40, {0, 0}, 0, true);
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMDirectedIdeal2_0) {
+    auto mesh_device = get_mesh_device();
+    if (mesh_device->impl().get_device(0)->arch() == ARCH::QUASAR) {
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::dram::DramConfig test_config = {
+            .test_id = 41,
+            .num_of_transactions = 4,
+            .pages_per_transaction = 4,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .core_coord = {0, 0},
+            .dram_channel = 0,
+            .virtual_channel = 0,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::dram::run_dm(mesh_device, test_config));
+        return;
+    }
+    unit_tests::dm::dram::directed_ideal_test(mesh_device, 41, {0, 0}, 0, 0, true);
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMCoreLocations2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        unit_tests::dm::dram::directed_ideal_test(mesh_device, 42, {0, 0}, 0, 0, true);
+        return;
+    }
+
+    auto grid_size = device->compute_with_storage_grid_size();
+    for (unsigned int x = 0; x < grid_size.x; x++) {
+        for (unsigned int y = 0; y < grid_size.y; y++) {
+            unit_tests::dm::dram::directed_ideal_test(mesh_device, 42, {x, y}, 0, 0, true);
+        }
+    }
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMChannels2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        unit_tests::dm::dram::directed_ideal_test(mesh_device, 43, {0, 0}, 0, 0, true);
+        return;
+    }
+
+    for (unsigned int dram_channel = 0; dram_channel < device->num_dram_channels(); dram_channel++) {
+        for (unsigned int vc = 0; vc < 4; vc++) {
+            unit_tests::dm::dram::directed_ideal_test(mesh_device, 43, {0, 0}, dram_channel, vc, true);
+        }
+    }
 }
 
 }  // namespace tt::tt_metal

@@ -360,6 +360,62 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadTridDirectedId
     EXPECT_TRUE(run_dm(mesh_device, test_config));
 }
 
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadDirectedIdeal2_0) {
+    auto mesh_device = get_mesh_device();
+
+    DataFormat l1_data_format = DataFormat::Float16_b;
+    uint32_t page_size_bytes = tt::tile_size(l1_data_format);
+
+    const bool is_quasar = MetalContext::instance().get_cluster().arch() == ARCH::QUASAR;
+    uint32_t num_of_transactions = is_quasar ? 16u : 256u;
+
+    CoreRange core_range({0, 0}, {0, 0});
+    CoreRangeSet core_range_set({core_range});
+
+    unit_tests::dm::dram_sharded::DramShardedConfig test_config = {
+        .test_id = 90,
+        .num_of_transactions = num_of_transactions,
+        .num_banks = mesh_device->num_dram_channels(),
+        .pages_per_bank = 32,
+        .page_size_bytes = page_size_bytes,
+        .l1_data_format = l1_data_format,
+        .cores = core_range_set,
+        .use_2_0 = true};
+
+    EXPECT_TRUE(run_dm(mesh_device, test_config));
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadBankNumbers2_0) {
+    auto mesh_device = get_mesh_device();
+
+    DataFormat l1_data_format = DataFormat::Float16_b;
+    uint32_t page_size_bytes = tt::tile_size(l1_data_format);
+    uint32_t max_num_banks = mesh_device->num_dram_channels();
+    uint32_t num_pages = 32;
+
+    const bool is_quasar = MetalContext::instance().get_cluster().arch() == ARCH::QUASAR;
+    uint32_t max_transactions = is_quasar ? 16u : 256u;
+
+    CoreRange core_range({0, 0}, {0, 0});
+    CoreRangeSet core_range_set({core_range});
+
+    for (uint32_t num_of_transactions = 1; num_of_transactions <= max_transactions; num_of_transactions *= 4) {
+        for (uint32_t num_banks = 1; num_banks <= max_num_banks; num_banks++) {
+            unit_tests::dm::dram_sharded::DramShardedConfig test_config = {
+                .test_id = 91,
+                .num_of_transactions = num_of_transactions,
+                .num_banks = num_banks,
+                .pages_per_bank = num_pages,
+                .page_size_bytes = page_size_bytes,
+                .l1_data_format = l1_data_format,
+                .cores = core_range_set,
+                .use_2_0 = true};
+
+            EXPECT_TRUE(run_dm(mesh_device, test_config));
+        }
+    }
+}
+
 TEST_F(GenericMeshDeviceFixture, TensixDataMovementDRAMShardedReadTileNumbers2_0) {
     auto mesh_device = get_mesh_device();
 

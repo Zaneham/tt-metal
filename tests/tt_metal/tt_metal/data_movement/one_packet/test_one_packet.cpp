@@ -538,4 +538,96 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteSizes_2_0) {
     }
 }
 
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketReadDirectedIdeal_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord subordinate_core_coord = {0, 1};
+
+    if (device->arch() == ARCH::QUASAR) {
+        auto grid = device->compute_with_storage_grid_size();
+        if (grid.x >= 2) {
+            subordinate_core_coord = {1, 0};
+        } else if (grid.y >= 2) {
+            subordinate_core_coord = {0, 1};
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        unit_tests::dm::one_packet::OnePacketConfig test_config = {
+            .test_id = 86,
+            .master_core_coord = master_core_coord,
+            .subordinate_core_coord = subordinate_core_coord,
+            .num_packets = 4,
+            .packet_size_bytes = page_size_bytes,
+            .read = true,
+            .use_2_0 = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    uint32_t packet_size_bytes = page_size_bytes * 256;
+    uint32_t num_packets = max_transmittable_bytes / packet_size_bytes;
+
+    unit_tests::dm::one_packet::OnePacketConfig test_config = {
+        .test_id = 86,
+        .master_core_coord = master_core_coord,
+        .subordinate_core_coord = subordinate_core_coord,
+        .num_packets = num_packets,
+        .packet_size_bytes = packet_size_bytes,
+        .read = true,
+        .use_2_0 = true,
+    };
+    EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOnePacketWriteDirectedIdeal_2_0) {
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+    auto [page_size_bytes, max_transmittable_bytes, max_transmittable_pages] =
+        tt::tt_metal::unit_tests::dm::compute_physical_constraints(mesh_device);
+
+    CoreCoord master_core_coord = {0, 0};
+    CoreCoord subordinate_core_coord = {0, 1};
+
+    if (device->arch() == ARCH::QUASAR) {
+        auto grid = device->compute_with_storage_grid_size();
+        if (grid.x >= 2) {
+            subordinate_core_coord = {1, 0};
+        } else if (grid.y >= 2) {
+            subordinate_core_coord = {0, 1};
+        } else {
+            GTEST_SKIP() << "Skipping: need at least a 1x2 or 2x1 grid, got " << grid.x << "x" << grid.y;
+        }
+        unit_tests::dm::one_packet::OnePacketConfig test_config = {
+            .test_id = 87,
+            .master_core_coord = master_core_coord,
+            .subordinate_core_coord = subordinate_core_coord,
+            .num_packets = 4,
+            .packet_size_bytes = page_size_bytes,
+            .read = false,
+            .use_2_0 = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    uint32_t packet_size_bytes = page_size_bytes * 256;
+    uint32_t num_packets = max_transmittable_bytes / packet_size_bytes;
+
+    unit_tests::dm::one_packet::OnePacketConfig test_config = {
+        .test_id = 87,
+        .master_core_coord = master_core_coord,
+        .subordinate_core_coord = subordinate_core_coord,
+        .num_packets = num_packets,
+        .packet_size_bytes = packet_size_bytes,
+        .read = false,
+        .use_2_0 = true,
+    };
+    EXPECT_TRUE(unit_tests::dm::one_packet::run_dm(mesh_device, test_config));
+}
+
 }  // namespace tt::tt_metal
