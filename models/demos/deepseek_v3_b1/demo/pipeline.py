@@ -486,7 +486,6 @@ def create_sp5_pipeline_configuration(
             weights=weight_provider.load_dense_layer(layer_id=layer_id, device=d),
             layer_idx=layer_id,
             num_slots=num_slots,
-            forward_metadata=True,
         )
 
     def _decoder_stage(
@@ -499,7 +498,6 @@ def create_sp5_pipeline_configuration(
             weights=weight_provider.load_moe_layer(layer_id=layer_id, device=d),
             layer_idx=layer_id,
             num_slots=num_slots,
-            forward_metadata=True,
             upstream_fifo_pages=upstream_fifo_pages,
             downstream_fifo_pages=downstream_fifo_pages,
         )

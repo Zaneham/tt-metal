@@ -1707,6 +1707,11 @@ struct TopKSampling {
                                 std::max(static_cast<uint32_t>(metadata_ptr->k), static_cast<uint32_t>(1)),
                                 static_cast<uint32_t>(32));
                             p = std::min(std::max(static_cast<float>(metadata_ptr->p), 0.0f), 1.0f);
+                            float temperature = std::max(static_cast<float>(metadata_ptr->temperature), 0.01f);
+                            if (temperature == 0.0f) {
+                                K = 1;
+                                p = 1.0f;
+                            }
                         }
 
                         {

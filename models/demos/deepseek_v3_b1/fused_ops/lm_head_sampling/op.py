@@ -1250,7 +1250,6 @@ class LMHeadSampling:
                 reduce_num_hops = 1
                 if enable_reduce_to_one:
                     reduce_root_row = int(reduce_params["root_coord"][0])
-                    reduce_root_col = int(reduce_params["root_coord"][1])
                     # Always use linear mode. Torus auto-enable was the source of the
                     # corner-root hang: when root_row in {0,3}, the reduce was wiring
                     # ROOT3→ROOT2 across 3 rows expecting fabric wrap, but fabric_2D is
