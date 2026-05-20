@@ -50,6 +50,10 @@ struct DataflowBufferConfig {
     std::optional<std::pair<uint32_t, uint32_t>> unpack_face_geometry = std::nullopt;
     // Set only when both producer and consumer are the same compute kernel
     std::optional<TensixScope> tensix_scope = std::nullopt;
+    // When true, the DFB borrows L1 memory from an externally managed buffer
+    // instead of allocating its own L1 region. The actual base address must be
+    // supplied before launch via DataflowBufferImpl::set_borrowed_memory_base_addr.
+    bool borrows_memory = false;
 };
 
 // Note: This API and the DataflowBufferConfig are placeholder only, the final DataflowBuffer APIs will conform with
