@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include "tt-metalium/kernel_types.hpp"
 #include "tt-metalium/tensor_accessor_args.hpp"
@@ -89,6 +90,9 @@ ProgramDescriptor GridSampleBilinearProgramFactory::create_descriptor(
         last_output_tile_is_partial && input_shape[-1] <= tt::constants::FACE_WIDTH;
     const auto output_face_geometry =
         FaceGeometry{.face_r_dim = 1, .num_faces = single_partial_output_fits_in_face ? 1U : 2U};
+    const std::optional<TileDescriptor> output_tile =
+        single_partial_output_fits_in_face ? std::optional{TileDescriptor{1, tt::constants::FACE_WIDTH, false}}
+                                           : std::nullopt;
 
     const uint32_t grid_stick_size =
         is_sharded ? grid_shape[-1] * grid_tensor.element_size() : get_aligned_stick_size(grid_shape, grid_tensor);
@@ -176,6 +180,7 @@ ProgramDescriptor GridSampleBilinearProgramFactory::create_descriptor(
             .buffer_index = static_cast<uint8_t>(output_cb_index),
             .data_format = output_cb_data_format,
             .page_size = output_cb_page_size,
+            .tile = output_tile,
             .face_geometry = output_face_geometry,
         }}},
         .buffer = is_sharded ? output_tensor.buffer() : nullptr,

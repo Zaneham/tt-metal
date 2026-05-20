@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <tt-metalium/program_descriptors.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <tt-metalium/work_split.hpp>
@@ -146,6 +147,9 @@ ProgramDescriptor RotateDeviceOperation::BilinearProgramFactory::create_descript
         last_output_tile_is_partial && input_channels <= tt::constants::FACE_WIDTH;
     const auto output_face_geometry =
         FaceGeometry{.face_r_dim = 1, .num_faces = single_partial_output_fits_in_face ? 1U : 2U};
+    const std::optional<TileDescriptor> output_tile =
+        single_partial_output_fits_in_face ? std::optional{TileDescriptor{1, tt::constants::FACE_WIDTH, false}}
+                                           : std::nullopt;
 
     const uint32_t fill_cb_page_size = input_stick_nbytes;
     const uint32_t fill_cb_index = cb_idx++;
@@ -204,6 +208,7 @@ ProgramDescriptor RotateDeviceOperation::BilinearProgramFactory::create_descript
             .buffer_index = static_cast<uint8_t>(output_cb_index),
             .data_format = output_cb_data_format,
             .page_size = output_cb_page_size,
+            .tile = output_tile,
             .face_geometry = output_face_geometry,
         }}},
         .buffer = any_sharded ? output_tensor.buffer() : nullptr,
