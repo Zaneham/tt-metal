@@ -120,6 +120,17 @@ void py_module(nb::module_& mod) {
               * matmul per_core_N == weight per-receiver N.
             All configs must agree on compute_with_storage_grid_size and num_global_cb_receivers.
 
+            Picking num_buffered_blocks:
+              * 1: no overlap; DRISC and matmul are fully serialized.
+              * 2: double-buffer ping-pong (minimum useful value).
+              * 4 (default): comfortable slack against jitter; fits L1 for typical shapes.
+              * num_blocks of the largest matmul (max(weight_K_tiles / in0_block_w)): full-
+                layer decoupling. Above this, more buffering doesn't add throughput - the
+                DRISC just stalls on remote_cb_reserve_back. This matches the production
+                llama 70B pattern.
+            Larger values are clamped by an L1 budget so the GCB leaves room for the matmul's
+            in0/out/interm CBs.
+
             Args:
                 mesh_device: The mesh device.
                 program_configs: List of 1D mcast matmul program configs (each gather_in0=True).
