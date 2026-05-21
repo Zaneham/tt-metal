@@ -331,13 +331,18 @@ void kernel_main() {
 
         const uint64_t global_noc_semaphore_addr = get_noc_addr(global_semaphore_addr, /*noc=*/1);
 
+        // Topology is a CT arg from the host (already auto-downgraded via ttnn::ccl::get_usable_topology
+        // at the op API boundary in moe_compute_device_operation.cpp). For Linear topology, the helper
+        // derives per-device positive/negative ranges from linearized_mesh_coord so endpoints elide the
+        // absent-direction send via `if constexpr` — required to avoid UB on LINE endpoints.
         fabric_multicast_bidirectional_atomic_inc_ring_1d<
             linearized_mesh_coord,
+            topology,
             mesh_rows,
             mesh_cols,
             replicate_axis,
-            topology,
-            true>(fabric_connections, packet_headers[1], packet_headers[2], global_noc_semaphore_addr);
+            /*DoubleAntipodalAtomicInc=*/(topology == tt::tt_fabric::Topology::Ring)>(
+            fabric_connections, packet_headers[1], packet_headers[2], global_noc_semaphore_addr);
 
         auto semaphore_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(global_semaphore_addr);
 
@@ -350,12 +355,13 @@ void kernel_main() {
             fabric_mux_termination_signal_address,
             num_mux_workers_per_link>(directions, fabric_connections, true, rt_arg_count);
 
-        // Ring with DoubleAntipodalAtomicInc: each device receives replicate_group_devices signals
-        // (antipodal device gets hit from both directions).
-        // Linear: each device receives exactly replicate_group_devices - 1 signals (no wrap-around).
-        constexpr uint32_t barrier_wait_count =
-            has_wrap_around<topology>() ? replicate_group_devices : replicate_group_devices - 1;
-        noc_semaphore_wait(semaphore_ptr, barrier_wait_count);
+        // Ring + DoubleAntipodalAtomicInc=true: each device receives `replicate_group_devices` inc's
+        //   (the antipodal device is incremented from both directions, summing to N senders).
+        // Linear: each device receives `replicate_group_devices - 1` inc's (no antipodal doubling;
+        //   each sender on the line sends to exactly N-1 other devices).
+        constexpr uint32_t expected_inc_count =
+            (topology == tt::tt_fabric::Topology::Linear) ? (replicate_group_devices - 1) : replicate_group_devices;
+        noc_semaphore_wait(semaphore_ptr, expected_inc_count);
         noc_semaphore_set(semaphore_ptr, 0);
     } else {
         // get sync core semaphore noc address
