@@ -8,7 +8,7 @@ import warnings
 from loguru import logger
 
 from models.demos.utils.model_targets import resolve_perf_targets
-from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
+from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler, perf_target_check
 
 PREFILL_TIME_TO_TOKEN_KEY = "prefill_time_to_token"
 PREFILL_TIME_TO_FIRST_TOKEN_KEY = "prefill_time_to_first_token"
