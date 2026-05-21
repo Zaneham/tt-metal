@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Metal 2.0 (declarative API) Tensix producer for run_single_dfb_program_m2.
+// Metal 2.0 (declarative API) Tensix producer for run_single_dfb_program_2_0.
 // Host pre-fills the DFB L1 ring; this kernel only posts credits.
 
 #include "api/dataflow/dataflow_buffer.h"

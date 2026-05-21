@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 //
-// Metal 2.0 (declarative API) Tensix consumer for run_single_dfb_program_m2.
+// Metal 2.0 (declarative API) Tensix consumer for run_single_dfb_program_2_0.
 // Just drains credits; host reads L1 directly to verify the data landed.
 
 #include "api/dataflow/dataflow_buffer.h"
