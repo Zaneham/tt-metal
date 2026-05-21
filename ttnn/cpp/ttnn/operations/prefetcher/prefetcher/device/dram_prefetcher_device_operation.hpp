@@ -21,6 +21,7 @@ struct DramPrefetcherOperation {
     using spec_return_value_t = TensorSpec;
     using tensor_return_value_t = Tensor;
     using program_factory_t = std::variant<DramPrefetcherProgramFactory>;
+    static program_factory_t select_program_factory(const operation_attributes_t&, const tensor_args_t&);
     static void validate_on_program_cache_miss(const operation_attributes_t&, const tensor_args_t&);
     static spec_return_value_t compute_output_specs(const operation_attributes_t&, const tensor_args_t&);
     static tensor_return_value_t create_output_tensors(const operation_attributes_t&, const tensor_args_t&);
@@ -30,6 +31,7 @@ ttnn::Tensor dram_prefetcher(
     std::vector<ttnn::Tensor>& tensors,
     uint32_t num_layers,
     const std::optional<const tt::tt_metal::experimental::GlobalCircularBuffer>& global_cb,
-    bool enable_performance_mode);
+    bool enable_performance_mode,
+    uint32_t dram_core_k_block_w_tiles = 1);
 
 }  // namespace ttnn::prim

@@ -6,9 +6,15 @@
 #include "ttnn/tensor/tensor_ops.hpp"
 #include "ttnn/device_operation.hpp"
 #include <tt-metalium/constants.hpp>
+#include <tt-metalium/experimental/global_circular_buffer.hpp>
 #include <optional>
 
 namespace ttnn::prim {
+
+DramPrefetcherOperation::program_factory_t DramPrefetcherOperation::select_program_factory(
+    const operation_attributes_t& /*args*/, const tensor_args_t& /*tensor_args*/) {
+    return DramPrefetcherProgramFactory{};
+}
 
 void DramPrefetcherOperation::validate_on_program_cache_miss(
     const operation_attributes_t& args, const tensor_args_t& tensor_args) {
@@ -16,6 +22,13 @@ void DramPrefetcherOperation::validate_on_program_cache_miss(
     TT_FATAL(!input_tensors.empty(), "Must have at least one input tensor");
     TT_FATAL(args.num_layers > 0, "Prefetcher must run for at least 1 layer");
     TT_FATAL(args.global_cb.has_value(), "Global circular buffer must be provided");
+
+    TT_FATAL(
+        tt::tt_metal::experimental::sender_core_type(*args.global_cb) !=
+            tt::tt_metal::experimental::SenderCoreType::Dram,
+        "ttnn.dram_prefetcher does not support DRAM-sender GlobalCircularBuffers. Use "
+        "ttnn.start_dram_core_prefetcher / ttnn.stop_dram_core_prefetcher instead.");
+
     const ttnn::Tensor& tensor_addrs = input_tensors.back();  // Last tensor is tensor_addrs
 
     auto global_cb = *(args.global_cb);
@@ -92,11 +105,13 @@ ttnn::Tensor dram_prefetcher(
     std::vector<ttnn::Tensor>& tensors,
     const uint32_t num_layers,
     const std::optional<const tt::tt_metal::experimental::GlobalCircularBuffer>& global_cb,
-    const bool enable_performance_mode) {
+    const bool enable_performance_mode,
+    const uint32_t dram_core_k_block_w_tiles) {
     auto operation_attributes = DramPrefetcherParams{
         .num_layers = num_layers,
         .enable_performance_mode = enable_performance_mode,
         .global_cb = global_cb,
+        .dram_core_k_block_w_tiles = dram_core_k_block_w_tiles,
     };
     auto tensor_args = DramPrefetcherInputs{.input_tensors = tensors};
 
