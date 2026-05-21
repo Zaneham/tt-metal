@@ -3,15 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_buffer.h"
-#include "experimental/kernel_args.h"
 
 void kernel_main() {
-    constexpr uint32_t entries_per_neo = get_arg(args::entries_per_neo);
-    constexpr uint32_t words_per_entry = get_arg(args::words_per_entry);
+    const uint32_t entries_per_neo = get_compile_time_arg_val(0);
+    const uint32_t words_per_entry = get_compile_time_arg_val(1);
 
-    // Both PRODUCER ("out") and CONSUMER ("in") bindings on this kernel reference
-    // the same self-looped DFB, so dfb::out and dfb::in resolve to the same ID.
-    DataflowBuffer dfb(dfb::out);
+    DataflowBuffer dfb(0);
 
 #ifdef UCK_CHLKC_UNPACK
     uint32_t trisc_id = ckernel::csr_read<ckernel::CSR::TRISC_ID>();

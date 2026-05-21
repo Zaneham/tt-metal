@@ -5,15 +5,10 @@
 // Variant of dfb_consumer.cpp that pre-increments the TC `acked` counter to a
 // near-wrap value before the main consumer loop. Pairs with
 // dfb_producer_with_tc_preload.cpp. See that file for rationale.
-//
-// CTA 4 (kPreloadAckedValue):
-//   0       → no preload, identical behavior to dfb_consumer.cpp
-//   N > 0   → on entry, advance every TC slot's `acked` field by N via direct
-//             HW register write. Producer must apply the same N to `posted`.
 
-#include "experimental/dataflow_buffer.h"
-#include "experimental/noc.h"
-#include "experimental/tensor.h"
+#include "api/dataflow/dataflow_buffer.h"
+#include "api/dataflow/noc.h"
+#include "api/tensor/noc_traits.h"
 
 void kernel_main() {
     const uint32_t dst_addr_base = get_compile_time_arg_val(0);
@@ -29,8 +24,8 @@ void kernel_main() {
     const uint32_t entries_per_core = get_arg_val<uint32_t>(3);
     const uint32_t num_consumers = static_cast<uint32_t>(__builtin_popcount(consumer_mask));
 
-    experimental::DataflowBuffer dfb(logical_dfb_id);
-    experimental::Noc noc;
+    DataflowBuffer dfb(logical_dfb_id);
+    Noc noc;
 
 #ifdef ARCH_QUASAR
     std::uint64_t hartid;
@@ -40,8 +35,6 @@ void kernel_main() {
     uint32_t consumer_idx = 0;
 #endif
 
-    // TC acked-counter preload: only consumer 0 issues the increment so the
-    // counter is bumped exactly once per TC slot regardless of num_consumers.
     if constexpr (kPreloadAckedValue > 0) {
 #ifdef ARCH_QUASAR
         if (consumer_idx == 0) {
@@ -65,7 +58,7 @@ void kernel_main() {
         }
         if constexpr (implicit_sync) {
 #ifdef ARCH_QUASAR
-            noc.async_write<experimental::Noc::TxnIdMode::ENABLED>(dfb, tensor_accessor, {}, {.page_id = page_id});
+            noc.async_write<Noc::TxnIdMode::ENABLED>(dfb, tensor_accessor, {}, {.page_id = page_id});
 #endif
         } else {
             dfb.wait_front(1);

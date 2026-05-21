@@ -22,7 +22,11 @@ set(UNIT_TESTS_API_SOURCES
     dataflow_buffer/test_alias_dataflow_buffer.cpp
     dataflow_buffer/test_dataflow_buffer.cpp
     dataflow_buffer/test_dataflow_buffer_configs.cpp
+<<<<<<< HEAD
     dataflow_buffer/test_borrowed_memory_dataflow_buffer.cpp
+=======
+    dataflow_buffer/test_dataflow_buffer_m2.cpp
+>>>>>>> 90469954111 (Add Metal 2.0 parallel DFB test suite alongside the legacy positional-CTA tests)
     distribution_spec/test_buffer_distribution_spec.cpp
     metal2_host_api/test_program_spec.cpp
     metal2_host_api/test_program_spec_hw.cpp

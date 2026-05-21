@@ -1,6 +1,17 @@
 // SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 //
 // SPDX-License-Identifier: Apache-2.0
+//
+// Metal 2.0 (declarative API) C2 compute kernel.
+//
+// Three DFB pipeline:
+//   dfb::in    (inter, DM → TRISC)
+//   dfb::self  (intra, TRISC self-loop)  ← this kernel binds both PRODUCER and CONSUMER
+//   dfb::out   (inter, TRISC → DM)
+//
+// Per tile:
+//   stage A: unpack dfb_in  → SFPU relu → pack dfb_self
+//   stage B: unpack dfb_self → SFPU relu → pack dfb_out
 
 #include <cstdint>
 
@@ -10,34 +21,20 @@
 #include "api/compute/eltwise_unary/eltwise_unary.h"
 #include "api/compute/eltwise_unary/relu.h"
 #include "api/dataflow/dataflow_buffer.h"
+#include "experimental/kernel_args.h"
 
-// C2 compute kernel: three-DFB pipeline that loops a tile through the same
-// TRISC twice using the SFPU (relu) between stages.
-//
-// DFB ids (caller registers in this exact order):
-//   0  inter, DM → TRISC      (DM producer fills dfb_in)
-//   1  intra, TRISC → TRISC   (self-loop; this kernel is both producer and consumer)
-//   2  inter, TRISC → DM      (DM consumer drains dfb_out)
-//
-// Per tile:
-//   stage A: unpack dfb_in  → SFPU relu → pack dfb_self
-//   stage B: unpack dfb_self → SFPU relu → pack dfb_out
-//
-// Compile-time args:
-//   0: per_core_tile_cnt  - number of tiles to process
 void kernel_main() {
-    const uint32_t per_core_tile_cnt = get_compile_time_arg_val(0);
+    constexpr uint32_t per_core_tile_cnt = get_arg(args::per_core_tile_cnt);
 
-    // Init for unary pipeline; both stages reuse the same SFPU op (relu).
     unary_op_init_common(0, 2);
     relu_tile_init();
 
-    DataflowBuffer dfb_in(0);
-    DataflowBuffer dfb_self(1);
-    DataflowBuffer dfb_out(2);
+    DataflowBuffer dfb_in(dfb::in);
+    DataflowBuffer dfb_self(dfb::self);
+    DataflowBuffer dfb_out(dfb::out);
 
     for (uint32_t b = 0; b < per_core_tile_cnt; ++b) {
-        // Stage A: dfb_in → relu → dfb_self  (inter-tensix in, intra-tensix self-loop out)
+        // Stage A: dfb_in → relu → dfb_self
         acquire_dst();
         dfb_in.wait_front(1);
         dfb_self.reserve_back(1);
@@ -48,7 +45,7 @@ void kernel_main() {
         dfb_self.push_back(1);
         release_dst();
 
-        // Stage B: dfb_self → relu → dfb_out (intra-tensix self-loop in, inter-tensix out)
+        // Stage B: dfb_self → relu → dfb_out
         acquire_dst();
         dfb_self.wait_front(1);
         dfb_out.reserve_back(1);

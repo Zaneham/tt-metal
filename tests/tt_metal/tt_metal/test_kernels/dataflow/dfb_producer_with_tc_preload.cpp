@@ -9,18 +9,13 @@
 // still catching the same bug class (firmware code that uses a wider shadow
 // accumulator than the 16-bit HW register).
 //
-// CTA 3 (kPreloadPostedValue):
-//   0       → no preload, identical behavior to dfb_producer.cpp
-//   N > 0   → on entry, advance every TC slot's `posted` field by N via direct
-//             HW register write (bypasses the ring-credit check). Consumer must
-//             apply the same N to `acked` so the ring still looks empty after
-//             preload (posted - acked == 0).
-//
-// Pairs with: dfb_consumer_with_tc_preload.cpp
+// Uses the OLD-API positional CTAs (the new metal2_host_api TensorAccessor
+// binding mechanism has a CRTA-population bug on emu that returns zero for
+// the tensor base address). Pairs with: dfb_consumer_with_tc_preload.cpp.
 
-#include "experimental/dataflow_buffer.h"
-#include "experimental/noc.h"
-#include "experimental/tensor.h"
+#include "api/dataflow/dataflow_buffer.h"
+#include "api/dataflow/noc.h"
+#include "api/tensor/noc_traits.h"
 
 void kernel_main() {
     const uint32_t src_addr_base = get_compile_time_arg_val(0);
@@ -34,8 +29,8 @@ void kernel_main() {
     const uint32_t entries_per_core = get_arg_val<uint32_t>(2);
     const uint32_t num_producers = static_cast<uint32_t>(__builtin_popcount(producer_mask));
 
-    experimental::DataflowBuffer dfb(0);
-    experimental::Noc noc;
+    DataflowBuffer dfb(0);
+    Noc noc;
 
 #ifdef ARCH_QUASAR
     std::uint64_t hartid;
@@ -65,7 +60,7 @@ void kernel_main() {
         }
         if constexpr (implicit_sync) {
 #ifdef ARCH_QUASAR
-            noc.async_read<experimental::Noc::TxnIdMode::ENABLED>(tensor_accessor, dfb, {.page_id = page_id}, {});
+            noc.async_read<Noc::TxnIdMode::ENABLED>(tensor_accessor, dfb, {.page_id = page_id}, {});
 #endif
         } else {
             dfb.reserve_back(1);

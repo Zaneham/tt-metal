@@ -6,9 +6,9 @@
 // instead of hardcoding it to 0. Used by tests that need to coexist with another
 // DFB (e.g., a decoy DFB that occupies id 0 to force divergent TC allocation).
 
-#include "experimental/dataflow_buffer.h"
-#include "experimental/noc.h"
-#include "experimental/tensor.h"
+#include "api/dataflow/dataflow_buffer.h"
+#include "api/dataflow/noc.h"
+#include "api/tensor/noc_traits.h"
 
 void kernel_main() {
     const uint32_t src_addr_base = get_compile_time_arg_val(0);
@@ -22,8 +22,8 @@ void kernel_main() {
     const uint32_t entries_per_core = get_arg_val<uint32_t>(2);
     const uint32_t num_producers = static_cast<uint32_t>(__builtin_popcount(producer_mask));
 
-    experimental::DataflowBuffer dfb(logical_dfb_id);
-    experimental::Noc noc;
+    DataflowBuffer dfb(logical_dfb_id);
+    Noc noc;
 
 #ifdef ARCH_QUASAR
     std::uint64_t hartid;
@@ -43,7 +43,7 @@ void kernel_main() {
         }
         if constexpr (implicit_sync) {
 #ifdef ARCH_QUASAR
-            noc.async_read<experimental::Noc::TxnIdMode::ENABLED>(tensor_accessor, dfb, {.page_id = page_id}, {});
+            noc.async_read<Noc::TxnIdMode::ENABLED>(tensor_accessor, dfb, {.page_id = page_id}, {});
 #endif
         } else {
             dfb.reserve_back(1);
