@@ -157,7 +157,6 @@ def verify_perf(
     expected_perf_metrics: dict = None,
     high_tol_percentage=1.15,  # 15% tolerance (approx +-5% CI variance + 5% real increase)
     expected_measurements: dict = None,
-    lower_is_better_metrics: set = None,
     model_name: str = None,
     sku: str = None,
     batch_size: int = None,
@@ -172,7 +171,6 @@ def verify_perf(
             resolved from centralized YAML using model_name/sku[/batch_size/seq_len].
         high_tol_percentage: tolerance percentage (e.g., 1.15 means 15% tolerance)
         expected_measurements: dict specifying which measurements are required
-        lower_is_better_metrics: set of metric names where lower values are better (e.g., TTFT)
     """
     if expected_perf_metrics is None:
         if not model_name or not sku:
@@ -213,17 +211,12 @@ def verify_perf(
         expected_measurements[PREFILL_TIME_TO_TOKEN_KEY] = False
 
     # Default metrics where lower is better
-    lower_is_better_metrics_default = {
+    lower_is_better_metrics = {
         "prefill_time_to_token",
         "prefill_time_to_first_token",
         "compile_prefill",
         "compile_decode",
     }
-    lower_is_better_metrics = (
-        lower_is_better_metrics_default.union(lower_is_better_metrics)
-        if lower_is_better_metrics
-        else lower_is_better_metrics_default
-    )
 
     does_pass = True
     for key in expected_measurements:
