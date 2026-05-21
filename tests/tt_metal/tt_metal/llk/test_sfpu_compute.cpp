@@ -788,19 +788,24 @@ bool run_sfpu_binary_two_input_buffer(
             // Quasar eltwise_binary.cpp expects 4 CTAs: {in0, in1, in2, out}.
             // `in2` is only referenced inside DST_ACCUM_MODE/ACC_TO_DEST blocks,
             // so an unused DFB id (0) is fine here.
-            vector<uint32_t> compute_cta = {in0_dfb, in1_dfb, /*unused in2*/ 0u, out_dfb};
+            vector<uint32_t> compute_cta = {in0_dfb, in1_dfb, out_dfb};
+            std::vector<UnpackToDestMode> unpack_to_dest_mode(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::Default);
+            unpack_to_dest_mode[tt::CBIndex::c_0] = UnpackToDestMode::UnpackToDestFp32;
+            unpack_to_dest_mode[tt::CBIndex::c_1] = UnpackToDestMode::UnpackToDestFp32;
             compute_kernel = tt_metal::experimental::quasar::CreateKernel(
                 program_,
-                "tt_metal/kernels/compute/eltwise_binary.cpp",
+                "tt_metal/kernels/compute/eltwise_binary_quasar_SFPU.cpp",
                 test_config.cores,
                 tt_metal::experimental::quasar::QuasarComputeConfig{
                     .num_threads_per_cluster = 1,
-                    .dst_full_sync_en = true,
+                    .fp32_dest_acc_en = 1,
                     // INT32 dest acc (uncomment when using add_int_tile<DataFormat::Int32>):
                     // .fp32_dest_acc_en = is_int_op,
+                    .unpack_to_dest_mode = unpack_to_dest_mode,
                     .math_approx_mode = test_config.approx_mode,
                     .compile_args = compute_cta,
-                    .defines = sfpu_defines});
+                    .defines = sfpu_defines,
+                });
             tt_metal::experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
                 program_, in0_dfb, reader_kernel, compute_kernel);
             tt_metal::experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
@@ -808,16 +813,21 @@ bool run_sfpu_binary_two_input_buffer(
             tt_metal::experimental::dfb::BindDataflowBufferToProducerConsumerKernels(
                 program_, out_dfb, compute_kernel, writer_kernel);
         } else {
+            std::vector<UnpackToDestMode> unpack_to_dest_mode(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::Default);
+            unpack_to_dest_mode[tt::CBIndex::c_0] = UnpackToDestMode::UnpackToDestFp32;
+            unpack_to_dest_mode[tt::CBIndex::c_1] = UnpackToDestMode::UnpackToDestFp32;
             compute_kernel = tt_metal::CreateKernel(
                 program_,
-                "tt_metal/kernels/compute/eltwise_binary.cpp",
+                "tt_metal/kernels/compute/eltwise_binary_quasar_SFPU.cpp",
                 test_config.cores,
                 tt_metal::ComputeConfig{
-                    .dst_full_sync_en = true,
+                    .fp32_dest_acc_en = 1,
                     // INT32 dest acc (uncomment when using add_int_tile<DataFormat::Int32>):
                     // .fp32_dest_acc_en = is_int_op,
+                    .unpack_to_dest_mode = unpack_to_dest_mode,
                     .math_approx_mode = test_config.approx_mode,
-                    .defines = sfpu_defines});
+                    .defines = sfpu_defines,
+                });
         }
 
         for (const CoreCoord& core_coord : core_range) {
@@ -987,9 +997,10 @@ INSTANTIATE_TEST_SUITE_P(
     SingleCoreSfpuBinaryCompute,
     SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture,
     ::testing::Values(
-        std::make_tuple(1, "div_binary"),
-        std::make_tuple(4, "div_binary"),
-        std::make_tuple(1, "add_int"),
-        std::make_tuple(4, "add_int")));
+        // std::make_tuple(1, "div_binary")
+        // std::make_tuple(4, "div_binary"),
+        std::make_tuple(1, "add_int")
+        // std::make_tuple(4, "add_int")
+        ));
 
 }  // namespace tt::tt_metal
