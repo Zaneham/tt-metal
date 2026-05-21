@@ -6,7 +6,6 @@
 
 #include "ttnn/operations/moreh/moreh_softmax/device/moreh_softmax_device_operation.hpp"
 #include <tt-metalium/tensor_accessor_args.hpp>
-#include "ttnn/cpp/ttnn/kernel_lib/reduce_helpers_host.hpp"
 #include "ttnn/operations/moreh/moreh_helper_functions.hpp"
 
 namespace ttnn::operations::moreh::moreh_softmax {
@@ -94,7 +93,6 @@ MorehSoftmaxOperation::MorehSoftmaxHLargeFactory::create(
         writer_defines);
 
     std::map<std::string, std::string> compute_defines;
-    compute_defines["REDUCE_FORMAT"] = ttnn::kernel_lib::reduce_format_define(data_format);
     if (op == MorehSoftmaxOp::SOFTMAX || op == MorehSoftmaxOp::LOGSOFTMAX) {
         compute_defines["SOFTMAX"] = "1";
     } else {
