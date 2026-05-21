@@ -32,6 +32,7 @@ namespace tt::tt_metal::distributed {
 namespace {
 
 constexpr uint32_t kRemoteCBId = 31;
+constexpr uint32_t kNocMaxBurstSizeBytes = 16 * 1024;
 
 // Bytes reserved above the arena's kernel_working_region_base for noc_xy + config and
 // alignment slack. The remainder of the kernel region is the budget for the two
@@ -156,6 +157,24 @@ std::unique_ptr<Program> build_program(
         num_receivers,
         geoms.empty() ? 0 : geoms.front().dma_block_size / num_receivers,
         stage_budget);
+    TT_FATAL(
+        k_block_w_tiles == 1 || M == 1,
+        "DRAM-core prefetcher only supports num_dma_chunks_per_block > 1 when "
+        "dram_core_k_block_w_tiles == 1. Got dram_core_k_block_w_tiles={} and "
+        "num_dma_chunks_per_block={}. Larger K-blocks need row-strided DMA chunking; "
+        "otherwise receiver slices are not contiguous in the staged DRAM block.",
+        k_block_w_tiles,
+        M);
+    for (const auto& g : geoms) {
+        const uint32_t row_push_size = g.push_page_size / k_block_w_tiles;
+        TT_FATAL(
+            row_push_size <= kNocMaxBurstSizeBytes,
+            "DRAM-core prefetcher row push size ({} B) exceeds the one-packet NoC write "
+            "limit ({} B). Increase num_global_cb_receivers / BENCH_RECV_PER_BANK or "
+            "reduce N_per_bank; larger writes are not split by the DRISC prefetcher.",
+            row_push_size,
+            kNocMaxBurstSizeBytes);
+    }
 
     uint32_t max_chunk_size = 0;
     for (const auto& g : geoms) {
@@ -202,6 +221,7 @@ std::unique_ptr<Program> build_program(
             static_cast<uint32_t>(gcb.buffer_address()),
             static_cast<uint32_t>(experimental::pages_sent_worker_l1_base(gcb)),
             M,
+            k_block_w_tiles,
         };
 
         KernelHandle kernel_id = CreateKernel(

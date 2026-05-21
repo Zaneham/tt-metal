@@ -632,17 +632,18 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
                             recv_per_bank);
                         const uint32_t bytes_per_tile =
                             tt::tile_size(tt::tt_metal::datatype_to_dataformat_converter(input_tensor_b.dtype()));
+                        const uint32_t actual_in0_block_w = weight_K_tiles / ring_size;
                         const uint32_t in1_block_size = static_cast<uint32_t>(
-                            program_config.in0_block_w * program_config.per_core_N * bytes_per_tile);
+                            actual_in0_block_w * program_config.per_core_N * bytes_per_tile);
                         TT_FATAL(
                             in1_block_size > 0 && gcb.size() % in1_block_size == 0,
                             "global_cb size ({} B) must be an exact multiple of in1_block_size ({} = "
-                            "in0_block_w {} * per_core_N {} * bytes_per_tile {}). Otherwise "
+                            "actual_in0_block_w {} * per_core_N {} * bytes_per_tile {}). Otherwise "
                             "remote_cb_wait_front's wrap-adjustment misfires at the layer boundary and "
                             "the receiver waits forever for unsent in1 pages.",
                             gcb.size(),
                             in1_block_size,
-                            program_config.in0_block_w,
+                            actual_in0_block_w,
                             program_config.per_core_N,
                             bytes_per_tile);
                     }

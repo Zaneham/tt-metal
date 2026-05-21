@@ -53,7 +53,9 @@ void kernel_main() {
     constexpr uint32_t receiver_buffer_address = get_compile_time_arg_val(12);
     constexpr uint32_t remote_pages_sent_worker_l1_addr = get_compile_time_arg_val(13);
     constexpr uint32_t num_dma_chunks_per_block = get_compile_time_arg_val(14);  // M
+    constexpr uint32_t k_block_w_tiles = get_compile_time_arg_val(15);
     static_assert(num_dma_chunks_per_block >= 1, "M must be >= 1");
+    static_assert(k_block_w_tiles >= 1, "K-block width must be >= 1 tile");
     constexpr uint32_t num_recv_per_chunk = num_receivers / num_dma_chunks_per_block;
     static_assert(
         num_recv_per_chunk * num_dma_chunks_per_block == num_receivers,
@@ -114,6 +116,7 @@ void kernel_main() {
             const uint32_t bank_local_base = tensor_offsets[t];
             const uint32_t dma_block_size = tensor_dma_sizes[t];
             const uint32_t push_page_size = tensor_push_page_sizes[t];  // = tpr_full * tile_bytes
+            const uint32_t push_row_size = push_page_size / k_block_w_tiles;
             const uint32_t dma_chunk_size = dma_block_size / num_dma_chunks_per_block;
             // push_chunk_size stays at the *full* per-receiver per-K-block slice (push_page_size).
             // With M>1, each push call still pushes push_page_size bytes per receiver, just to a
@@ -176,9 +179,9 @@ void kernel_main() {
                     remote_cb_id,
                     stage_buf,
                     /*num_pages=*/1,
-                    /*num_rows=*/1,
+                    /*num_rows=*/k_block_w_tiles,
                     /*coalesced_num_pages_per_row=*/1,
-                    /*coalesced_page_size=*/push_page_size,
+                    /*coalesced_page_size=*/push_row_size,
                     noc_index);
                 noc_async_posted_writes_flushed();
             }
