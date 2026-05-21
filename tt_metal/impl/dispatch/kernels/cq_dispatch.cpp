@@ -1286,19 +1286,19 @@ re_run_command:
 
         case CQ_DISPATCH_CMD_SINK:
             DPRINT << "cmd_sink" << ENDL();
-            // DEVICE_PRINT("cmd_sink\n");
+            DEVICE_PRINT("cmd_sink\n");
             break;
 
         case CQ_DISPATCH_CMD_DEBUG:
             DPRINT << "cmd_debug" << ENDL();
-            // DEVICE_PRINT("cmd_debug\n");
+            DEVICE_PRINT("cmd_debug\n");
             cmd_ptr = process_debug_cmd(cmd_ptr);
             goto re_run_command;
             break;
 
         case CQ_DISPATCH_CMD_DELAY:
             DPRINT << "cmd_delay" << ENDL();
-            // DEVICE_PRINT("cmd_delay\n");
+            DEVICE_PRINT("cmd_delay\n");
             process_delay_cmd();
             break;
 
