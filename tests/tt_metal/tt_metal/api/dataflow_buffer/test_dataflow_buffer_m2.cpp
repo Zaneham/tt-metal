@@ -96,6 +96,21 @@ static inline TensorSpec make_flat_dram_tensor_spec(uint32_t page_size_bytes, ui
     return TensorSpec(Shape{num_pages, elements_per_page}, tensor_layout);
 }
 
+// Build a single-page L1 INTERLEAVED TensorSpec for use as a borrowed-memory DFB
+// backing tensor. Single page is mandatory: AttachBorrowedDFBBuffers's per-bank
+// size check compares the DFB total (entry_size * num_entries) against the
+// tensor's aligned_size_per_bank(). Multi-page interleaved L1 splits the storage
+// across banks, making each bank's slice smaller than the DFB total → attach
+// fails. Single page = single bank = aligned_size_per_bank equals the whole
+// allocation.
+static inline TensorSpec make_flat_l1_tensor_spec_for_borrow(uint32_t total_bytes) {
+    const uint32_t total_words = total_bytes / sizeof(uint32_t);
+    auto page_config = PageConfig(Layout::ROW_MAJOR);
+    auto memory_config = MemoryConfig{TensorMemoryLayout::INTERLEAVED, BufferType::L1};
+    auto tensor_layout = TensorLayout(DataType::UINT32, page_config, memory_config);
+    return TensorSpec(Shape{1, total_words}, tensor_layout);
+}
+
 // Build a Gen2 DM KernelSpec.
 static inline m2::KernelSpec make_dm_kernel(
     const std::string& unique_id, const std::string& source_path, uint8_t num_threads = 1) {
@@ -1525,6 +1540,288 @@ TEST_P(DFBImplicitSyncParamFixture_M2, DMTest4xDFB_1Sx1S_M2) {
         /*entry_size=*/1024,
         /*entries_per_dfb=*/16,
         GetParam());
+}
+
+// =====================================================================================
+// Alias_M2: post-rebase coverage — DFB aliasing (b90824df5c8 + a7fe8d7c174).
+//
+// Two (or more) DFBs declare each other in `alias_with`; the allocator picks
+// a single L1 address and propagates it to every secondary. The DFBs are still
+// logically distinct (own credits, own counters, own bindings) — only the
+// backing L1 region is shared. Safety requires temporal disjointness in the
+// kernel: phase A drains DFB_A end-to-end, then phase B uses DFB_B over the
+// same L1.
+//
+// Validation rules (all in program_spec.cpp):
+//   - Strict-clique: every member must list every other member (transitivity).
+//   - Same total size (entry_size * num_entries) across the group.
+//   - Same node-set coverage across the group's WorkUnits.
+//   - Consistent borrowed_from (either all borrow, or none).
+// All members must use disable_implicit_sync=true (alias kernels are explicit
+// credit-flow only; no implicit_sync CTA in alias_dfb_*.cpp).
+// =====================================================================================
+
+// AliasDFB_M2: simplest case — assert allocator gives both aliased DFBs the
+// same L1 base after MakeProgramFromSpec + finalize/allocate. No kernel launch.
+TEST_F(MeshDeviceFixture, AliasDFB_M2_AddressEquality_1Sx1S) {
+    auto& mesh_device = this->devices_.at(0);
+    if (mesh_device->get_devices()[0]->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "M2 path is Quasar-only (Gen2DataMovementConfig)";
+    }
+
+    constexpr uint32_t entry_size_a = 512;
+    constexpr uint32_t num_entries_a = 8;
+    constexpr uint32_t entry_size_b = 256;
+    constexpr uint32_t num_entries_b = 16;  // 512*8 == 256*16 == 4096 B (same-total-size rule)
+    const m2::NodeCoord node{0, 0};
+
+    constexpr const char* DFB_A = "dfb_a";
+    constexpr const char* DFB_B = "dfb_b";
+    constexpr const char* PRODUCER = "producer";
+    constexpr const char* CONSUMER = "consumer";
+    constexpr const char* IN_TENSOR_A = "in_tensor_a";
+    constexpr const char* IN_TENSOR_B = "in_tensor_b";
+    constexpr const char* OUT_TENSOR_A = "out_tensor_a";
+    constexpr const char* OUT_TENSOR_B = "out_tensor_b";
+
+    const auto spec_a = make_flat_dram_tensor_spec(entry_size_a, num_entries_a, DataType::UINT32);
+    const auto spec_b = make_flat_dram_tensor_spec(entry_size_b, num_entries_b, DataType::UINT32);
+    auto in_a = MeshTensor::allocate_on_device(*mesh_device, spec_a, TensorTopology{});
+    auto in_b = MeshTensor::allocate_on_device(*mesh_device, spec_b, TensorTopology{});
+    auto out_a = MeshTensor::allocate_on_device(*mesh_device, spec_a, TensorTopology{});
+    auto out_b = MeshTensor::allocate_on_device(*mesh_device, spec_b, TensorTopology{});
+
+    // Strict-clique rule: each spec must list the other in alias_with.
+    m2::DataflowBufferSpec dfb_a{
+        .unique_id = DFB_A,
+        .entry_size = entry_size_a,
+        .num_entries = num_entries_a,
+        .data_format_metadata = tt::DataFormat::Float16_b,
+        .alias_with = {DFB_B},
+        .disable_implicit_sync = true,
+    };
+    m2::DataflowBufferSpec dfb_b{
+        .unique_id = DFB_B,
+        .entry_size = entry_size_b,
+        .num_entries = num_entries_b,
+        .data_format_metadata = tt::DataFormat::Float16_b,
+        .alias_with = {DFB_A},
+        .disable_implicit_sync = true,
+    };
+
+    auto producer = make_dm_kernel(PRODUCER, "tests/tt_metal/tt_metal/test_kernels/dataflow/alias_dfb_producer.cpp");
+    producer.dfb_bindings = {
+        {.dfb_spec_name = DFB_A,
+         .local_accessor_name = "out_a",
+         .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+         .access_pattern = m2::DFBAccessPattern::STRIDED},
+        {.dfb_spec_name = DFB_B,
+         .local_accessor_name = "out_b",
+         .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+         .access_pattern = m2::DFBAccessPattern::STRIDED},
+    };
+    producer.tensor_bindings = {
+        {.tensor_parameter_name = IN_TENSOR_A, .accessor_name = "src_a"},
+        {.tensor_parameter_name = IN_TENSOR_B, .accessor_name = "src_b"},
+    };
+    producer.compile_time_arg_bindings = {
+        {"num_entries_per_producer_a", num_entries_a},
+        {"num_entries_per_producer_b", num_entries_b},
+        {"num_producers", 1u},
+    };
+    producer.runtime_arguments_schema = {
+        .named_runtime_args = {"chunk_offset_a", "chunk_offset_b", "entries_per_core_a", "entries_per_core_b"}};
+
+    auto consumer = make_dm_kernel(CONSUMER, "tests/tt_metal/tt_metal/test_kernels/dataflow/alias_dfb_consumer.cpp");
+    consumer.dfb_bindings = {
+        {.dfb_spec_name = DFB_A,
+         .local_accessor_name = "in_a",
+         .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+         .access_pattern = m2::DFBAccessPattern::STRIDED},
+        {.dfb_spec_name = DFB_B,
+         .local_accessor_name = "in_b",
+         .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+         .access_pattern = m2::DFBAccessPattern::STRIDED},
+    };
+    consumer.tensor_bindings = {
+        {.tensor_parameter_name = OUT_TENSOR_A, .accessor_name = "dst_a"},
+        {.tensor_parameter_name = OUT_TENSOR_B, .accessor_name = "dst_b"},
+    };
+    consumer.compile_time_arg_bindings = {
+        {"num_entries_per_consumer_a", num_entries_a},
+        {"num_entries_per_consumer_b", num_entries_b},
+        {"num_consumers", 1u},
+    };
+    consumer.runtime_arguments_schema = {
+        .named_runtime_args = {"chunk_offset_a", "chunk_offset_b", "entries_per_core_a", "entries_per_core_b"}};
+
+    m2::ProgramSpec spec{
+        .program_id = "alias_addr_eq_m2",
+        .kernels = {producer, consumer},
+        .dataflow_buffers = {dfb_a, dfb_b},  // dfb_a first → primary
+        .tensor_parameters =
+            {
+                {.unique_id = IN_TENSOR_A, .spec = spec_a},
+                {.unique_id = IN_TENSOR_B, .spec = spec_b},
+                {.unique_id = OUT_TENSOR_A, .spec = spec_a},
+                {.unique_id = OUT_TENSOR_B, .spec = spec_b},
+            },
+        .work_units = {m2::WorkUnitSpec{
+            .unique_id = "wu",
+            .kernels = {PRODUCER, CONSUMER},
+            .target_nodes = node,
+        }},
+    };
+
+    Program program = m2::MakeProgramFromSpec(*mesh_device, spec);
+    // Trigger DFB finalize+allocate without launching kernels — uniform_alloc_addr
+    // is populated by allocate_dataflow_buffers, which alias-propagation runs inside.
+    IDevice* device = mesh_device->get_devices()[0];
+    detail::CompileProgram(device, program);
+    program.impl().finalize_dataflow_buffer_configs();
+    program.impl().allocate_dataflow_buffers(device);
+
+    const uint32_t id_a = program.impl().get_dfb_handle(DFB_A);
+    const uint32_t id_b = program.impl().get_dfb_handle(DFB_B);
+    const uint32_t addr_a = program.impl().get_dataflow_buffer(id_a)->uniform_alloc_addr();
+    const uint32_t addr_b = program.impl().get_dataflow_buffer(id_b)->uniform_alloc_addr();
+
+    EXPECT_EQ(addr_a, addr_b) << "M2: aliased DFBs must share the same L1 base address";
+    log_info(tt::LogTest, "AliasDFB_M2_AddressEquality_1Sx1S: addr_a=0x{:x}  addr_b=0x{:x}", addr_a, addr_b);
+}
+
+// =====================================================================================
+// BorrowedMem_M2: post-rebase coverage — DFB "from borrowed memory" (f06cb279620).
+//
+// The DFB's L1 storage is borrowed from a user-managed L1-resident MeshTensor
+// instead of being allocated by Metal. The address is patched in at
+// SetProgramRunParameters time. Useful when the DFB ring is also visible to
+// non-DFB code (e.g. host pre-fill). Legacy equivalent = dynamic CB.
+//
+// Constraints (per program_spec.cpp / program_run_params.cpp):
+//   - borrowed_from must name a real TensorParameter with BufferType::L1.
+//   - L1 tensor must be single-page so aligned_size_per_bank == total bytes;
+//     multi-page interleaved L1 splits across banks and fails the per-bank
+//     size check at attach time.
+//   - The L1 tensor MUST be bound to >=1 kernel (TensorParameter validation
+//     requires it). The kernel doesn't have to read it — we use a no-op
+//     binding to a ta::dfb_ring slot declared in the variant producer kernel.
+//   - Alias-group rule: all members of an alias group must agree on borrowed_from.
+// =====================================================================================
+
+// BorrowedMem_M2: baseline DM→DFB→DM identity over a borrowed L1 ring.
+TEST_F(MeshDeviceFixture, BorrowedMem_M2_DMDM_1Sx1S_Identity) {
+    auto& mesh_device = this->devices_.at(0);
+    if (mesh_device->get_devices()[0]->arch() != ARCH::QUASAR) {
+        GTEST_SKIP() << "M2 path is Quasar-only (Gen2DataMovementConfig)";
+    }
+    IDevice* device = mesh_device->get_devices()[0];
+
+    constexpr uint32_t entry_size = 256;
+    constexpr uint32_t num_entries = 16;
+    constexpr uint32_t total_bytes = entry_size * num_entries;
+    const m2::NodeCoord node{0, 0};
+
+    constexpr const char* DFB = "borrowed_dfb";
+    constexpr const char* PRODUCER = "producer";
+    constexpr const char* CONSUMER = "consumer";
+    constexpr const char* SRC_T = "src_tensor";
+    constexpr const char* DST_T = "dst_tensor";
+    constexpr const char* RING_T = "dfb_ring_tensor";
+
+    const auto src_spec = make_flat_dram_tensor_spec(entry_size, num_entries, DataType::UINT32);
+    const auto dst_spec = make_flat_dram_tensor_spec(entry_size, num_entries, DataType::UINT32);
+    const auto ring_spec = make_flat_l1_tensor_spec_for_borrow(total_bytes);
+    auto src_tensor = MeshTensor::allocate_on_device(*mesh_device, src_spec, TensorTopology{});
+    auto dst_tensor = MeshTensor::allocate_on_device(*mesh_device, dst_spec, TensorTopology{});
+    auto ring_tensor = MeshTensor::allocate_on_device(*mesh_device, ring_spec, TensorTopology{});
+
+    m2::DataflowBufferSpec dfb{
+        .unique_id = DFB,
+        .entry_size = entry_size,
+        .num_entries = num_entries,
+        .data_format_metadata = tt::DataFormat::Float16_b,
+        .borrowed_from = RING_T,
+        .disable_implicit_sync = true,
+    };
+
+    // Producer is the ring-binding variant: declares ta::dfb_ring as no-op so the
+    // ring tensor can be bound (every TensorParameter must be bound to >=1 kernel).
+    auto producer =
+        make_dm_kernel(PRODUCER, "tests/tt_metal/tt_metal/test_kernels/dataflow/m2/dfb_producer_with_ring_binding.cpp");
+    producer.dfb_bindings = {
+        {.dfb_spec_name = DFB,
+         .local_accessor_name = "out",
+         .endpoint_type = m2::KernelSpec::DFBEndpointType::PRODUCER,
+         .access_pattern = m2::DFBAccessPattern::STRIDED}};
+    producer.tensor_bindings = {
+        {.tensor_parameter_name = SRC_T, .accessor_name = "src_tensor"},
+        {.tensor_parameter_name = RING_T, .accessor_name = "dfb_ring"},  // no-op
+    };
+    producer.compile_time_arg_bindings = {{"num_entries_per_producer", num_entries}, {"implicit_sync", 0u}};
+    producer.runtime_arguments_schema = {.named_runtime_args = {"chunk_offset", "entries_per_core"}};
+
+    auto consumer = make_dm_kernel(CONSUMER, "tests/tt_metal/tt_metal/test_kernels/dataflow/m2/dfb_consumer.cpp");
+    consumer.dfb_bindings = {
+        {.dfb_spec_name = DFB,
+         .local_accessor_name = "in",
+         .endpoint_type = m2::KernelSpec::DFBEndpointType::CONSUMER,
+         .access_pattern = m2::DFBAccessPattern::STRIDED}};
+    consumer.tensor_bindings = {{.tensor_parameter_name = DST_T, .accessor_name = "dst_tensor"}};
+    consumer.compile_time_arg_bindings = {
+        {"num_entries_per_consumer", num_entries}, {"blocked_consumer", 0u}, {"implicit_sync", 0u}};
+    consumer.runtime_arguments_schema = {.named_runtime_args = {"chunk_offset", "entries_per_core"}};
+
+    m2::ProgramSpec spec{
+        .program_id = "borrowed_dfb_m2",
+        .kernels = {producer, consumer},
+        .dataflow_buffers = {dfb},
+        .tensor_parameters =
+            {
+                {.unique_id = SRC_T, .spec = src_spec},
+                {.unique_id = DST_T, .spec = dst_spec},
+                {.unique_id = RING_T, .spec = ring_spec},
+            },
+        .work_units = {m2::WorkUnitSpec{
+            .unique_id = "wu",
+            .kernels = {PRODUCER, CONSUMER},
+            .target_nodes = node,
+        }},
+    };
+
+    Program program = m2::MakeProgramFromSpec(*mesh_device, spec);
+
+    m2::ProgramRunParams params;
+    params.kernel_run_params = {
+        {.kernel_spec_name = PRODUCER,
+         .named_runtime_args = {{.node = node, .args = {{"chunk_offset", 0u}, {"entries_per_core", num_entries}}}}},
+        {.kernel_spec_name = CONSUMER,
+         .named_runtime_args = {{.node = node, .args = {{"chunk_offset", 0u}, {"entries_per_core", num_entries}}}}},
+    };
+    params.tensor_args = {
+        {.tensor_parameter_name = SRC_T, .tensor = std::cref(src_tensor)},
+        {.tensor_parameter_name = DST_T, .tensor = std::cref(dst_tensor)},
+        {.tensor_parameter_name = RING_T, .tensor = std::cref(ring_tensor)},
+    };
+    m2::SetProgramRunParameters(program, params);
+
+    // Stimulus (DRAM src) + Quasar emu WriteShard barrier (#38042).
+    const uint32_t total_words = total_bytes / sizeof(uint32_t);
+    std::vector<uint32_t> input(total_words);
+    std::iota(input.begin(), input.end(), 0u);
+    detail::WriteToBuffer(*src_tensor.mesh_buffer().get_reference_buffer(), input);
+    m2_writeshard_barrier_uint32(device, src_tensor, input);
+
+    detail::LaunchProgram(device, program, /*wait_until_cores_done=*/true);
+
+    // Defining property of borrowed memory: the DFB's L1 base address must
+    // equal the bound L1 ring tensor's address.
+    EXPECT_EQ(program.impl().dataflow_buffers()[0]->uniform_alloc_addr(), static_cast<uint32_t>(ring_tensor.address()))
+        << "M2 borrowed DFB must be allocated at the ring tensor's L1 address";
+
+    std::vector<uint32_t> output;
+    detail::ReadFromBuffer(*dst_tensor.mesh_buffer().get_reference_buffer(), output);
+    EXPECT_EQ(input, output) << "M2 borrowed-DFB identity mismatch";
 }
 
 }  // namespace tt::tt_metal
