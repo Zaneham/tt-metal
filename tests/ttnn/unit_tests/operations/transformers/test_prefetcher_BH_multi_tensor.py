@@ -76,7 +76,8 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
     if arch is not None and "BLACKHOLE" not in str(arch).upper():
         pytest.skip("DRAM-core prefetcher requires Blackhole")
 
-    ttnn.device.enable_asynchronous_slow_dispatch(device)
+    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
+        ttnn.device.enable_asynchronous_slow_dispatch(device)
 
     # Query the chip's actual DRAM bank count so the test adapts to harvested BHs
     # (P100 has 7, P150/P300 have 8). The receiver grid is laid out as

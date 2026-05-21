@@ -109,7 +109,8 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     if arch is not None and "BLACKHOLE" not in str(arch).upper():
         pytest.skip("DRAM-core prefetcher matmul requires Blackhole")
 
-    ttnn.device.enable_asynchronous_slow_dispatch(device)
+    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
+        ttnn.device.enable_asynchronous_slow_dispatch(device)
 
     # ---- Topology (queries DRAM bank count so the test adapts to harvested BHs) ----
     num_dram_banks = device.dram_grid_size().x

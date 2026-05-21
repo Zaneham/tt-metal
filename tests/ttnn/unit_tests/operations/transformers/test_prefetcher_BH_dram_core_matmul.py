@@ -39,7 +39,8 @@ def test_dram_core_prefetcher_matmul(device):
     # Async slow dispatch: the prefetcher (DRISC cores) and matmul (worker cores) live on
     # disjoint programmable-core types, so the SD CQ will launch them concurrently and only
     # serialize when their core sets intersect.
-    ttnn.device.enable_asynchronous_slow_dispatch(device)
+    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
+        ttnn.device.enable_asynchronous_slow_dispatch(device)
 
     # ---- Topology: 2 DRAM bank senders → 2 worker receivers each ----
     num_dram_banks = 2

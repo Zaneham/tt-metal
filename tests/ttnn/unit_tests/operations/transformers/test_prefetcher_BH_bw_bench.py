@@ -151,7 +151,8 @@ def test_bw_dram_core_prefetcher(device):
     if arch is not None and "BLACKHOLE" not in str(arch).upper():
         pytest.skip("DRAM-core prefetcher requires Blackhole")
 
-    ttnn.device.enable_asynchronous_slow_dispatch(device)
+    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
+        ttnn.device.enable_asynchronous_slow_dispatch(device)
 
     # Query DRAM bank count so the bench runs on harvested BHs (P100 has 7 banks).
     num_dram_banks = device.dram_grid_size().x
@@ -223,7 +224,8 @@ def test_bw_workercore_prefetcher(device):
     if arch is not None and "BLACKHOLE" not in str(arch).upper():
         pytest.skip("Bench tuned for Blackhole topology")
 
-    ttnn.device.enable_asynchronous_slow_dispatch(device)
+    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
+        ttnn.device.enable_asynchronous_slow_dispatch(device)
 
     # Worker-core path is out of scope for the harvested-card adaptation; keep
     # the unharvested _NUM_BANKS=8 baseline so the bench numbers stay comparable
