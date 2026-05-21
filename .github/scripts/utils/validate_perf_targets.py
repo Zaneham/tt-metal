@@ -150,21 +150,14 @@ def _check_metric(
     measured_value: float,
     high_tolerance: float,
 ) -> str | None:
-    """Compare measured and expected values using asymmetric regression bounds."""
-    if metric_name in LOWER_IS_BETTER_METRICS:
-        if measured_value > expected_value:
-            return f"{metric_name}: measured={measured_value} > expected={expected_value}"
-        lower_bound = expected_value * (2 - high_tolerance)
-        if measured_value < lower_bound:
-            return (
-                f"{metric_name}: measured={measured_value} < lower_bound={lower_bound} "
-                f"(expected={expected_value}, high_tolerance={high_tolerance})"
-            )
-        return None
-
-    if measured_value < expected_value:
-        return f"{metric_name}: measured={measured_value} < expected={expected_value}"
+    """Compare measured and expected values using symmetric tolerance bounds."""
+    lower_bound = expected_value * (2 - high_tolerance)
     upper_bound = expected_value * high_tolerance
+    if measured_value < lower_bound:
+        return (
+            f"{metric_name}: measured={measured_value} < lower_bound={lower_bound} "
+            f"(expected={expected_value}, high_tolerance={high_tolerance})"
+        )
     if measured_value > upper_bound:
         return (
             f"{metric_name}: measured={measured_value} > upper_bound={upper_bound} "

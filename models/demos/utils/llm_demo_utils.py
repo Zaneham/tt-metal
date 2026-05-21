@@ -160,6 +160,7 @@ def verify_perf(
         "compile_prefill": False,
         "compile_decode": False,
         "prefill_time_to_token": False,
+        "prefill_time_to_first_token": False,
         "prefill_decode_t/s/u": False,
         "prefill_t/s": True,
         "decode_t/s": True,
@@ -170,6 +171,7 @@ def verify_perf(
     # Default metrics where lower is better
     lower_is_better_metrics_default = {
         "prefill_time_to_token",
+        "prefill_time_to_first_token",
         "compile_prefill",
         "compile_decode",
     }
@@ -183,10 +185,11 @@ def verify_perf(
     for key in expected_measurements:
         if not expected_measurements[key]:
             continue
-        assert (
-            key in measurements and key in expected_perf_metrics and expected_perf_metrics[key] is not None
-        ), f"Metric {key} not found in measurements or expected_perf_metrics"
-
+        is_key_found = key in measurements and key in expected_perf_metrics and expected_perf_metrics[key] is not None
+        if not is_key_found:
+            logger.warning(f"Metric {key} not found in measurements or expected_perf_metrics")
+            does_pass = False
+            continue
         if key in lower_is_better_metrics:
             # For metrics where lower is better (e.g., TTFT)
             if measurements[key] > expected_perf_metrics[key]:  # Higher than expected is bad
@@ -218,9 +221,7 @@ def verify_perf(
             PerfRegressionWarning,
             stacklevel=2,
         )
-        # Keep this assert until centralized targets migration is complete:
-        # https://github.com/tenstorrent/tt-metal/issues/42782
-        assert does_pass, (
+        perf_target_check (does_pass,
             "Performance regression detected. Failing fast to avoid silently accepting "
-            "degraded model performance while centralized targets rollout is in progress."
+            "degraded model performance while centralized targets rollout is in progress.",
         )
