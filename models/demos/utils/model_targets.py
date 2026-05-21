@@ -20,7 +20,13 @@ _SKU_ALIASES = {
     "wh_n300": {"wh_n300", "n300"},
     "wh_llmbox_perf": {"wh_llmbox_perf", "t3k"},
     "wh_galaxy_perf": {"wh_galaxy_perf", "tg", "glx", "bhglx"},
-    "blackhole": {"blackhole", "bh", "p150", "p300", "p150x8"},
+    "bh_p100": {"bh_p100", "p100"},
+    "bh_p150": {"bh_p150", "p150"},
+    "bh_p300": {"bh_p300", "p300"},
+    "bh_loudbox": {"bh_loudbox", "p150x8"},
+    "bh_quietbox_2": {"bh_quietbox_2", "p300x2"},
+    "bh_galaxy_perf": {"bh_galaxy_perf"},
+    "blackhole": {"blackhole", "bh"},
 }
 
 

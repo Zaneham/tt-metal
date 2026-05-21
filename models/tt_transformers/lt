@@ -1511,27 +1511,29 @@ def export_results_to_markdown(output_entries, stdscr):
     # Check if any entry came from a JSON config
     used_json = any("json" in entry.command_name for entry in output_entries)
 
-    # Only update PERF.md and display it if not using JSON
+    # Only update markdown report and display it if not using JSON
     if not used_json:
-        with open("PERF.md", "w") as f:
+        report_path = os.path.join("generated", "perf_reports", "tt_transformers_perf_table.md")
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w") as f:
             f.write("\n".join(markdown_lines) + "\n")
 
         # Clear screen and show message
         stdscr.clear()
 
-        # display 'PERF.md' using less
+        # display generated markdown report using less
         # Save current terminal state
         curses.def_prog_mode()
         # Exit curses temporaril
         curses.endwin()
         # Run less command
-        os.system(f"less -R PERF.md")
+        os.system(f"less -R {report_path}")
         # Resume curses
         curses.reset_prog_mode()
         stdscr.refresh()
 
         # display helpful message at the bottom of the screen
-        stdscr.addstr(0, 0, f"Table written to {os.path.abspath('PERF.md')}")
+        stdscr.addstr(0, 0, f"Table written to {os.path.abspath(report_path)}")
     else:
         stdscr.clear()
 
