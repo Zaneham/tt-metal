@@ -563,13 +563,9 @@ def comp_pcc(golden, calculated, pcc=0.99):
         golden = golden.type(torch.float32)
         calculated = calculated.type(torch.float32)
 
-    # Single element case
-    if golden.numel() == 1:
-        return torch.equal(golden, calculated), float(torch.equal(golden, calculated))
-
-    # If both tensors are constant
+    # If both tensors are constant (also covers single-element tensors, where max == min trivially).
     if torch.max(golden) == torch.min(golden) and torch.max(calculated) == torch.min(calculated):
-        result = torch.isclose(torch.max(golden), torch.max(calculated)).item()
+        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
         return result, 1.0 if result else 0.0
 
     # If only one tensor is constant, PCC is mathematically undefined (zero std dev).
