@@ -91,6 +91,36 @@ void py_module(nb::module_& mod) {
                 size: Per-receiver fifo size in bytes.
                 buffer_type: Buffer type (L1 or L1_SMALL).
             )doc");
+
+    mod.def(
+        "create_global_circular_buffer_for_matmul_1d",
+        &ttnn::global_circular_buffer::create_global_circular_buffer_for_matmul_1d,
+        nb::keep_alive<0, 1>(),
+        nb::arg("mesh_device"),
+        nb::arg("program_config"),
+        nb::arg("weight"),
+        nb::arg("num_buffered_blocks") = 4,
+        nb::arg("buffer_type") = tt::tt_metal::BufferType::L1,
+        R"doc(
+            Build a DRAM-sender GlobalCircularBuffer sized to feed a 1D ring matmul
+            (gather_in0=true) with the given weight tensor. Size, page stride, and the
+            receiver-to-bank rectangle are derived from the matmul's program config so
+            host-side alignment checks fire as TT_FATAL at construction rather than as a
+            silent device hang during ttnn.linear.
+
+            Validates that:
+              * weight K is tile-aligned AND divisible by ring_size (no activation padding past K),
+              * weight N shards evenly across DRAM banks and per-bank N splits evenly across
+                num_global_cb_receivers,
+              * matmul per_core_N == weight per-receiver N.
+
+            Args:
+                mesh_device: The mesh device.
+                program_config: The 1D mcast matmul program config (must have gather_in0=True).
+                weight: The DRAM-sharded in1 tensor (full K per bank, sharded across N).
+                num_buffered_blocks: How many in1 blocks fit per receiver in the GCB ring.
+                buffer_type: Buffer type (L1 or L1_SMALL).
+            )doc");
 }
 
 }  // namespace ttnn::global_circular_buffer

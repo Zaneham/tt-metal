@@ -161,6 +161,7 @@ from ttnn._ttnn.operations.debug import (
 
 from ttnn._ttnn.global_circular_buffer import (
     create_global_circular_buffer,
+    create_global_circular_buffer_for_matmul_1d,
     create_global_circular_buffer_with_dram_senders,
 )
 

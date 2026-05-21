@@ -517,6 +517,80 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
                             "Num global CB receivers must be 1 when global CB is not provided.");
                     }
 
+                    // Cross-validate the global_cb's geometry against matmul + weight shape.
+                    // These catch silent-hang configs where the matmul reads more in1 pages
+                    // than the prefetcher pushes (e.g. activation K padded past weight K), or
+                    // the GCB fifo wrap-adjustment math misfires.
+                    if (attributes.global_cb.has_value() && input_tensor_a.is_sharded()) {
+                        const auto& gcb = attributes.global_cb.value();
+                        const uint32_t ring_size = input_tensor_a.shard_spec().value().grid.num_cores();
+                        const uint32_t weight_K_tiles = b_shape_padded[-2] / in1_tile.get_height();
+                        const uint32_t weight_N_tiles = b_shape_padded[-1] / in1_tile.get_width();
+                        const uint32_t num_senders = gcb.sender_cores().num_cores();
+                        const uint32_t num_recv = gcb.receiver_cores().num_cores();
+                        const uint32_t recv_per_bank = static_cast<uint32_t>(program_config.num_global_cb_receivers);
+
+                        TT_FATAL(
+                            num_senders > 0 && num_recv == num_senders * recv_per_bank,
+                            "global_cb receiver count ({}) must equal num_senders ({}) * "
+                            "num_global_cb_receivers ({})",
+                            num_recv,
+                            num_senders,
+                            recv_per_bank);
+                        TT_FATAL(
+                            num_recv == ring_size,
+                            "global_cb receiver count ({}) must equal in0 (activation) ring_size "
+                            "({} = num_cores of in0.shard_spec.grid). Receivers and matmul workers "
+                            "must be the same set of cores.",
+                            num_recv,
+                            ring_size);
+                        TT_FATAL(
+                            weight_K_tiles % ring_size == 0,
+                            "Weight K must be divisible by ring_size in tiles for gather_in0 + global_cb. "
+                            "Got weight_K_tiles={}, ring_size={} (remainder={}). The activation grid would "
+                            "pad K past the weight K, and the matmul would wait forever for in1 pages the "
+                            "prefetcher never pushes.",
+                            weight_K_tiles,
+                            ring_size,
+                            weight_K_tiles % ring_size);
+                        TT_FATAL(
+                            weight_N_tiles % num_senders == 0,
+                            "Weight N ({} tiles) must be divisible by num_senders ({}) so it shards "
+                            "evenly across the DRAM banks the global_cb senders cover",
+                            weight_N_tiles,
+                            num_senders);
+                        const uint32_t per_bank_N_tiles = weight_N_tiles / num_senders;
+                        TT_FATAL(
+                            per_bank_N_tiles % recv_per_bank == 0,
+                            "Weight per-bank N ({} tiles) must be divisible by num_global_cb_receivers ({})",
+                            per_bank_N_tiles,
+                            recv_per_bank);
+                        const uint32_t per_recv_N_tiles = per_bank_N_tiles / recv_per_bank;
+                        TT_FATAL(
+                            per_recv_N_tiles == program_config.per_core_N,
+                            "Matmul per_core_N ({}) must equal weight per-receiver N ({} = per_bank_N_tiles {} "
+                            "/ num_global_cb_receivers {})",
+                            program_config.per_core_N,
+                            per_recv_N_tiles,
+                            per_bank_N_tiles,
+                            recv_per_bank);
+                        const uint32_t bytes_per_tile =
+                            tt::tile_size(tt::tt_metal::datatype_to_dataformat_converter(input_tensor_b.dtype()));
+                        const uint32_t in1_block_size = static_cast<uint32_t>(
+                            program_config.in0_block_w * program_config.per_core_N * bytes_per_tile);
+                        TT_FATAL(
+                            in1_block_size > 0 && gcb.size() % in1_block_size == 0,
+                            "global_cb size ({} B) must be an exact multiple of in1_block_size ({} = "
+                            "in0_block_w {} * per_core_N {} * bytes_per_tile {}). Otherwise "
+                            "remote_cb_wait_front's wrap-adjustment misfires at the layer boundary and "
+                            "the receiver waits forever for unsent in1 pages.",
+                            gcb.size(),
+                            in1_block_size,
+                            program_config.in0_block_w,
+                            program_config.per_core_N,
+                            bytes_per_tile);
+                    }
+
                     TT_FATAL(!optional_bias.has_value(), "Bias is not supported when using gather_in0.");
                 } else {
                     // Checks specific to non-gather configs
