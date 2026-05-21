@@ -97,28 +97,34 @@ void py_module(nb::module_& mod) {
         &ttnn::global_circular_buffer::create_global_circular_buffer_for_matmul_1d,
         nb::keep_alive<0, 1>(),
         nb::arg("mesh_device"),
-        nb::arg("program_config"),
-        nb::arg("weight"),
+        nb::arg("program_configs"),
+        nb::arg("weights"),
         nb::arg("num_buffered_blocks") = 4,
         nb::arg("buffer_type") = tt::tt_metal::BufferType::L1,
         R"doc(
-            Build a DRAM-sender GlobalCircularBuffer sized to feed a 1D ring matmul
-            (gather_in0=true) with the given weight tensor. Size, page stride, and the
-            receiver-to-bank rectangle are derived from the matmul's program config so
+            Build a DRAM-sender GlobalCircularBuffer sized to feed one or more 1D ring matmuls
+            (gather_in0=true) with their weight tensors. Size, page stride, and the
+            receiver-to-bank rectangle are derived from the matmul program configs so
             host-side alignment checks fire as TT_FATAL at construction rather than as a
             silent device hang during ttnn.linear.
 
-            Validates that:
+            One (program_config, weight) pair per matmul. The production pattern (e.g. llama 70B)
+            is to share a single GCB across XQKV/WO/FF1/FF2, where each consumer has a different
+            in1_block_size. The GCB size is picked as a multiple of LCM(in1_block_size for each
+            matmul) so the wrap-adjustment math stays consistent for every consumer.
+
+            Validates per matmul:
               * weight K is tile-aligned AND divisible by ring_size (no activation padding past K),
               * weight N shards evenly across DRAM banks and per-bank N splits evenly across
                 num_global_cb_receivers,
               * matmul per_core_N == weight per-receiver N.
+            All configs must agree on compute_with_storage_grid_size and num_global_cb_receivers.
 
             Args:
                 mesh_device: The mesh device.
-                program_config: The 1D mcast matmul program config (must have gather_in0=True).
-                weight: The DRAM-sharded in1 tensor (full K per bank, sharded across N).
-                num_buffered_blocks: How many in1 blocks fit per receiver in the GCB ring.
+                program_configs: List of 1D mcast matmul program configs (each gather_in0=True).
+                weights: List of DRAM-sharded in1 tensors, one per program_config.
+                num_buffered_blocks: How many of the largest in1 block fit per receiver in the GCB ring.
                 buffer_type: Buffer type (L1 or L1_SMALL).
             )doc");
 }

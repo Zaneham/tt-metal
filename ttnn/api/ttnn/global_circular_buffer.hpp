@@ -36,22 +36,29 @@ GlobalCircularBuffer create_global_circular_buffer_with_dram_senders(
     uint32_t size,
     BufferType buffer_type = BufferType::L1);
 
-// Build a DRAM-sender GCB shaped to feed a 1D ring matmul (gather_in0=true) with the
-// given weight tensor, with size/page-stride/receiver-layout derived from the matmul's
-// program config. The receiver rectangle is laid out as `num_dram_banks` columns x
-// `num_global_cb_receivers` rows starting at (0, 0); bank `b` owns the b-th contiguous
-// stride of `num_global_cb_receivers` cores in row-major order.
+// Build a DRAM-sender GCB shaped to feed one or more 1D ring matmuls (gather_in0=true)
+// from the given weight tensors. The receiver rectangle is laid out as `num_dram_banks`
+// columns x `num_global_cb_receivers` rows starting at (0, 0); bank `b` owns the b-th
+// contiguous stride of `num_global_cb_receivers` cores in row-major order.
 //
-// Validates: weight K is tile-aligned AND divisible by ring_size (so activation
-// K_per_shard is integer-tile, the silent-hang case where matmul pads K beyond what
-// the prefetcher pushes); weight N shards evenly across DRAM banks and per-bank N
-// splits evenly across receivers; matmul's per_core_N matches the weight per-receiver N.
+// One (program_config, weight) pair per matmul. Each pair is validated independently:
+//   * weight K is tile-aligned AND divisible by ring_size (so activation K_per_shard is
+//     integer-tile, the silent-hang case where matmul pads K beyond what the prefetcher
+//     pushes),
+//   * weight N shards evenly across DRAM banks and per-bank N splits evenly across
+//     receivers,
+//   * matmul's per_core_N matches the weight per-receiver N.
+// All configs must agree on compute_with_storage_grid_size and num_global_cb_receivers
+// (the GCB has one receiver rectangle shared across all consumer matmuls).
 //
-// `num_buffered_blocks` controls how many in1 blocks fit in the GCB ring per receiver.
+// `gcb_size` is picked as a multiple of LCM(in1_block_size for each config), large enough
+// to buffer the biggest matmul's `num_buffered_blocks` worth of in1 (matches the production
+// llama-70B pattern where a single GCB feeds XQKV/WO/FF1/FF2 with different in1_block sizes
+// and the GCB size is a common multiple of all of them).
 GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     MeshDevice* mesh_device,
-    const ttnn::operations::matmul::MatmulMultiCoreReuseMultiCast1DProgramConfig& program_config,
-    const tt::tt_metal::Tensor& weight,
+    const std::vector<ttnn::operations::matmul::MatmulMultiCoreReuseMultiCast1DProgramConfig>& program_configs,
+    const std::vector<tt::tt_metal::Tensor>& weights,
     uint32_t num_buffered_blocks = 4,
     BufferType buffer_type = BufferType::L1);
 
