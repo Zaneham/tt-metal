@@ -6,6 +6,7 @@
 #include "ttnn/tensor/tensor_ops.hpp"
 #include "ttnn/operations/matmul/device/config/matmul_program_config.hpp"
 #include "ttnn/operations/matmul/device/utilities/matmul_utilities.hpp"
+#include "tt-metalium/experimental/global_circular_buffer.hpp"
 #include "tt-metalium/work_split.hpp"
 #include "tt_stl/unreachable.hpp"
 
@@ -517,11 +518,15 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
                             "Num global CB receivers must be 1 when global CB is not provided.");
                     }
 
-                    // Cross-validate the global_cb's geometry against matmul + weight shape.
-                    // These catch silent-hang configs where the matmul reads more in1 pages
-                    // than the prefetcher pushes (e.g. activation K padded past weight K), or
-                    // the GCB fifo wrap-adjustment math misfires.
-                    if (attributes.global_cb.has_value() && input_tensor_a.is_sharded()) {
+                    // Cross-validate the DRAM-sender global_cb's geometry against the matmul +
+                    // weight shape. These catch silent-hang configs where the matmul reads more
+                    // in1 pages than the prefetcher pushes (e.g. activation K padded past weight
+                    // K), or the GCB fifo wrap-adjustment math misfires. Gated on the DRAM-sender
+                    // path because the worker-sender variant predates this work and uses different
+                    // sizing/ordering conventions (no bank IDs; gcb_size = N * max_tile_size).
+                    if (attributes.global_cb.has_value() && input_tensor_a.is_sharded() &&
+                        tt::tt_metal::experimental::sender_core_type(attributes.global_cb.value()) ==
+                            tt::tt_metal::experimental::SenderCoreType::Dram) {
                         const auto& gcb = attributes.global_cb.value();
                         const uint32_t ring_size = input_tensor_a.shard_spec().value().grid.num_cores();
                         const uint32_t weight_K_tiles = b_shape_padded[-2] / in1_tile.get_height();
@@ -544,6 +549,57 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
                             "must be the same set of cores.",
                             num_recv,
                             ring_size);
+
+                        // Set equality on the logical receiver cores: the GCB must target exactly
+                        // the matmul's worker grid, not a superset/subset/shifted variant.
+                        const auto& act_grid = input_tensor_a.shard_spec().value().grid;
+                        TT_FATAL(
+                            gcb.receiver_cores() == act_grid,
+                            "global_cb.receiver_cores() must equal in0.shard_spec().grid. The "
+                            "prefetcher's receivers and the matmul's workers must be exactly the "
+                            "same set of logical cores.");
+
+                        // Ordering check: concatenating sender_receiver_core_mapping in iteration
+                        // order (which the prefetcher walks bank 0 .. bank N-1) and row-major-
+                        // enumerating each sender's receivers must reproduce the matmul's ring
+                        // walk through the activation grid. If they disagree, the bank b weight
+                        // slice lands at the wrong ring position and the output is wrong (but
+                        // wouldn't necessarily hang).
+                        const auto ring_walk =
+                            tt::tt_metal::corerange_to_cores(act_grid, std::nullopt, /*row_wise=*/true);
+                        const auto& mapping = gcb.sender_receiver_core_mapping();
+                        TT_FATAL(
+                            mapping.size() * recv_per_bank == ring_walk.size(),
+                            "global_cb sender_receiver mapping ({} senders * {} receivers each) "
+                            "doesn't cover the matmul ring ({} cores)",
+                            mapping.size(),
+                            recv_per_bank,
+                            ring_walk.size());
+                        for (size_t bank_idx = 0; bank_idx < mapping.size(); ++bank_idx) {
+                            const auto bank_recvs = tt::tt_metal::corerange_to_cores(
+                                mapping[bank_idx].second, std::nullopt, /*row_wise=*/true);
+                            TT_FATAL(
+                                bank_recvs.size() == recv_per_bank,
+                                "Sender at bank index {} owns {} receivers; expected "
+                                "num_global_cb_receivers={}",
+                                bank_idx,
+                                bank_recvs.size(),
+                                recv_per_bank);
+                            for (size_t k = 0; k < recv_per_bank; ++k) {
+                                const size_t ring_pos = bank_idx * recv_per_bank + k;
+                                TT_FATAL(
+                                    bank_recvs[k] == ring_walk[ring_pos],
+                                    "global_cb bank {}'s receiver at index {} is core {} but the "
+                                    "matmul ring walk expects core {} at ring position {}. The "
+                                    "bank-to-receivers mapping must place bank b's receivers at "
+                                    "ring positions [b*num_global_cb_receivers, (b+1)*num_global_cb_receivers).",
+                                    bank_idx,
+                                    k,
+                                    bank_recvs[k],
+                                    ring_walk[ring_pos],
+                                    ring_pos);
+                            }
+                        }
                         TT_FATAL(
                             weight_K_tiles % ring_size == 0,
                             "Weight K must be divisible by ring_size in tiles for gather_in0 + global_cb. "
