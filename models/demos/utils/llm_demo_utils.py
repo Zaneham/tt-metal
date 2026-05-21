@@ -10,9 +10,42 @@ from loguru import logger
 from models.demos.utils.model_targets import resolve_perf_targets
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
+PREFILL_TIME_TO_TOKEN_KEY = "prefill_time_to_token"
+PREFILL_TIME_TO_FIRST_TOKEN_KEY = "prefill_time_to_first_token"
+
 
 class PerfRegressionWarning(UserWarning):
     """Warning emitted when measured perf drifts from configured thresholds."""
+
+
+def _normalize_ttft_metrics(metrics: dict, source_name: str) -> dict:
+    """
+    Normalize TTFT aliases to seconds and enforce key precedence.
+
+    `prefill_time_to_first_token` is interpreted as milliseconds and takes precedence
+    over `prefill_time_to_token` when both are present.
+    """
+    normalized_metrics = dict(metrics)
+    has_ttft_ms = metrics.get(PREFILL_TIME_TO_FIRST_TOKEN_KEY) is not None
+    has_ttft_s = metrics.get(PREFILL_TIME_TO_TOKEN_KEY) is not None
+
+    if has_ttft_ms and has_ttft_s:
+        logger.warning(
+            f"Both {PREFILL_TIME_TO_FIRST_TOKEN_KEY} and {PREFILL_TIME_TO_TOKEN_KEY} are set in {source_name}; "
+            f"using {PREFILL_TIME_TO_FIRST_TOKEN_KEY} and ignoring {PREFILL_TIME_TO_TOKEN_KEY}."
+        )
+
+    ttft_value_seconds = None
+    if has_ttft_ms:
+        ttft_value_seconds = float(metrics[PREFILL_TIME_TO_FIRST_TOKEN_KEY]) / 1000.0
+    elif has_ttft_s:
+        ttft_value_seconds = float(metrics[PREFILL_TIME_TO_TOKEN_KEY])
+
+    if ttft_value_seconds is not None:
+        normalized_metrics[PREFILL_TIME_TO_FIRST_TOKEN_KEY] = ttft_value_seconds
+        normalized_metrics[PREFILL_TIME_TO_TOKEN_KEY] = ttft_value_seconds
+
+    return normalized_metrics
 
 
 def create_benchmark_data(profiler: BenchmarkProfiler, measurements: dict, N_warmup_iter: dict, targets: dict):
@@ -156,6 +189,9 @@ def verify_perf(
                 f"batch_size={batch_size}, seq_len={seq_len}"
             )
 
+    measurements = _normalize_ttft_metrics(measurements, "measurements")
+    expected_perf_metrics = _normalize_ttft_metrics(expected_perf_metrics, "expected_perf_metrics")
+
     expected_measurements_default = {
         "compile_prefill": False,
         "compile_decode": False,
@@ -167,6 +203,14 @@ def verify_perf(
         "decode_t/s/u": True,
     }
     expected_measurements = expected_measurements_default if expected_measurements is None else expected_measurements
+    expected_measurements = dict(expected_measurements)
+
+    if expected_measurements.get(PREFILL_TIME_TO_FIRST_TOKEN_KEY) and expected_measurements.get(PREFILL_TIME_TO_TOKEN_KEY):
+        logger.warning(
+            f"Both {PREFILL_TIME_TO_FIRST_TOKEN_KEY} and {PREFILL_TIME_TO_TOKEN_KEY} are enabled in expected_measurements; "
+            f"using {PREFILL_TIME_TO_FIRST_TOKEN_KEY} and ignoring {PREFILL_TIME_TO_TOKEN_KEY}."
+        )
+        expected_measurements[PREFILL_TIME_TO_TOKEN_KEY] = False
 
     # Default metrics where lower is better
     lower_is_better_metrics_default = {
