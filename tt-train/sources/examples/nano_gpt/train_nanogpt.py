@@ -7,8 +7,10 @@
 Reads ``device_config`` from YAML (``mesh_shape``, ``enable_ddp``, ``enable_tp``),
 opens a named device mesh, and runs the standard forward / backward / step
 loop with a dp-axis all-reduce on gradients when DDP is on. A 1x1 mesh is
-the degenerate single-device case; a 2D mesh with both DDP and TP enabled
-uses axis 0 for "dp" and axis 1 for "tp".
+the degenerate single-device case. By default a 2D mesh with both DDP and TP
+enabled uses axis 0 for "dp" and axis 1 for "tp"; use ``--dp_axis`` and
+``--tp_axis`` to assign those names to other mesh dimensions (same as
+``train_lora_llama.py``).
 
 Supported ``model_type``:
 
@@ -278,23 +280,66 @@ def read_file_to_str(file_path: str) -> str:
         return f.read()
 
 
-def build_mesh(device_config: DeviceConfig) -> ttml.Mesh:
+def build_mesh(
+    device_config: DeviceConfig,
+    dp_axis: int = -1,
+    tp_axis: int = -1,
+) -> ttml.Mesh:
     """Build a named device mesh from DeviceConfig.
 
-    Mirrors the C++ axis-assignment rule in autograd/auto_context.cpp:140-195
-    so that ttml.sync_gradients and mesh.axis_mapper("dp"|"tp", ...) bind to
-    the same physical axes the C++ trainer would.
+    When ``dp_axis`` and ``tp_axis`` are both -1 (default), axis names follow
+    the C++ assignment rule in autograd/auto_context.cpp:140-195 (DP on axis 0,
+    TP on axis 1 for 2D meshes).
 
-    Line topology (at most one mesh dim > 1): exactly one of enable_ddp /
-    enable_tp must be true; that name is assigned to the active (non-trivial)
-    axis.
-
-    2D mesh (both dims > 1): the number of enabled parallelisms must equal
-    the number of mesh dims, and assignment order is DP -> TP. CP/PP are
-    out of scope here.
+    When either index is set, names are placed on those mesh dimensions (same
+    semantics as ``train_lora_llama.py``). ``device_config.enable_ddp`` /
+    ``enable_tp`` must match whether the corresponding axis index is set.
     """
     shape = tuple(int(s) for s in device_config.mesh_shape)
     n = len(shape)
+
+    if dp_axis != -1 or tp_axis != -1:
+        for name, value in (("dp_axis", dp_axis), ("tp_axis", tp_axis)):
+            if value != -1 and not (0 <= value < n):
+                raise ValueError(f"--{name} ({value}) is out of range for mesh_shape {shape} of length {n}")
+        if dp_axis != -1 and dp_axis == tp_axis:
+            raise ValueError(f"--dp_axis and --tp_axis must differ (both set to {dp_axis})")
+        if device_config.enable_ddp != (dp_axis != -1):
+            raise ValueError(
+                "device_config.enable_ddp must match --dp_axis: set --dp_axis to the DP mesh "
+                "dimension index when enable_ddp is true, or omit --dp_axis (default -1) for "
+                "automatic assignment"
+            )
+        if device_config.enable_tp != (tp_axis != -1):
+            raise ValueError(
+                "device_config.enable_tp must match --tp_axis: set --tp_axis to the TP mesh "
+                "dimension index when enable_tp is true, or omit --tp_axis (default -1) for "
+                "automatic assignment"
+            )
+        nontrivial = [i for i, s in enumerate(shape) if s > 1]
+        is_line = len(nontrivial) <= 1
+        enabled_count = int(device_config.enable_ddp) + int(device_config.enable_tp)
+        if is_line and enabled_count == 1:
+            active = nontrivial[0] if nontrivial else 0
+            assigned = dp_axis if device_config.enable_ddp else tp_axis
+            if assigned != active:
+                raise ValueError(
+                    f"Line mesh {shape} has active axis {active}; "
+                    f"--{'dp' if device_config.enable_ddp else 'tp'}_axis must be {active}, got {assigned}"
+                )
+        elif not is_line and enabled_count == 2 and (dp_axis == -1 or tp_axis == -1):
+            raise ValueError(
+                f"2D mesh {shape} with both enable_ddp and enable_tp requires both --dp_axis and --tp_axis "
+                "when using explicit axis assignment"
+            )
+
+        axis_names = [f"_{i}" for i in range(n)]
+        if dp_axis != -1:
+            axis_names[dp_axis] = "dp"
+        if tp_axis != -1:
+            axis_names[tp_axis] = "tp"
+        return ttml.Mesh(shape, tuple(axis_names))
+
     nontrivial = [i for i, s in enumerate(shape) if s > 1]
     is_line = len(nontrivial) <= 1
     enabled = (
@@ -1294,6 +1339,24 @@ def main():
         help="Enable memory usage tracking (prints memory stats after first iteration)",
     )
     parser.add_argument(
+        "--dp_axis",
+        type=int,
+        default=-1,
+        help=(
+            "Index of the DP axis in device_config.mesh_shape (default: -1, automatic "
+            "assignment from enable_ddp). Must match enable_ddp in the YAML config."
+        ),
+    )
+    parser.add_argument(
+        "--tp_axis",
+        type=int,
+        default=-1,
+        help=(
+            "Index of the TP axis in device_config.mesh_shape (default: -1, automatic "
+            "assignment from enable_tp). Must match enable_tp in the YAML config."
+        ),
+    )
+    parser.add_argument(
         "--print_summary",
         action="store_true",
         help="Print model layer-by-layer summary after creation",
@@ -1384,10 +1447,9 @@ def main():
         if args.resume:
             raise ValueError("--resume is not supported with tensor parallelism (device_config.enable_tp=true).")
 
-    # Build a named mesh whose axis names match the C++ assignment order
-    # (auto_context.cpp:140-195) so ttml.sync_gradients and axis_mapper("dp"|"tp", ...)
-    # bind to the same physical axes the C++ trainer would.
-    mesh = build_mesh(device_config)
+    # Build a named mesh. Default axis names follow auto_context.cpp (DP axis 0,
+    # TP axis 1). Pass --dp_axis / --tp_axis to override (train_lora_llama.py).
+    mesh = build_mesh(device_config, dp_axis=args.dp_axis, tp_axis=args.tp_axis)
     if device_config.enable_ddp or device_config.enable_tp:
         print(f"Mesh: shape={mesh.shape}, axis_names={mesh.axis_names}")
     ttml.open_device_mesh(mesh, tuple(device_config.device_ids) if device_config.device_ids else None)
