@@ -69,16 +69,12 @@ const map<std::string, std::map<std::string, std::string>> sfpu_op_to_op_name = 
 
 // Ternary SFPU ops driven by `run_sfpu_ternary_three_input_buffer`.
 //
-// Each entry maps an op name to kernel-side macro substitutions:
-//   * SFPU_OP_INIT_0  — runs once before the per-triple loop
-//   * SFPU_OP_CHAIN_0 — runs once per (in0, in1, in2) triple, inside an
-//                       acquire/release section. By convention the result
-//                       overwrites the first operand (DST[0]); the packer
-//                       reads from there. Matches the LLK where test and
-//                       the Quasar binary div pattern.
+// Each entry maps an op name to SFPU_OP_CHAIN_0 — the full per-tile body
+// (init + compute) run once per (in0, in1, in2) triple inside an
+// acquire/release section. Mirrors the unary pattern where init and compute
+// are both part of the chain.
 const map<std::string, std::map<std::string, std::string>> sfpu_ternary_op_to_op_name = {
-    {"where",
-     {{"SFPU_OP_INIT_0", "where_tile_init();"}, {"SFPU_OP_CHAIN_0", "where_tile<DataFormat::Float16_b>(0, 1, 2, 3);"}}},
+    {"where", {{"SFPU_OP_CHAIN_0", "where_tile_init(); where_tile<DataFormat::Float16_b>(0, 1, 2, 3);"}}},
 };
 
 bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
@@ -199,6 +195,86 @@ struct SfpuConfig {
     bool approx_mode = true;
 };
 
+namespace {
+
+// Validates that cfg describes a single-core CoreRange and returns the Quasar NodeCoord.
+experimental::metal2_host_api::NodeCoord extract_single_core_node(const SfpuConfig& cfg, const char* context) {
+    TT_FATAL(cfg.cores.ranges().size() == 1, "{} expects a single CoreRange (got {})", context, cfg.cores.size());
+    const CoreRange& cr = *cfg.cores.ranges().begin();
+    TT_FATAL(cr.start_coord == cr.end_coord, "{} expects a single-core CoreRange", context);
+    return {cr.start_coord.x, cr.start_coord.y};
+}
+
+// Builds a DataflowBufferSpec with implicit sync disabled — common to all DFBs in this test.
+experimental::metal2_host_api::DataflowBufferSpec make_dfb_spec(
+    const char* id, const SfpuConfig& cfg, tt::DataFormat fmt) {
+    return {
+        .unique_id = id,
+        .entry_size = static_cast<uint32_t>(cfg.tile_byte_size),
+        .num_entries = static_cast<uint32_t>(cfg.num_tiles),
+        .data_format_metadata = fmt,
+        .disable_implicit_sync = true,
+    };
+}
+
+// Converts a string→string defines map to the CompilerOptions::Defines vector form.
+experimental::metal2_host_api::KernelSpec::CompilerOptions::Defines to_kernel_defines(
+    const std::map<std::string, std::string>& m) {
+    experimental::metal2_host_api::KernelSpec::CompilerOptions::Defines defines;
+    for (const auto& [k, v] : m) {
+        defines.emplace_back(k, v);
+    }
+    return defines;
+}
+
+// Builds a writer_unary KernelSpec bound to a single output DFB.
+experimental::metal2_host_api::KernelSpec make_writer_unary_quasar_spec(const char* kernel_id, const char* out_dfb_id) {
+    return {
+        .unique_id = kernel_id,
+        .source =
+            experimental::metal2_host_api::KernelSpec::SourceFilePath{"tt_metal/kernels/dataflow/writer_unary.cpp"},
+        .num_threads = 1,
+        .dfb_bindings = {{
+            .dfb_spec_name = out_dfb_id,
+            .local_accessor_name = "in",
+            .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
+            .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
+        }},
+        .runtime_arguments_schema = {.named_runtime_args = {"dst_addr", "bank_id", "num_tiles"}},
+        .config_spec =
+            experimental::metal2_host_api::DataMovementConfiguration{
+                .gen2_data_movement_config =
+                    experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
+    };
+}
+
+// Builds writer KernelRunParams for a single-node Quasar program.
+experimental::metal2_host_api::ProgramRunParams::KernelRunParams make_writer_run_params(
+    const char* kernel_id,
+    const experimental::metal2_host_api::NodeCoord& node,
+    uint32_t dst_addr,
+    uint32_t num_tiles) {
+    return {
+        .kernel_spec_name = kernel_id,
+        .named_runtime_args = {{
+            .node = node,
+            .args = {{"dst_addr", dst_addr}, {"bank_id", 0u}, {"num_tiles", num_tiles}},
+        }},
+    };
+}
+
+// Creates a writer_unary kernel on the legacy (non-Quasar) path.
+tt_metal::KernelHandle create_legacy_writer_kernel(tt_metal::Program& program, const SfpuConfig& cfg) {
+    return tt_metal::CreateKernel(
+        program,
+        "tt_metal/kernels/dataflow/writer_unary.cpp",
+        cfg.cores,
+        tt_metal::DataMovementConfig{
+            .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default});
+}
+
+}  // namespace
+
 /// @brief Does Dram --> Reader --> CB --> Sfpu Compute --> CB --> Writer --> Dram. So far, enqueue APIs only added to
 /// grayskull
 /// @param device
@@ -239,39 +315,13 @@ bool run_sfpu_all_same_buffer(
     sfpu_defines["SFPU_OP_COMPUTE_KERNEL_API_INCLUDE"] = "1";
 
     if (device->arch() == ARCH::QUASAR) {
-        // The Metal 2.0 path supports a single-core work unit, which matches every
-        // existing parametrization of this test (single CoreRange of {0, 0}).
-        TT_FATAL(
-            test_config.cores.ranges().size() == 1,
-            "Metal 2.0 sfpu path expects a single CoreRange (got {})",
-            test_config.cores.size());
-        const CoreRange& core_range = *test_config.cores.ranges().begin();
-        TT_FATAL(core_range.start_coord == core_range.end_coord, "Metal 2.0 sfpu path expects a single-core CoreRange");
-        const CoreCoord core = core_range.start_coord;
-        const experimental::metal2_host_api::NodeCoord node{core.x, core.y};
-
         constexpr const char* IN_DFB = "in_dfb";
         constexpr const char* OUT_DFB = "out_dfb";
         constexpr const char* READER = "reader";
         constexpr const char* WRITER = "writer";
         constexpr const char* COMPUTE = "compute";
 
-        // Legacy DataflowBufferConfig set enable_implicit_sync = false on both DFBs;
-        // mirror that with disable_implicit_sync = true.
-        experimental::metal2_host_api::DataflowBufferSpec in_dfb_spec{
-            .unique_id = IN_DFB,
-            .entry_size = static_cast<uint32_t>(test_config.tile_byte_size),
-            .num_entries = static_cast<uint32_t>(test_config.num_tiles),
-            .data_format_metadata = test_config.l1_input_data_format,
-            .disable_implicit_sync = true,
-        };
-        experimental::metal2_host_api::DataflowBufferSpec out_dfb_spec{
-            .unique_id = OUT_DFB,
-            .entry_size = static_cast<uint32_t>(test_config.tile_byte_size),
-            .num_entries = static_cast<uint32_t>(test_config.num_tiles),
-            .data_format_metadata = test_config.l1_output_data_format,
-            .disable_implicit_sync = true,
-        };
+        const auto node = extract_single_core_node(test_config, "Metal 2.0 sfpu path");
 
         experimental::metal2_host_api::KernelSpec reader_spec{
             .unique_id = READER,
@@ -291,35 +341,12 @@ bool run_sfpu_all_same_buffer(
                         experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
         };
 
-        experimental::metal2_host_api::KernelSpec writer_spec{
-            .unique_id = WRITER,
-            .source =
-                experimental::metal2_host_api::KernelSpec::SourceFilePath{"tt_metal/kernels/dataflow/writer_unary.cpp"},
-            .num_threads = 1,
-            .dfb_bindings = {{
-                .dfb_spec_name = OUT_DFB,
-                .local_accessor_name = "in",
-                .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
-                .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
-            }},
-            .runtime_arguments_schema = {.named_runtime_args = {"dst_addr", "bank_id", "num_tiles"}},
-            .config_spec =
-                experimental::metal2_host_api::DataMovementConfiguration{
-                    .gen2_data_movement_config =
-                        experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
-        };
-
-        experimental::metal2_host_api::KernelSpec::CompilerOptions::Defines compute_defines;
-        for (const auto& [k, v] : sfpu_defines) {
-            compute_defines.emplace_back(k, v);
-        }
-
         experimental::metal2_host_api::KernelSpec compute_spec{
             .unique_id = COMPUTE,
             .source =
                 experimental::metal2_host_api::KernelSpec::SourceFilePath{"tt_metal/kernels/compute/eltwise_sfpu.cpp"},
             .num_threads = 1,
-            .compiler_options = {.defines = std::move(compute_defines)},
+            .compiler_options = {.defines = to_kernel_defines(sfpu_defines)},
             .dfb_bindings =
                 {{
                      .dfb_spec_name = IN_DFB,
@@ -341,17 +368,14 @@ bool run_sfpu_all_same_buffer(
                 },
         };
 
-        experimental::metal2_host_api::WorkUnitSpec wu{
-            .unique_id = "main",
-            .kernels = {READER, WRITER, COMPUTE},
-            .target_nodes = node,
-        };
-
         experimental::metal2_host_api::ProgramSpec spec{
             .program_id = "sfpu_compute",
-            .kernels = {reader_spec, writer_spec, compute_spec},
-            .dataflow_buffers = {in_dfb_spec, out_dfb_spec},
-            .work_units = {wu},
+            .kernels = {reader_spec, make_writer_unary_quasar_spec(WRITER, OUT_DFB), compute_spec},
+            .dataflow_buffers =
+                {make_dfb_spec(IN_DFB, test_config, test_config.l1_input_data_format),
+                 make_dfb_spec(OUT_DFB, test_config, test_config.l1_output_data_format)},
+            .work_units = {experimental::metal2_host_api::WorkUnitSpec{
+                .unique_id = "main", .kernels = {READER, WRITER, COMPUTE}, .target_nodes = node}},
         };
 
         Program program = experimental::metal2_host_api::MakeProgramFromSpec(*mesh_device, spec);
@@ -367,18 +391,8 @@ bool run_sfpu_all_same_buffer(
                            {"bank_id", 0u},
                            {"num_tiles", static_cast<uint32_t>(test_config.num_tiles)}}}},
             },
-            experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
-                .kernel_spec_name = WRITER,
-                .named_runtime_args =
-                    {{.node = node,
-                      .args =
-                          {{"dst_addr", output_dram_buffer->address()},
-                           {"bank_id", 0u},
-                           {"num_tiles", static_cast<uint32_t>(test_config.num_tiles)}}}},
-            },
-            experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
-                .kernel_spec_name = COMPUTE,
-            },
+            make_writer_run_params(WRITER, node, output_dram_buffer->address(), test_config.num_tiles),
+            experimental::metal2_host_api::ProgramRunParams::KernelRunParams{.kernel_spec_name = COMPUTE},
         };
         experimental::metal2_host_api::SetProgramRunParameters(program, params);
 
@@ -424,12 +438,7 @@ bool run_sfpu_all_same_buffer(
                 tt_metal::DataMovementConfig{
                     .processor = tt_metal::DataMovementProcessor::RISCV_1, .noc = tt_metal::NOC::RISCV_1_default});
 
-            auto writer_kernel = tt_metal::CreateKernel(
-                program_,
-                "tt_metal/kernels/dataflow/writer_unary.cpp",
-                test_config.cores,
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default});
+            auto writer_kernel = create_legacy_writer_kernel(program_, test_config);
 
             vector<uint32_t> compute_kernel_args = {
                 uint32_t(test_config.num_tiles),  // per_core_block_cnt
@@ -497,17 +506,6 @@ bool run_sfpu_ternary_three_input_buffer(
     sfpu_defines["SFPU_TERNARY_OP"] = "1";
 
     if (device->arch() == ARCH::QUASAR) {
-        TT_FATAL(
-            test_config.cores.ranges().size() == 1,
-            "Metal 2.0 ternary SFPU path expects a single CoreRange (got {})",
-            test_config.cores.size());
-        const CoreRange& core_range = *test_config.cores.ranges().begin();
-        TT_FATAL(
-            core_range.start_coord == core_range.end_coord,
-            "Metal 2.0 ternary SFPU path expects a single-core CoreRange");
-        const CoreCoord core = core_range.start_coord;
-        const experimental::metal2_host_api::NodeCoord node{core.x, core.y};
-
         constexpr const char* IN0_DFB = "in0_dfb";
         constexpr const char* IN1_DFB = "in1_dfb";
         constexpr const char* IN2_DFB = "in2_dfb";
@@ -516,23 +514,7 @@ bool run_sfpu_ternary_three_input_buffer(
         constexpr const char* WRITER = "writer";
         constexpr const char* COMPUTE = "compute";
 
-        auto make_input_dfb = [&](const char* id) {
-            return experimental::metal2_host_api::DataflowBufferSpec{
-                .unique_id = id,
-                .entry_size = static_cast<uint32_t>(test_config.tile_byte_size),
-                .num_entries = static_cast<uint32_t>(test_config.num_tiles),
-                .data_format_metadata = test_config.l1_input_data_format,
-                .disable_implicit_sync = true,
-            };
-        };
-
-        experimental::metal2_host_api::DataflowBufferSpec out_dfb_spec{
-            .unique_id = OUT_DFB,
-            .entry_size = static_cast<uint32_t>(test_config.tile_byte_size),
-            .num_entries = static_cast<uint32_t>(test_config.num_tiles),
-            .data_format_metadata = test_config.l1_output_data_format,
-            .disable_implicit_sync = true,
-        };
+        const auto node = extract_single_core_node(test_config, "Metal 2.0 ternary SFPU path");
 
         experimental::metal2_host_api::KernelSpec reader_spec{
             .unique_id = READER,
@@ -575,35 +557,12 @@ bool run_sfpu_ternary_three_input_buffer(
                         experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
         };
 
-        experimental::metal2_host_api::KernelSpec writer_spec{
-            .unique_id = WRITER,
-            .source =
-                experimental::metal2_host_api::KernelSpec::SourceFilePath{"tt_metal/kernels/dataflow/writer_unary.cpp"},
-            .num_threads = 1,
-            .dfb_bindings = {{
-                .dfb_spec_name = OUT_DFB,
-                .local_accessor_name = "in",
-                .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
-                .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
-            }},
-            .runtime_arguments_schema = {.named_runtime_args = {"dst_addr", "bank_id", "num_tiles"}},
-            .config_spec =
-                experimental::metal2_host_api::DataMovementConfiguration{
-                    .gen2_data_movement_config =
-                        experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
-        };
-
-        experimental::metal2_host_api::KernelSpec::CompilerOptions::Defines compute_defines;
-        for (const auto& [k, v] : sfpu_defines) {
-            compute_defines.emplace_back(k, v);
-        }
-
         experimental::metal2_host_api::KernelSpec compute_spec{
             .unique_id = COMPUTE,
             .source =
                 experimental::metal2_host_api::KernelSpec::SourceFilePath{"tt_metal/kernels/compute/eltwise_sfpu.cpp"},
             .num_threads = 1,
-            .compiler_options = {.defines = std::move(compute_defines)},
+            .compiler_options = {.defines = to_kernel_defines(sfpu_defines)},
             .dfb_bindings =
                 {{
                      .dfb_spec_name = IN0_DFB,
@@ -639,18 +598,16 @@ bool run_sfpu_ternary_three_input_buffer(
                 },
         };
 
-        experimental::metal2_host_api::WorkUnitSpec wu{
-            .unique_id = "main",
-            .kernels = {READER, WRITER, COMPUTE},
-            .target_nodes = node,
-        };
-
         experimental::metal2_host_api::ProgramSpec spec{
             .program_id = "sfpu_ternary_compute",
-            .kernels = {reader_spec, writer_spec, compute_spec},
+            .kernels = {reader_spec, make_writer_unary_quasar_spec(WRITER, OUT_DFB), compute_spec},
             .dataflow_buffers =
-                {make_input_dfb(IN0_DFB), make_input_dfb(IN1_DFB), make_input_dfb(IN2_DFB), out_dfb_spec},
-            .work_units = {wu},
+                {make_dfb_spec(IN0_DFB, test_config, test_config.l1_input_data_format),
+                 make_dfb_spec(IN1_DFB, test_config, test_config.l1_input_data_format),
+                 make_dfb_spec(IN2_DFB, test_config, test_config.l1_input_data_format),
+                 make_dfb_spec(OUT_DFB, test_config, test_config.l1_output_data_format)},
+            .work_units = {experimental::metal2_host_api::WorkUnitSpec{
+                .unique_id = "main", .kernels = {READER, WRITER, COMPUTE}, .target_nodes = node}},
         };
 
         Program program = experimental::metal2_host_api::MakeProgramFromSpec(*mesh_device, spec);
@@ -670,18 +627,8 @@ bool run_sfpu_ternary_three_input_buffer(
                            {"src2_addr", input2_dram_buffer->address()},
                            {"src2_bank_id", 0u}}}},
             },
-            experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
-                .kernel_spec_name = WRITER,
-                .named_runtime_args =
-                    {{.node = node,
-                      .args =
-                          {{"dst_addr", output_dram_buffer->address()},
-                           {"bank_id", 0u},
-                           {"num_tiles", static_cast<uint32_t>(test_config.num_tiles)}}}},
-            },
-            experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
-                .kernel_spec_name = COMPUTE,
-            },
+            make_writer_run_params(WRITER, node, output_dram_buffer->address(), test_config.num_tiles),
+            experimental::metal2_host_api::ProgramRunParams::KernelRunParams{.kernel_spec_name = COMPUTE},
         };
         experimental::metal2_host_api::SetProgramRunParameters(program, params);
 
@@ -738,12 +685,7 @@ bool run_sfpu_ternary_three_input_buffer(
                     .noc = tt_metal::NOC::RISCV_1_default,
                     .defines = {{"LOAD_BUF2_DATA", "1"}}});
 
-            auto writer_kernel = tt_metal::CreateKernel(
-                program_,
-                "tt_metal/kernels/dataflow/writer_unary.cpp",
-                test_config.cores,
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default});
+            auto writer_kernel = create_legacy_writer_kernel(program_, test_config);
 
             auto compute_kernel = tt_metal::CreateKernel(
                 program_,
@@ -768,184 +710,6 @@ bool run_sfpu_ternary_three_input_buffer(
 
     std::vector<uint32_t> dest_buffer_data;
     tt_metal::detail::ReadFromBuffer(output_dram_buffer, dest_buffer_data);
-
-    // PROBE: dump the first elements of result vs each input + golden so we can
-    // see exactly where outputs land and how they relate to cond's branches.
-    {
-        auto out_vals = unpack_vector<bfloat16, uint32_t>(dest_buffer_data);
-        auto in0_vals = unpack_vector<bfloat16, uint32_t>(packed_in0);
-        auto in1_vals = unpack_vector<bfloat16, uint32_t>(packed_in1);
-        auto in2_vals = unpack_vector<bfloat16, uint32_t>(packed_in2);
-        auto golden_vals = unpack_vector<bfloat16, uint32_t>(packed_golden);
-
-        // Per-element first 16 with expected (golden) and ✓/✗
-        const size_t n = std::min<size_t>(16, out_vals.size());
-        log_info(tt::LogTest, "PROBE: idx |   out    |  golden  | cond  | in1(t) | in2(f) | branch | ok?");
-        for (size_t i = 0; i < n; ++i) {
-            const float o = static_cast<float>(out_vals[i]);
-            const float g = static_cast<float>(golden_vals[i]);
-            const float c = static_cast<float>(in0_vals[i]);
-            const char* branch = (c == 0.0f) ? "false" : "true ";
-            const char* ok = (o == g) ? "OK" : "BAD";
-            log_info(
-                tt::LogTest,
-                "PROBE: {:3}  | {:+.4f} | {:+.4f} | {:+.2f} | {:+.4f} | {:+.4f} | {}  | {}",
-                i,
-                o,
-                g,
-                c,
-                static_cast<float>(in1_vals[i]),
-                static_cast<float>(in2_vals[i]),
-                branch,
-                ok);
-        }
-
-        // Match histogram: where does each output element land?
-        size_t match_golden = 0, match_in0 = 0, match_in1 = 0, match_in2 = 0;
-        size_t match_neg_in0 = 0, match_neg_in1 = 0, match_neg_in2 = 0;
-        size_t out_is_zero = 0, no_match = 0;
-        // Branch-conditional accuracy
-        size_t cond_eq0 = 0, cond_ne0 = 0;
-        size_t correct_cond_eq0 = 0, correct_cond_ne0 = 0;
-        size_t cond_eq0_got_true = 0, cond_eq0_got_false = 0;
-        size_t cond_ne0_got_true = 0, cond_ne0_got_false = 0;
-        for (size_t i = 0; i < out_vals.size(); ++i) {
-            const float o = static_cast<float>(out_vals[i]);
-            const float g = static_cast<float>(golden_vals[i]);
-            const float c = static_cast<float>(in0_vals[i]);
-            const float t = static_cast<float>(in1_vals[i]);
-            const float f = static_cast<float>(in2_vals[i]);
-            if (o == g) {
-                ++match_golden;
-            }
-            bool m_in0 = (o == c), m_in1 = (o == t), m_in2 = (o == f);
-            if (m_in0) {
-                ++match_in0;
-            }
-            if (m_in1) {
-                ++match_in1;
-            }
-            if (m_in2) {
-                ++match_in2;
-            }
-            if (o == -c) {
-                ++match_neg_in0;
-            }
-            if (o == -t) {
-                ++match_neg_in1;
-            }
-            if (o == -f) {
-                ++match_neg_in2;
-            }
-            if (o == 0.0f) {
-                ++out_is_zero;
-            }
-            if (!m_in0 && !m_in1 && !m_in2 && o != 0.0f) {
-                ++no_match;
-            }
-
-            if (c == 0.0f) {
-                ++cond_eq0;
-                if (o == g) {
-                    ++correct_cond_eq0;
-                }
-                if (o == t) {
-                    ++cond_eq0_got_true;
-                }
-                if (o == f) {
-                    ++cond_eq0_got_false;
-                }
-            } else {
-                ++cond_ne0;
-                if (o == g) {
-                    ++correct_cond_ne0;
-                }
-                if (o == t) {
-                    ++cond_ne0_got_true;
-                }
-                if (o == f) {
-                    ++cond_ne0_got_false;
-                }
-            }
-        }
-        log_info(
-            tt::LogTest,
-            "PROBE: total {} elems | match: golden={}  in0={}  in1={}  in2={}  -in0={}  -in1={}  -in2={}  zero={}  "
-            "no_match={}",
-            out_vals.size(),
-            match_golden,
-            match_in0,
-            match_in1,
-            match_in2,
-            match_neg_in0,
-            match_neg_in1,
-            match_neg_in2,
-            out_is_zero,
-            no_match);
-        log_info(
-            tt::LogTest,
-            "PROBE: cond==0 branch: {}/{} correct  [got_true={}  got_false={}]",
-            correct_cond_eq0,
-            cond_eq0,
-            cond_eq0_got_true,
-            cond_eq0_got_false);
-        log_info(
-            tt::LogTest,
-            "PROBE: cond!=0 branch: {}/{} correct  [got_true={}  got_false={}]",
-            correct_cond_ne0,
-            cond_ne0,
-            cond_ne0_got_true,
-            cond_ne0_got_false);
-
-        // First mismatch vs golden, with full context
-        for (size_t i = 0; i < out_vals.size(); ++i) {
-            if (static_cast<float>(out_vals[i]) != static_cast<float>(golden_vals[i])) {
-                log_info(
-                    tt::LogTest,
-                    "PROBE: first golden-mismatch @ idx {} | out={:+.4f}  expected={:+.4f}  cond={:+.2f}  in1={:+.4f}  "
-                    "in2={:+.4f}",
-                    i,
-                    static_cast<float>(out_vals[i]),
-                    static_cast<float>(golden_vals[i]),
-                    static_cast<float>(in0_vals[i]),
-                    static_cast<float>(in1_vals[i]),
-                    static_cast<float>(in2_vals[i]));
-                break;
-            }
-        }
-
-        // Per-tile/per-face mismatch breakdown (now vs golden).
-        constexpr size_t elems_per_tile = 32 * 32;
-        constexpr size_t elems_per_face = 16 * 16;
-        const size_t total_tiles = out_vals.size() / elems_per_tile;
-        for (size_t t = 0; t < total_tiles; ++t) {
-            size_t tile_mm = 0;
-            std::array<size_t, 4> face_mm = {0, 0, 0, 0};
-            ssize_t first_bad = -1;
-            for (size_t f = 0; f < 4; ++f) {
-                for (size_t e = 0; e < elems_per_face; ++e) {
-                    size_t idx = t * elems_per_tile + f * elems_per_face + e;
-                    if (static_cast<float>(out_vals[idx]) != static_cast<float>(golden_vals[idx])) {
-                        ++tile_mm;
-                        ++face_mm[f];
-                        if (first_bad < 0) {
-                            first_bad = static_cast<ssize_t>(idx);
-                        }
-                    }
-                }
-            }
-            log_info(
-                tt::LogTest,
-                "PROBE: tile {}: mismatches-vs-golden={}/1024 [face0={} face1={} face2={} face3={}] first_bad_idx={}",
-                t,
-                tile_mm,
-                face_mm[0],
-                face_mm[1],
-                face_mm[2],
-                face_mm[3],
-                first_bad);
-        }
-    }
 
     return sfpu_util::is_close_packed_sfpu_output(dest_buffer_data, packed_golden, test_config.sfpu_op);
 }

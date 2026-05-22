@@ -61,9 +61,6 @@ void kernel_main() {
             copy_tile_to_dst_init_short(in2_id);
             copy_tile(in2_id, 0, 2);
 
-#ifdef SFPU_OP_INIT_0
-            SFPU_OP_INIT_0
-#endif
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif
@@ -88,9 +85,6 @@ void kernel_main() {
             copy_tile(in1_id, 0, 1);
             copy_tile(in2_id, 0, 2);
 
-#ifdef SFPU_OP_INIT_0
-            SFPU_OP_INIT_0
-#endif
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif

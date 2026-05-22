@@ -8,7 +8,7 @@
 #include "llk_assert.h"
 #include "llk_defs.h"
 #include "llk_math_eltwise_ternary_sfpu.h"
-#include "llk_math_eltwise_ternary_sfpu_params.h"
+#include "llk_math_eltwise_ternary_sfpu.h"
 
 namespace ckernel {
 
