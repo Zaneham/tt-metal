@@ -29,8 +29,7 @@ void kernel_main() {
     experimental::DataflowBuffer dfb_in0(dfb_in0_id);
     experimental::DataflowBuffer dfb_in1(dfb_in1_id);
     experimental::DataflowBuffer dfb_out(dfb_out_id);
-    init_sfpu(dfb_in0.get_id(), dfb_out.get_id());
-    copy_tile_to_dst_init_short(dfb_in0.get_id());
+    sfpu_unpack_to_dest_hw_init(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
 #ifdef SFPU_OP_INIT_0
     SFPU_OP_INIT_0
 #endif
@@ -45,21 +44,20 @@ void kernel_main() {
         // (SFPU_OP_CHAIN_0 expands to e.g. div_binary_tile(0, 1, 0)) so the
         // result lands at DST[0], then pack DST[0]. Two DST slots suffice
         // regardless of per_core_block_size.
-        // Re-init copy_tile_to_dst before each copy_tile call so the unpacker
-        // is pointed at the right input CB/DFB; copy_tile_to_dst_init_short
-        // configures unpacker state for a single source.
+        // Re-init before each unpack so the unpacker is pointed at the right
+        // input DFB; init configures unpacker state for a single source.
         for (uint32_t i = 0; i < per_core_block_size; ++i) {
-            acquire_dst();
             copy_tile_to_dst_init_short(dfb_in0.get_id());
-            copy_tile(dfb_in0.get_id(), i, 0);
+            unpack_tile_to_dest(dfb_in0.get_id(), i, 0);
             copy_tile_to_dst_init_short(dfb_in1.get_id());
-            copy_tile(dfb_in1.get_id(), i, 1);
+            unpack_tile_to_dest(dfb_in1.get_id(), i, 1);
+            unpack_tile_to_dest_section_done();
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif
-
-            pack_tile(0, dfb_out.get_id());
-            release_dst();
+            sfpu_op_dest_section_done();
+            pack_tile<true>(0, dfb_out.get_id(), i);
+            pack_tile_dest_dvalid_section_done();
         }
 
         dfb_in0.pop_front(per_core_block_size);

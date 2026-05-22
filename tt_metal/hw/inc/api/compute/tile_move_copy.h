@@ -14,7 +14,17 @@
 
 #ifdef TRISC_UNPACK
 #include "llk_unpack_A_api.h"
+#include "llk_unpack_common.h"
 #endif
+
+#ifdef TRISC_PACK
+#include "llk_pack_api.h"
+#endif
+
+#ifdef TRISC_MATH
+#include "llk_math_common.h"
+#endif
+
 namespace ckernel {
 
 // clang-format off
@@ -42,8 +52,8 @@ ALWI void copy_tile_to_dst_init_short(
 #else
     LLK_ASSERT(transpose_within_16x16_face == false, "Transpose within face not supported on Quasar");
     LLK_ASSERT(transpose == 0, "Transpose not supported on Quasar");
-    UNPACK((llk_unpack_A_init<false, DST_ACCUM_MODE>(cbid)));
-    MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE>(cbid)));
+    UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(
+        transpose, transpose_within_16x16_face, cbid)));
 #endif
 }
 /**
@@ -120,5 +130,35 @@ ALWI void copy_block_matmul_partials(
     MATH((llk_math_eltwise_unary_datacopy_block(start_dst_tile_index, ntiles, in_cb_id)));
 #endif
 }
+
+#ifdef ARCH_QUASAR
+// Quasar Int32 SFPU binary ops use UNP_DEST (L1 -> DST directly), not srcA + datacopy.
+// Mirrors the LLK sfpu_binary_quasar_test.cpp unpack-to-dest path.
+
+ALWI void sfpu_unpack_to_dest_hw_init(uint32_t icb0, uint32_t icb1, uint32_t ocb) {
+    UNPACK((set_up_dest_dvalid_per_thread<dest_dvalid_client::UNPACK>(
+        {dest_dvalid_client::UNPACK, dest_dvalid_client::SFPU, dest_dvalid_client::PACK})));
+    UNPACK((llk_unpack_hw_configure(icb0, icb1)));
+    MATH((_llk_math_upk_to_dest_hw_configure_<false, DST_ACCUM_MODE, false>()));
+    MATH((set_up_dest_dvalid_per_thread<dest_dvalid_client::SFPU>(
+        {dest_dvalid_client::UNPACK, dest_dvalid_client::SFPU, dest_dvalid_client::PACK})));
+    PACK((set_up_dest_dvalid_per_thread<dest_dvalid_client::PACK>(
+        {dest_dvalid_client::UNPACK, dest_dvalid_client::SFPU, dest_dvalid_client::PACK})));
+    PACK((llk_pack_hw_configure(ocb)));
+    PACK((llk_pack_init(ocb)));
+}
+
+ALWI void unpack_tile_to_dest(uint32_t in_cb_id, uint32_t in_tile_index, uint32_t dst_tile_index) {
+    UNPACK((llk_unpack_A_to_dest(in_cb_id, in_tile_index, dst_tile_index)));
+}
+
+ALWI void unpack_tile_to_dest_section_done() { UNPACK((_llk_unpack_dest_dvalid_section_done_<DST_SYNC_MODE>())); }
+
+ALWI void sfpu_op_dest_section_done() { MATH((_llk_math_set_dvalid_<p_cleardvalid::SFPU, DST_SYNC_MODE>())); }
+
+ALWI void pack_tile_dest_dvalid_section_done() {
+    PACK((llk_pack_dest_dvalid_section_done<DST_SYNC_MODE, DST_ACCUM_MODE>()));
+}
+#endif
 
 }  // namespace ckernel

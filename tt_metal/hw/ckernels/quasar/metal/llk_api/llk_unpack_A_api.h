@@ -46,19 +46,30 @@ inline void llk_unpack_A_init(
     const std::uint32_t operand = 0) {
     const std::uint32_t operand_id = get_operand_id(operand);
 
-    static_assert(unpack_to_dest == false, "unpack_to_dest is not yet supported on Quasar");
-    static_assert(acc_to_dest == false, "acc_to_dest is not yet supported on Quasar");
-    static_assert(BType == BroadcastType::NONE, "Only BroadcastType::NONE is supported on Quasar right now");
+    static_assert(unpack_to_dest || acc_to_dest == false, "acc_to_dest is not yet supported on Quasar");
+    static_assert(
+        unpack_to_dest || BType == BroadcastType::NONE, "Only BroadcastType::NONE is supported on Quasar right now");
 
     // TODO (tt-metal #42916): Once runtime asserts are added, add asserts for unsupported features above and for valid
     // transpose_of_faces and within_face_16x16_transpose values
 
-    // For Quasar, the unp_sel field is ignored if binary_reuse_dest != EltwiseBinaryReuseDestType::NONE
-    _llk_unpack_unary_operand_init_<
-        p_unpacr::UNP_A,
-        false /* TRANSPOSE_EN */,
-        false /* IS_32b_DEST_EN */,
-        binary_reuse_dest>(operand_id);
+    if constexpr (unpack_to_dest) {
+        static_assert(
+            binary_reuse_dest == EltwiseBinaryReuseDestType::NONE,
+            "binary_reuse_dest not supported with unpack_to_dest on Quasar");
+        tdma_descriptor_t td_val;
+        td_val.buf_desc_id = operand_id;
+        td_val.reg_data_format = static_cast<std::uint8_t>(unpack_dst_format[operand_id]);
+        _llk_unpack_configure_unary_<p_unpacr::UNP_DEST>(td_val);
+        _llk_unpack_unary_operand_init_<p_unpacr::UNP_DEST, false, DST_ACCUM_MODE>(operand_id, 1 /*num_tiles*/);
+    } else {
+        // For Quasar, the unp_sel field is ignored if binary_reuse_dest != EltwiseBinaryReuseDestType::NONE
+        _llk_unpack_unary_operand_init_<
+            p_unpacr::UNP_A,
+            false /* TRANSPOSE_EN */,
+            false /* IS_32b_DEST_EN */,
+            binary_reuse_dest>(operand_id);
+    }
 }
 
 /**
@@ -79,6 +90,23 @@ inline void llk_unpack_A(const std::uint32_t operand, const std::uint32_t tile_i
 
     WAYPOINT("UPAW");
     _llk_unpack_unary_operand_<p_unpacr::UNP_A>(l1_tile_index);
+    WAYPOINT("UPAD");
+}
+
+/**
+ * @brief Unpack one tile from L1 directly into DST at dst_tile_index via UNP_DEST.
+ */
+inline void llk_unpack_A_to_dest(
+    const std::uint32_t operand, const std::uint32_t l1_tile_index, const std::uint32_t dst_tile_index) {
+    const std::uint32_t operand_id = get_operand_id(operand);
+    const LocalDFBInterface& local_dfb_interface = get_local_dfb_interface(operand_id);
+    const std::uint32_t l1_tile_idx =
+        local_dfb_interface.tc_slots[local_dfb_interface.tc_idx].rd_entry_idx + l1_tile_index;
+
+    WAYPOINT("UPAW");
+    TT_SET_SRC_TILE_FACE_ROW_IDX(p_set_inc_sel::TILE_SEL, p_unpacr::UNP_A, l1_tile_idx);
+    TTI_SET_DST_TILE_FACE_ROW_IDX(p_set_inc_sel::TILE_SEL, p_unpacr::UNP_A, dst_tile_index);
+    ckernel::ckernel_template::run_bank0_sw_cntl(instrn_buffer);
     WAYPOINT("UPAD");
 }
 
