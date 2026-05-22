@@ -78,7 +78,7 @@ const map<std::string, std::map<std::string, std::string>> sfpu_op_to_op_name = 
 //                       the Quasar binary div pattern.
 const map<std::string, std::map<std::string, std::string>> sfpu_ternary_op_to_op_name = {
     {"where",
-     {{"SFPU_OP_INIT_0", "where_tile_init();"}, {"SFPU_OP_CHAIN_0", "where_tile<DataFormat::Float16_b>(0, 1, 2, 0);"}}},
+     {{"SFPU_OP_INIT_0", "where_tile_init();"}, {"SFPU_OP_CHAIN_0", "where_tile<DataFormat::Float16_b>(0, 1, 2, 3);"}}},
 };
 
 bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
@@ -479,15 +479,15 @@ bool run_sfpu_ternary_three_input_buffer(
     auto output_dram_buffer = CreateBuffer(dram_config);
 
     const uint32_t numel = per_buffer_byte_size / sizeof(bfloat16);
-    const int seed = std::chrono::system_clock::now().time_since_epoch().count();
+    const int seed = 42;
     auto [packed_in0, packed_in1, packed_in2] =
         sfpu_util::generate_packed_sfpu_ternary_inputs(numel, test_config.sfpu_op, seed);
 
     auto in0 = unpack_vector<bfloat16, uint32_t>(packed_in0);
     auto in1 = unpack_vector<bfloat16, uint32_t>(packed_in1);
     auto in2 = unpack_vector<bfloat16, uint32_t>(packed_in2);
-    std::vector<bfloat16> golden(in2.size());
-    for (size_t i = 0; i < in2.size(); ++i) {
+    std::vector<bfloat16> golden(in0.size());
+    for (size_t i = 0; i < in0.size(); ++i) {
         golden[i] = sfpu_util::sfpu_ternary_function(test_config.sfpu_op, in0[i], in1[i], in2[i]);
     }
     std::vector<uint32_t> packed_golden = pack_vector<uint32_t, bfloat16>(golden);

@@ -18,10 +18,11 @@ inline void llk_math_eltwise_ternary_sfpu_where_init() {
     sfpu::_init_where_();
 }
 
-// Forwards to the new Blackhole-style ternary SFPU dispatch. The underlying
-// `_calculate_where_<SFPU_ITERATIONS>` takes DEST tile indices and computes
-// per-tile SFPU offsets internally; the params wrapper sets section base to
-// DEST tile 0 and runs the kernel face-by-face.
+// Forwards to the sfpi-based ternary dispatch. `_calculate_where_` takes
+// DEST tile indices and computes per-tile SFPU offsets internally via the
+// sfpi `dst_reg[tile_idx * dst_tile_size_sfpi]` indexing. The params wrapper
+// sets section base to DEST tile 0 and advances by one face between
+// invocations; sfpi emits TTINCRWC for the per-row advance inside the body.
 template <bool APPROXIMATE, [[maybe_unused]] DataFormat data_format>
 inline void llk_math_eltwise_ternary_sfpu_where(
     uint dst_index0, uint dst_index1, uint dst_index2, uint odst, int vector_mode = (int)VectorMode::RC) {

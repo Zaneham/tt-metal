@@ -39,12 +39,9 @@ void kernel_main() {
     constexpr auto out_id = tt::CBIndex::c_16;
 #endif
 
-    unary_op_init_common(in0_id, out_id);
+    init_sfpu(in0_id, out_id);
 #ifdef ARCH_QUASAR
-    PACK((llk_pack_dest_init()));
-#endif
-#ifdef SFPU_OP_INIT_0
-    SFPU_OP_INIT_0
+    // PACK((llk_pack_dest_init()));
 #endif
 
     for (uint32_t block = 0; block < per_core_block_cnt; ++block) {
@@ -56,21 +53,24 @@ void kernel_main() {
             dfb_out.reserve_back(1);
 
             tile_regs_acquire();
-            // Quasar bakes buf_desc_id into the unpack MOP at init time, so the
-            // MOP must be re-programmed per CB before each copy_tile.
+
             copy_tile_to_dst_init_short(in0_id);
             copy_tile(in0_id, 0, 0);
             copy_tile_to_dst_init_short(in1_id);
             copy_tile(in1_id, 0, 1);
             copy_tile_to_dst_init_short(in2_id);
             copy_tile(in2_id, 0, 2);
+
+#ifdef SFPU_OP_INIT_0
+            SFPU_OP_INIT_0
+#endif
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif
             tile_regs_commit();
 
             tile_regs_wait();
-            pack_tile(0, out_id);
+            pack_tile(3, out_id);
             tile_regs_release();
 
             dfb_out.push_back(1);
@@ -87,13 +87,17 @@ void kernel_main() {
             copy_tile(in0_id, 0, 0);
             copy_tile(in1_id, 0, 1);
             copy_tile(in2_id, 0, 2);
+
+#ifdef SFPU_OP_INIT_0
+            SFPU_OP_INIT_0
+#endif
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif
             tile_regs_commit();
 
             tile_regs_wait();
-            pack_tile(0, out_id);
+            pack_tile(3, out_id);
             tile_regs_release();
 
             cb_push_back(out_id, 1);
