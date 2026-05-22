@@ -896,6 +896,9 @@ def test_demo_for_conditional_generation(
         if expected_perf_metrics is not None:
             total_batch = mesh_device.get_num_devices() * batch_size_per_device
             expected_perf_metrics["decode_t/s"] = expected_perf_metrics["decode_t/s/u"] * total_batch
+            expected_perf_metrics["prefill_time_to_token_tolerance"] = 0.20
+            expected_perf_metrics["decode_t_s_tolerance"] = 0.20
+            expected_perf_metrics["decode_t_s_u_tolerance"] = 0.20
             measurements = {
                 "prefill_time_to_token": ttft,
                 "decode_t/s": decode_throughput * total_batch,
@@ -909,7 +912,6 @@ def test_demo_for_conditional_generation(
             verify_perf(
                 measurements,
                 expected_perf_metrics,
-                high_tol_percentage=0.20,
                 expected_measurements=expected_measurements,
             )
         else:

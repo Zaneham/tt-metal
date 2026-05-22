@@ -19,7 +19,7 @@ import ttnn
 from models.common.sampling import SamplingParams
 from models.common.utility_functions import is_blackhole, is_wormhole_b0
 from models.demos.utils.llm_demo_utils import create_benchmark_data, verify_perf
-from models.demos.utils.model_targets import resolve_accuracy_targets, resolve_perf_targets
+from models.demos.utils.model_targets import is_tolerance_key, resolve_accuracy_targets, resolve_perf_targets
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_transformers.tt.common import (
     PagedAttentionConfig,
@@ -1567,14 +1567,8 @@ def test_demo_text(
                     seq_len=1024,
                 )
             ci_targets = {}
-            high_tol_percentage = 0.15
 
             if resolved_ci_targets:
-                if resolved_ci_targets.get("prefill_tolerance") is not None:
-                    high_tol_percentage = max(high_tol_percentage, float(resolved_ci_targets["prefill_tolerance"]))
-                if resolved_ci_targets.get("decode_tolerance") is not None:
-                    high_tol_percentage = max(high_tol_percentage, float(resolved_ci_targets["decode_tolerance"]))
-
                 if resolved_ci_targets.get("prefill_time_to_first_token") is not None:
                     ci_targets["prefill_time_to_token"] = (
                         float(resolved_ci_targets["prefill_time_to_first_token"]) / 1000
@@ -1582,13 +1576,15 @@ def test_demo_text(
                 if resolved_ci_targets.get("decode_t/s/u") is not None:
                     ci_targets["decode_t/s/u"] = float(resolved_ci_targets["decode_t/s/u"])
                     ci_targets["decode_t/s"] = float(resolved_ci_targets["decode_t/s/u"]) * global_batch_size
+                for key, value in resolved_ci_targets.items():
+                    if is_tolerance_key(key):
+                        ci_targets[key] = float(value)
 
             if ci_targets:  # Only verify performance if we have targets for this model/device combination
                 verify_perf(
                     measurements,
                     ci_targets,
-                    high_tol_percentage=high_tol_percentage,
-                    expected_measurements={k: True for k in ci_targets.keys()},
+                    expected_measurements={k: True for k in ci_targets.keys() if not is_tolerance_key(k)},
                 )
             else:
                 logger.warning(

@@ -261,6 +261,79 @@ def test_validate_perf_targets_detects_regression(tmp_path):
     assert "decode_t/s/u" in result.stdout
 
 
+def test_validate_perf_targets_supports_per_metric_tolerance_override(tmp_path):
+    (tmp_path / "generated/benchmark_data").mkdir(parents=True)
+    (tmp_path / "models").mkdir(parents=True)
+    (tmp_path / "tests/pipeline_reorg").mkdir(parents=True)
+
+    _write_complete_run(
+        tmp_path / "generated/benchmark_data/complete_run_1.json",
+        model="demo-model",
+        batch_size=1,
+        seq_len=128,
+        decode_tsu=118.0,
+    )
+
+    targets = {
+        "version": 1,
+        "targets": {
+            "demo-model": {
+                "aliases": [],
+                "skus": {
+                    "wh_n150": {
+                        "entries": [
+                            {
+                                "batch_size": 1,
+                                "seq_len": 128,
+                                "status": "active",
+                                "perf": {
+                                    "decode_t/s/u": 100.0,
+                                    "decode_t_s_u_tolerance": 0.2,
+                                },
+                                "accuracy": {},
+                            }
+                        ]
+                    }
+                },
+            }
+        },
+    }
+    (tmp_path / "models/model_targets.yaml").write_text(yaml.safe_dump(targets), encoding="utf-8")
+    tests_yaml = [{"model": "demo-model", "skus": {"wh_n150": {"tier": 1}}, "team": "models"}]
+    (tmp_path / "tests/pipeline_reorg/models_e2e_tests.yaml").write_text(yaml.safe_dump(tests_yaml), encoding="utf-8")
+
+    result = _run_validator(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_validate_perf_targets_rejects_tolerance_outside_fraction_range(tmp_path):
+    validator = _load_validator_module()
+    targets = {
+        "version": 1,
+        "targets": {
+            "demo-model": {
+                "aliases": [],
+                "skus": {
+                    "wh_n150": {
+                        "entries": [
+                            {
+                                "batch_size": 1,
+                                "seq_len": 128,
+                                "status": "active",
+                                "perf": {"decode_t/s/u": 100.0, "decode_t_s_u_tolerance": 1.2},
+                                "accuracy": {},
+                            }
+                        ]
+                    }
+                },
+            }
+        },
+    }
+
+    errors = validator._validate_targets_schema(targets)
+    assert any("outside [0.0, 1.0]" in err for err in errors)
+
+
 def test_validate_perf_targets_supports_prefill_time_to_first_token_ms_units(tmp_path):
     (tmp_path / "generated/benchmark_data").mkdir(parents=True)
     (tmp_path / "models").mkdir(parents=True)
@@ -494,6 +567,24 @@ def test_verify_perf_prefers_prefill_time_to_first_token_with_unit_conversion(mo
 
     warning_text = " ".join(warnings_seen)
     assert "ignoring prefill_time_to_token" in warning_text
+
+
+def test_verify_perf_respects_metric_specific_tolerance(monkeypatch):
+    llm_demo_utils = _load_llm_demo_utils_module()
+    monkeypatch.setattr(llm_demo_utils, "perf_target_check", lambda *_args, **_kwargs: None)
+
+    llm_demo_utils.verify_perf(
+        measurements={
+            "decode_t/s/u": 118.0,
+        },
+        expected_perf_metrics={
+            "decode_t/s/u": 100.0,
+            "decode_t_s_u_tolerance": 0.2,
+        },
+        expected_measurements={
+            "decode_t/s/u": True,
+        },
+    )
 
 
 def test_extract_metric_value_fails_for_ambiguous_unqualified_metric_name():

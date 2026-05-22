@@ -7,7 +7,12 @@ import warnings
 
 from loguru import logger
 
-from models.demos.utils.model_targets import resolve_perf_targets
+from models.demos.utils.model_targets import (
+    DEFAULT_PERF_TOLERANCE,
+    is_tolerance_key,
+    resolve_metric_tolerance,
+    resolve_perf_targets,
+)
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler, perf_target_check
 
 PREFILL_TIME_TO_TOKEN_KEY = "prefill_time_to_token"
@@ -155,7 +160,6 @@ def check_tokens_match(generated_text: dict, expected_greedy_output_path: str):
 def verify_perf(
     measurements: dict,
     expected_perf_metrics: dict = None,
-    high_tol_percentage=0.15,  # 15% tolerance (fraction in [0, 1])
     expected_measurements: dict = None,
     model_name: str = None,
     sku: str = None,
@@ -169,14 +173,8 @@ def verify_perf(
         measurements: dict of measured performance values
         expected_perf_metrics: dict of expected performance values. If omitted, the values are
             resolved from centralized YAML using model_name/sku[/batch_size/seq_len].
-        high_tol_percentage: tolerance fraction in [0, 1] (e.g., 0.15 means 15% tolerance)
         expected_measurements: dict specifying which measurements are required
     """
-    if not 0 <= high_tol_percentage <= 1:
-        raise ValueError(
-            f"high_tol_percentage must be between 0 and 1 (got {high_tol_percentage})"
-        )
-
     if expected_perf_metrics is None:
         if not model_name or not sku:
             raise ValueError("model_name and sku are required when expected_perf_metrics is not provided")
@@ -194,6 +192,8 @@ def verify_perf(
 
     measurements = _normalize_ttft_metrics(measurements, "measurements")
     expected_perf_metrics = _normalize_ttft_metrics(expected_perf_metrics, "expected_perf_metrics")
+    tolerance_config = {k: v for k, v in expected_perf_metrics.items() if is_tolerance_key(k)}
+    expected_perf_metrics = {k: v for k, v in expected_perf_metrics.items() if not is_tolerance_key(k)}
 
     expected_measurements_default = {
         "compile_prefill": False,
@@ -233,21 +233,31 @@ def verify_perf(
             does_pass = False
             continue
         if key in lower_is_better_metrics:
+            metric_tolerance = resolve_metric_tolerance(
+                metric_name=key,
+                thresholds=tolerance_config,
+                default_tolerance=DEFAULT_PERF_TOLERANCE,
+            )
             # For metrics where lower is better (e.g., TTFT)
             if measurements[key] > expected_perf_metrics[key]:  # Higher than expected is bad
                 does_pass = False
                 logger.warning(f"{key} ({measurements[key]}) is higher than expected {expected_perf_metrics[key]}")
-            elif measurements[key] < expected_perf_metrics[key] * (1 - high_tol_percentage):  # Much lower than expected
+            elif measurements[key] < expected_perf_metrics[key] * (1 - metric_tolerance):  # Much lower than expected
                 does_pass = False
                 logger.warning(
                     f"{key} ({measurements[key]}) is much lower than expected {expected_perf_metrics[key]}. Please update the expected perf."
                 )
         else:
+            metric_tolerance = resolve_metric_tolerance(
+                metric_name=key,
+                thresholds=tolerance_config,
+                default_tolerance=DEFAULT_PERF_TOLERANCE,
+            )
             # For metrics where higher is better (e.g., throughput)
             if measurements[key] < expected_perf_metrics[key]:  # Lower than expected is bad
                 does_pass = False
                 logger.warning(f"{key} ({measurements[key]}) is lower than expected {expected_perf_metrics[key]}")
-            elif measurements[key] > expected_perf_metrics[key] * (1 + high_tol_percentage):  # Much higher than expected
+            elif measurements[key] > expected_perf_metrics[key] * (1 + metric_tolerance):  # Much higher than expected
                 does_pass = False
                 logger.warning(
                     f"{key} ({measurements[key]}) is much higher than expected {expected_perf_metrics[key]}. Please update the expected perf."

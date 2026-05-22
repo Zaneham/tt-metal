@@ -559,7 +559,7 @@ def run_falcon_demo_kv(
     if expected_perf_metrics is not None:
         pass  # see issue #31939
     #     if num_devices == 32:  # set higher margin to 20% for Galaxy due to larger variance on CI
-    #         verify_perf(measurements, expected_perf_metrics, high_tol_percentage=0.20)
+    #         verify_perf(measurements, expected_perf_metrics)
     #     else:
     #         verify_perf(measurements, expected_perf_metrics)
     elif expected_greedy_output_path is not None:

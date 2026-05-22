@@ -1033,7 +1033,6 @@ def test_gpt_oss_demo(
                     verify_perf(
                         measurements,
                         prefill_targets,
-                        high_tol_percentage=ttft_tolerance,
                         expected_measurements={k: True for k in prefill_targets.keys()},
                     )
 
@@ -1045,7 +1044,6 @@ def test_gpt_oss_demo(
                     verify_perf(
                         measurements,
                         decode_targets,
-                        high_tol_percentage=decode_tolerance,
                         expected_measurements={k: True for k in decode_targets.keys()},
                     )
                 else:

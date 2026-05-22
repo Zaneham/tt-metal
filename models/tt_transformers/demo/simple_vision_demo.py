@@ -628,8 +628,8 @@ def test_multimodal_demo_text(
             ("T3K", "Llama-3.2-90B", 1): 10.0,
         }
         targets_decode_tok_s_u = {
-            ("N300", "Llama-3.2-11B", 16): (15.9, None),  # None to default to tolerance percentage (1.15)
-            ("T3K", "Llama-3.2-90B", 1): (8.0, None),
+            ("N300", "Llama-3.2-11B", 16): 15.9,
+            ("T3K", "Llama-3.2-90B", 1): 8.0,
         }
 
         perf_targets = {}
@@ -640,11 +640,9 @@ def test_multimodal_demo_text(
 
             perf_targets = {
                 "prefill_t/s": targets_prefill_tok_s[run_config],
-                "decode_t/s": targets_decode_tok_s_u[run_config][0] * max_batch_size,
-                "decode_t/s/u": targets_decode_tok_s_u[run_config][0],
+                "decode_t/s": targets_decode_tok_s_u[run_config] * max_batch_size,
+                "decode_t/s/u": targets_decode_tok_s_u[run_config],
             }
-
-            perf_tolerance = targets_decode_tok_s_u[run_config][1] or 0.15  # default to 15% tolerance
 
         # Save benchmark data for CI
         N_warmup_iter = {"inference_prefill": 0, "inference_decode": 0}
@@ -663,4 +661,4 @@ def test_multimodal_demo_text(
         )
 
         if perf_targets:
-            verify_perf(measurements, perf_targets, high_tol_percentage=perf_tolerance)
+            verify_perf(measurements, perf_targets)

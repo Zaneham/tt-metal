@@ -25,10 +25,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 25
-              prefill_tolerance: 0.15
               decode_t/s/u: 66.0
               decode_t/s: 2112.0
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -60,10 +58,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 62
-              prefill_tolerance: 0.15
               decode_t/s/u: 35.0
               decode_t/s: 1120.0
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -95,10 +91,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 182.9
-              prefill_tolerance: 0.15
               decode_t/s/u: 8.85
               decode_t/s: 283.2
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -156,10 +150,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 16165
-              prefill_tolerance: 0.25
               decode_t/s/u: 38.1
               decode_t/s: 38.1
-              decode_tolerance: 0.25
+              prefill_time_to_first_token_tolerance: 0.25
+              decode_t_s_tolerance: 0.25
+              decode_t_s_u_tolerance: 0.25
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -191,10 +186,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 108.8
-              prefill_tolerance: 0.15
               decode_t/s/u: 21.08
               decode_t/s: 675.31
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -226,10 +219,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 90
-              prefill_tolerance: 0.25
               decode_t/s/u: 21.0
               decode_t/s: 672.0
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.25
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -252,10 +244,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 240
-              prefill_tolerance: 0.4
               decode_t/s/u: 13.25
               decode_t/s: 424.0
-              decode_tolerance: 0.4
+              prefill_time_to_first_token_tolerance: 0.4
+              decode_t_s_tolerance: 0.4
+              decode_t_s_u_tolerance: 0.4
             accuracy:
               top1: 99.0
               top5: 100.0
@@ -280,10 +273,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 100.0
-              prefill_tolerance: 0.27
               decode_t/s/u: 20.0
               decode_t/s: 640.0
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.27
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -315,10 +307,10 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 100.0
-              prefill_tolerance: 0.15
               decode_t/s/u: 24.0
               decode_t/s: 768.0
-              decode_tolerance: 0.16
+              decode_t_s_tolerance: 0.16
+              decode_t_s_u_tolerance: 0.16
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -341,10 +333,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 73
-              prefill_tolerance: 0.25
               decode_t/s/u: 16.0
               decode_t/s: 512.0
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.25
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -367,12 +358,13 @@ targets:
             status: active
             perf:
               prefill_t/s: 84.0
-              prefill_tolerance: 0.3
               # decode targets lowered from 27 → 24 after observed regression
               # to 24.95 t/s in scheduled run 25778148259 (2026-05-13).
               decode_t/s/u: 24.0
               decode_t/s: 24.0
-              decode_tolerance: 0.2
+              prefill_t_s_tolerance: 0.3
+              decode_t_s_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -391,7 +383,8 @@ targets:
               # (see PR #43982 description) before it can gate CI usefully.
               decode_t/s/u: 16.0
               decode_t/s: 16.0
-              decode_tolerance: 0.25
+              decode_t_s_tolerance: 0.25
+              decode_t_s_u_tolerance: 0.25
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -491,10 +484,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 400
-              prefill_tolerance: 0.15
               decode_t/s/u: 12.0
               decode_t/s: 2200.0
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -505,10 +496,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 250
-              prefill_tolerance: 0.15
               decode_t/s/u: 5.0
               decode_t/s: 650.0
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -542,10 +531,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 1700
-              prefill_tolerance: 0.15
               decode_t/s/u: 8.0
               decode_t/s: 2200.0
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -556,10 +543,8 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 400
-              prefill_tolerance: 0.15
               decode_t/s/u: 3.0
               decode_t/s: 380.0
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U08TJ70UFRT # Stuti Raizada
             team: models
@@ -573,9 +558,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 130
-              prefill_tolerance: 0.15
               decode_t/s/u: 124.0
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -586,9 +571,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 140
-              prefill_tolerance: 0.15
               decode_t/s/u: 105.0
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -599,9 +584,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 220
-              prefill_tolerance: 0.15
               decode_t/s/u: 77.5
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -642,7 +627,6 @@ targets:
               prefill_t/s: 19.3
               decode_t/s/u: 15.9
               decode_t/s: 254.4
-              decode_tolerance: 0.15
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -675,10 +659,9 @@ targets:
             # Set ~10% below observed for headroom.
             perf:
               prefill_t/s: 10.0
-              prefill_tolerance: 0.3
               decode_t/s/u: 8.0
               decode_t/s: 8.0
-              decode_tolerance: 0.15
+              prefill_t_s_tolerance: 0.3
             accuracy: {}
             owner_id: U07RY6B5FLJ # Gongyu Wang
             team: models
@@ -701,10 +684,9 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 73
-              prefill_tolerance: 0.25
               decode_t/s/u: 16.0
               decode_t/s: 512.0
-              decode_tolerance: 0.15
+              prefill_time_to_first_token_tolerance: 0.25
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -779,10 +761,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 104.52
-              prefill_tolerance: 0.27
               decode_t/s/u: 14.45
               decode_t/s: 466.21
-              decode_tolerance: 0.27
+              prefill_time_to_first_token_tolerance: 0.27
+              decode_t_s_tolerance: 0.27
+              decode_t_s_u_tolerance: 0.27
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -829,10 +812,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 105
-              prefill_tolerance: 0.27
               decode_t/s/u: 20.7
               decode_t/s: 662.4
-              decode_tolerance: 0.27
+              prefill_time_to_first_token_tolerance: 0.27
+              decode_t_s_tolerance: 0.27
+              decode_t_s_u_tolerance: 0.27
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -855,10 +839,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 138.7
-              prefill_tolerance: 0.4
               decode_t/s/u: 16.3
               decode_t/s: 516.1
-              decode_tolerance: 0.4
+              prefill_time_to_first_token_tolerance: 0.4
+              decode_t_s_tolerance: 0.4
+              decode_t_s_u_tolerance: 0.4
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
@@ -944,10 +929,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 68.58
-              prefill_tolerance: 0.27
               decode_t/s/u: 25.66
               decode_t/s: 821.12
-              decode_tolerance: 0.27
+              prefill_time_to_first_token_tolerance: 0.27
+              decode_t_s_tolerance: 0.27
+              decode_t_s_u_tolerance: 0.27
             accuracy:
               top1: 89.0
               top5: 99.0
@@ -978,10 +964,11 @@ targets:
             status: active
             perf:
               prefill_time_to_first_token: 85.99
-              prefill_tolerance: 0.27
               decode_t/s/u: 39.4
               decode_t/s: 1260.8
-              decode_tolerance: 0.27
+              prefill_time_to_first_token_tolerance: 0.27
+              decode_t_s_tolerance: 0.27
+              decode_t_s_u_tolerance: 0.27
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
