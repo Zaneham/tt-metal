@@ -13,7 +13,7 @@ namespace ckernel {
 
 template <bool APPROXIMATE, ckernel::BinaryOp BINOP>
 inline void llk_math_eltwise_binary_sfpu_binop_init() {
-    _llk_math_eltwise_unary_sfpu_init_();
+    _llk_math_eltwise_sfpu_init_();
     ckernel::sfpu::sfpu_binary_init<APPROXIMATE, BINOP>();
 }
 

@@ -18,7 +18,8 @@
 #endif
 
 #ifdef TRISC_PACK
-#include "llk_pack_api.h"
+#include "llk_pack_tile_api.h"
+#include "llk_pack_common_api.h"
 #endif
 
 #ifdef TRISC_MATH
@@ -135,6 +136,7 @@ ALWI void copy_block_matmul_partials(
 // Quasar Int32 SFPU binary ops use UNP_DEST (L1 -> DST directly), not srcA + datacopy.
 // Mirrors the LLK sfpu_binary_quasar_test.cpp unpack-to-dest path.
 
+// One-time init for unpack-to-dest SFPU binary: dest dvalid chain + unpack/math/pack HW config.
 ALWI void sfpu_unpack_to_dest_hw_init(uint32_t icb0, uint32_t icb1, uint32_t ocb) {
     UNPACK((set_up_dest_dvalid_per_thread<dest_dvalid_client::UNPACK>(
         {dest_dvalid_client::UNPACK, dest_dvalid_client::SFPU, dest_dvalid_client::PACK})));
@@ -148,14 +150,18 @@ ALWI void sfpu_unpack_to_dest_hw_init(uint32_t icb0, uint32_t icb1, uint32_t ocb
     PACK((llk_pack_init(ocb)));
 }
 
+// Unpack one tile from L1 directly into DST[dst_tile_index] (UNP_DEST path).
 ALWI void unpack_tile_to_dest(uint32_t in_cb_id, uint32_t in_tile_index, uint32_t dst_tile_index) {
     UNPACK((llk_unpack_A_to_dest(in_cb_id, in_tile_index, dst_tile_index)));
 }
 
+// Signal unpack section complete on the dest dvalid chain.
 ALWI void unpack_tile_to_dest_section_done() { UNPACK((_llk_unpack_dest_dvalid_section_done_<DST_SYNC_MODE>())); }
 
+// Signal SFPU section complete on the dest dvalid chain.
 ALWI void sfpu_op_dest_section_done() { MATH((_llk_math_set_dvalid_<p_cleardvalid::SFPU, DST_SYNC_MODE>())); }
 
+// Signal pack section complete on the dest dvalid chain.
 ALWI void pack_tile_dest_dvalid_section_done() {
     PACK((llk_pack_dest_dvalid_section_done<DST_SYNC_MODE, DST_ACCUM_MODE>()));
 }
