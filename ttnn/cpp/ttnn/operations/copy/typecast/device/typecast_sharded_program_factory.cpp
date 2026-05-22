@@ -4,6 +4,7 @@
 
 #include "typecast_sharded_program_factory.hpp"
 
+#include <tt-metalium/tilize_utils.hpp>  // for round_up_to_mul32
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/core_coord.hpp>
 #include <tt-metalium/hal.hpp>
