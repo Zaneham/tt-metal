@@ -923,7 +923,7 @@ INSTANTIATE_TEST_SUITE_P(
     SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture,
     ::testing::Values(
         // std::make_tuple(1, "div_binary")
-        //  std::make_tuple(4, "div_binary"),
+        //   std::make_tuple(4, "div_binary"),
         std::make_tuple(1, "add_int")
         // std::make_tuple(4, "add_int")
         ));

@@ -8,45 +8,36 @@
 
 #include "api/compute/eltwise_unary/sfpu_split_includes.h"
 #include "api/compute/tile_move_copy.h"
-#ifdef SFPU_BINARY_OP
-#include "api/compute/eltwise_unary/eltwise_unary.h"
-#endif
 
 #ifdef ARCH_QUASAR
-#include "experimental/dataflow_buffer.h"
+#include "api/dataflow/dataflow_buffer.h"
+#include "experimental/kernel_args.h"
 #else
-#include "experimental/circular_buffer.h"
+#include "api/dataflow/circular_buffer.h"
 #endif
 
 void kernel_main() {
+#ifdef ARCH_QUASAR
+    uint32_t per_core_block_cnt = get_arg(args::per_core_block_cnt);
+    uint32_t per_core_block_size = get_arg(args::per_core_block_size);
+    uint32_t acc_to_dst = get_arg(args::acc_to_dst);
+#else
     uint32_t per_core_block_cnt = get_arg_val<uint32_t>(0);
     uint32_t per_core_block_size = get_arg_val<uint32_t>(1);
     uint32_t acc_to_dst = get_arg_val<uint32_t>(2);
-
-
-    #ifdef ARCH_QUASAR
-        constexpr uint32_t dfb_in0_id = get_compile_time_arg_val(0);
-        constexpr uint32_t dfb_in1_id = get_compile_time_arg_val(1);
-        constexpr uint32_t dfb_in2_id = get_compile_time_arg_val(2);
-        constexpr uint32_t dfb_out_id = get_compile_time_arg_val(3);
-        experimental::DataflowBuffer dfb_in0(dfb_in0_id);
-        experimental::DataflowBuffer dfb_in1(dfb_in1_id);
-        experimental::DataflowBuffer dfb_in2(dfb_in2_id);
-        experimental::DataflowBuffer dfb_out(dfb_out_id);
-#ifdef SFPU_BINARY_OP
-        init_sfpu(dfb_in0.get_id(), dfb_out.get_id());
-        copy_tile_to_dst_init_short(dfb_in0.get_id());
-#ifdef SFPU_OP_INIT_0
-        SFPU_OP_INIT_0
 #endif
-#else
-        binary_op_init_common(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
+
+#ifdef ARCH_QUASAR
+    DataflowBuffer dfb_in0(dfb::in0);
+    DataflowBuffer dfb_in1(dfb::in1);
+    DataflowBuffer dfb_in2(dfb::in2);
+    DataflowBuffer dfb_out(dfb::out);
+    binary_op_init_common(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
 #if not defined ELTWISE_DEST_REUSE_TYPE
 #ifdef FULL_INIT
-        binary_tiles_init<true, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
+    binary_tiles_init<true, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
 #else
-        binary_tiles_init<false, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
-#endif
+    binary_tiles_init<false, ELTWISE_OP_TYPE>(dfb_in0.get_id(), dfb_in1.get_id());
 #endif
 #endif
 #else
@@ -56,13 +47,6 @@ void kernel_main() {
     constexpr auto cb_inp1 = cb_in1;
     constexpr auto cb_out0 = tt::CBIndex::c_16;
     constexpr auto cb_in2 = tt::CBIndex::c_2;
-#ifdef SFPU_BINARY_OP
-    init_sfpu(cb_inp0, cb_out0);
-    copy_tile_to_dst_init_short(cb_inp0);
-#ifdef SFPU_OP_INIT_0
-    SFPU_OP_INIT_0
-#endif
-#else
     binary_op_init_common(cb_inp0, cb_inp1, cb_out0);
 #if not defined ELTWISE_DEST_REUSE_TYPE
 #ifdef FULL_INIT
@@ -72,60 +56,22 @@ void kernel_main() {
 #endif
 #endif
 #endif
-#endif
 
 #ifdef PACK_RELU
     PACK((llk_pack_relu_config(ReluType::ZERO_RELU)));
 #endif
 
     for (uint32_t block = 0; block < per_core_block_cnt; ++block) {
-        #ifdef ARCH_QUASAR
-            dfb_in0.wait_front(per_core_block_size);
-            dfb_in1.wait_front(per_core_block_size);
-            dfb_out.reserve_back(per_core_block_size);
-        #else
-            cb_wait_front(cb_inp0, per_core_block_size);
-            cb_wait_front(cb_inp1, per_core_block_size);
-            cb_reserve_back(cb_out0, per_core_block_size);
-        #endif
-
-#ifdef SFPU_BINARY_OP
-            // SFPU binary path (e.g. div_binary). Each pair is its own
-            // acquire/release: bring LHS into DST[0], RHS into DST[1], run the op
-            // (SFPU_OP_CHAIN_0 expands to e.g. div_binary_tile(0, 1, 0)) so the
-            // result lands at DST[0], then pack DST[0]. Two DST slots suffice
-            // regardless of per_core_block_size.
-            // Re-init copy_tile_to_dst before each copy_tile call so the unpacker
-            // is pointed at the right input CB/DFB; copy_tile_to_dst_init_short
-            // configures unpacker state for a single source.
-            for (uint32_t i = 0; i < per_core_block_size; ++i) {
-                tile_regs_acquire();
 #ifdef ARCH_QUASAR
-                copy_tile_to_dst_init_short(dfb_in0.get_id());
-                copy_tile(dfb_in0.get_id(), i, 0);
-                copy_tile_to_dst_init_short(dfb_in1.get_id());
-                copy_tile(dfb_in1.get_id(), i, 1);
+        dfb_in0.wait_front(per_core_block_size);
+        dfb_in1.wait_front(per_core_block_size);
+        dfb_out.reserve_back(per_core_block_size);
 #else
-                copy_tile_to_dst_init_short(cb_inp0);
-                copy_tile(cb_inp0, i, 0);
-                copy_tile_to_dst_init_short(cb_inp1);
-                copy_tile(cb_inp1, i, 1);
+        cb_wait_front(cb_inp0, per_core_block_size);
+        cb_wait_front(cb_inp1, per_core_block_size);
+        cb_reserve_back(cb_out0, per_core_block_size);
 #endif
-#ifdef SFPU_OP_CHAIN_0
-                SFPU_OP_CHAIN_0
-#endif
-                tile_regs_commit();
-
-                tile_regs_wait();
-#ifdef ARCH_QUASAR
-                pack_tile(0, dfb_out.get_id());
-#else
-                pack_tile(0, cb_out0);
-#endif
-                tile_regs_release();
-            }
-#else
-            tile_regs_acquire();
+        tile_regs_acquire();
 
 #if defined(DST_ACCUM_MODE) || defined(ACC_TO_DEST) || defined(ELTWISE_DEST_REUSE_TYPE)
 #ifdef ARCH_QUASAR
@@ -148,41 +94,41 @@ void kernel_main() {
 #if defined(DST_ACCUM_MODE) || defined(ACC_TO_DEST)
 // The following define is needed for WH/BH if mul_tiles/_init is used
 #if defined(MUL_TILES_WITH_DST_ACCUM)
-    #ifdef ARCH_QUASAR
+#ifdef ARCH_QUASAR
         ELTWISE_OP_INIT(dfb_in0.get_id(), dfb_in1.get_id());
-    #else
-        ELTWISE_OP_INIT(cb_inp0, cb_inp1);
-    #endif
 #else
-    #ifdef ARCH_QUASAR
+        ELTWISE_OP_INIT(cb_inp0, cb_inp1);
+#endif
+#else
+#ifdef ARCH_QUASAR
         ELTWISE_OP_INIT(dfb_in0.get_id(), dfb_in1.get_id(), true);
-    #else
+#else
         ELTWISE_OP_INIT(cb_inp0, cb_inp1, true);
-    #endif
+#endif
 #endif
 #endif
 
 #ifdef ELTWISE_DEST_REUSE_TYPE
-    #ifdef ARCH_QUASAR
+#ifdef ARCH_QUASAR
         binary_dest_reuse_tiles_init<ELTWISE_OP_TYPE, ELTWISE_DEST_REUSE_TYPE>(dfb_in0.get_id());
-    #else
+#else
         binary_dest_reuse_tiles_init<ELTWISE_OP_TYPE, ELTWISE_DEST_REUSE_TYPE>(cb_inp0);
-    #endif
+#endif
 #endif
 
         for (uint32_t i = 0; i < per_core_block_size; ++i) {
 #ifdef ELTWISE_DEST_REUSE_TYPE
-    #ifdef ARCH_QUASAR
+#ifdef ARCH_QUASAR
             binary_dest_reuse_tiles<ELTWISE_OP_TYPE, ELTWISE_DEST_REUSE_TYPE>(dfb_in0.get_id(), i, i);
-    #else
-            binary_dest_reuse_tiles<ELTWISE_OP_TYPE, ELTWISE_DEST_REUSE_TYPE>(cb_inp0, i, i);
-    #endif
 #else
-    #ifdef ARCH_QUASAR
+            binary_dest_reuse_tiles<ELTWISE_OP_TYPE, ELTWISE_DEST_REUSE_TYPE>(cb_inp0, i, i);
+#endif
+#else
+#ifdef ARCH_QUASAR
             ELTWISE_OP(dfb_in0.get_id(), dfb_in1.get_id(), i, i, i);
-    #else
+#else
             ELTWISE_OP(cb_inp0, cb_inp1, i, i, i);
-    #endif
+#endif
 #endif
 
 #ifdef SFPU_OP_CHAIN_0
@@ -193,19 +139,18 @@ void kernel_main() {
 
         tile_regs_wait();
         for (uint32_t i = 0; i < per_core_block_size; ++i) {
-        #ifdef ARCH_QUASAR
+#ifdef ARCH_QUASAR
             pack_tile(i, dfb_out.get_id());
-        #else
+#else
             pack_tile(i, cb_out0);
-        #endif
+#endif
         }
         tile_regs_release();
-#endif  // SFPU_BINARY_OP
 
 #ifdef ARCH_QUASAR
-            dfb_in0.pop_front(per_core_block_size);
-            dfb_in1.pop_front(per_core_block_size);
-            dfb_out.push_back(per_core_block_size);
+        dfb_in0.pop_front(per_core_block_size);
+        dfb_in1.pop_front(per_core_block_size);
+        dfb_out.push_back(per_core_block_size);
 #else
         cb_pop_front(cb_inp0, per_core_block_size);
         cb_pop_front(cb_inp1, per_core_block_size);

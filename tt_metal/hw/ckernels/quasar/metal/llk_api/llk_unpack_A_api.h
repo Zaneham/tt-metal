@@ -46,9 +46,8 @@ inline void llk_unpack_A_init(
     const std::uint32_t operand = 0) {
     const std::uint32_t operand_id = get_operand_id(operand);
 
-    static_assert(unpack_to_dest || acc_to_dest == false, "acc_to_dest is not yet supported on Quasar");
-    static_assert(
-        unpack_to_dest || BType == BroadcastType::NONE, "Only BroadcastType::NONE is supported on Quasar right now");
+    static_assert(acc_to_dest == false, "acc_to_dest is not yet supported on Quasar");
+    static_assert(BType == BroadcastType::NONE, "Only BroadcastType::NONE is supported on Quasar right now");
 
     // TODO (tt-metal #42916): Once runtime asserts are added, add asserts for unsupported features above and for valid
     // transpose_of_faces and within_face_16x16_transpose values

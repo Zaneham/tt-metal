@@ -53,10 +53,25 @@ ALWI void copy_tile_to_dst_init_short(
 #else
     LLK_ASSERT(transpose_within_16x16_face == false, "Transpose within face not supported on Quasar");
     LLK_ASSERT(transpose == 0, "Transpose not supported on Quasar");
-    UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(
-        transpose, transpose_within_16x16_face, cbid)));
+    UNPACK((llk_unpack_A_init<false, DST_ACCUM_MODE>(cbid)));
+    MATH((llk_math_eltwise_unary_datacopy_init<DataCopyType::A2D, DST_ACCUM_MODE>(cbid)));
 #endif
 }
+
+#ifdef ARCH_QUASAR
+// Init unpacker for UNP_DEST (L1 -> DST directly). Pair with unpack_tile_to_dest(), not copy_tile().
+ALWI void copy_tile_to_dst_unp_dest_init_short(
+    uint32_t cbid,
+    uint32_t transpose = 0,
+    uint32_t transpose_within_16x16_face = false,
+    uint32_t call_line = __builtin_LINE()) {
+    LLK_ASSERT(transpose_within_16x16_face == false, "Transpose within face not supported on Quasar");
+    LLK_ASSERT(transpose == 0, "Transpose not supported on Quasar");
+    state_configure(cbid, call_line);
+    UNPACK((llk_unpack_A_init<BroadcastType::NONE, false, EltwiseBinaryReuseDestType::NONE, true>(
+        transpose, transpose_within_16x16_face, cbid)));
+}
+#endif
 /**
  * Perform a init for the copy tile operation. This calls the short init function and initializes packer dst offset
  * registers.

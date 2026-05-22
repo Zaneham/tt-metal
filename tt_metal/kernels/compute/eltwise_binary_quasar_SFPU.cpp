@@ -36,9 +36,9 @@ void kernel_main() {
         // Per-tile: unpack LHS/RHS to DST[0]/DST[1], run SFPU op, pack DST[0].
         // Re-init before each unpack so the unpacker points at the right input DFB.
         for (uint32_t i = 0; i < per_core_block_size; ++i) {
-            copy_tile_to_dst_init_short(dfb_in0.get_id());
+            copy_tile_to_dst_unp_dest_init_short(dfb_in0.get_id());
             unpack_tile_to_dest(dfb_in0.get_id(), i, 0);
-            copy_tile_to_dst_init_short(dfb_in1.get_id());
+            copy_tile_to_dst_unp_dest_init_short(dfb_in1.get_id());
             unpack_tile_to_dest(dfb_in1.get_id(), i, 1);
             unpack_tile_to_dest_section_done();
 #ifdef SFPU_OP_CHAIN_0
