@@ -7,7 +7,6 @@
 #include "distributed/mesh_device_impl.hpp"
 #include "impl/buffers/drisc_l1_arena.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <utility>
 
@@ -43,56 +42,145 @@ constexpr const char* kKernelPath = "tt_metal/distributed/kernels/dram_core_pref
 
 inline uint32_t align_up(uint32_t a, uint32_t align) { return (a + align - 1) & ~(align - 1); }
 
-struct BlockGeom {
-    uint32_t num_blocks = 0;
-    uint32_t dma_block_size = 0;  // bytes/K-block/bank
-    uint32_t push_page_size = 0;  // bytes/K-block/receiver
-};
+// Cap for DMA-side page selection (mirrors worker-core ttnn.dram_prefetcher; see
+// docs/prefetcher_matmul_design.md §5 / §6 and dram_prefetcher_program_factory.cpp:21).
+// File-local duplicate by design — the two prefetcher paths share the algorithm but
+// not a header (see the plan file: prefetcher_matmul_design.md cross-component invariants).
+constexpr uint32_t kMaxStagePageSize = 8 * 1024;
 
-BlockGeom compute_block_geom(const MeshTensor& t, uint32_t num_receivers, uint32_t k_block_w_tiles) {
-    const auto* ref_buffer = t.mesh_buffer().get_reference_buffer();
-    const auto shard_shape = ref_buffer->shard_spec().shape();
-    const uint32_t bytes_per_tile = tt::tile_size(datatype_to_dataformat_converter(t.dtype()));
-    const uint32_t k_tiles = shard_shape[0] / tt::constants::TILE_HEIGHT;
-    const uint32_t n_tiles_per_bank = shard_shape[1] / tt::constants::TILE_WIDTH;
+// Largest `page` (multiple of tile_size, <= max_page_size) such that num_tiles*tile_size
+// is divisible by page. Returns (page_size, num_pages). Identical algorithm to
+// ttnn::prim::get_max_page_size_and_num_pages.
+std::pair<uint32_t, uint32_t> pick_page_size(uint32_t max_page_size, uint32_t num_tiles, uint32_t tile_size) {
+    const uint64_t total = static_cast<uint64_t>(num_tiles) * tile_size;
+    uint32_t page = (max_page_size / tile_size) * tile_size;
+    while (page >= tile_size && total % page != 0) {
+        page -= tile_size;
+    }
     TT_FATAL(
-        n_tiles_per_bank % num_receivers == 0,
-        "n_tiles_per_bank ({}) must divide num_receivers ({})",
-        n_tiles_per_bank,
-        num_receivers);
-    TT_FATAL(
-        k_tiles % k_block_w_tiles == 0,
-        "k_tiles ({}) must be divisible by dram_core_k_block_w_tiles ({})",
-        k_tiles,
-        k_block_w_tiles);
-    const uint32_t n_tiles_per_receiver = n_tiles_per_bank / num_receivers;
-    BlockGeom g;
-    g.num_blocks = k_tiles / k_block_w_tiles;
-    g.dma_block_size = k_block_w_tiles * n_tiles_per_bank * bytes_per_tile;
-    g.push_page_size = k_block_w_tiles * n_tiles_per_receiver * bytes_per_tile;
-    return g;
+        page >= tile_size,
+        "pick_page_size could not find a page that divides num_tiles*tile_size={} (tile={})",
+        static_cast<uint64_t>(total),
+        tile_size);
+    return {page, static_cast<uint32_t>(total / page)};
 }
 
-// Smallest M dividing num_receivers such that 2 * (dma_block_size / M) <= stage_budget
-// for every tensor. M must divide num_receivers; M=1 is the original single-push behavior.
-uint32_t pick_M(const std::vector<BlockGeom>& geoms, uint32_t num_receivers, uint32_t stage_budget) {
-    for (uint32_t m = 1; m <= num_receivers; ++m) {
-        if (num_receivers % m != 0) {
-            continue;
-        }
-        bool ok = true;
-        for (const auto& g : geoms) {
-            const uint32_t chunk_size = g.dma_block_size / m;
-            if (2 * chunk_size > stage_budget) {
-                ok = false;
+// Per-tensor geometry handed to the DRAM-core prefetcher kernel. All values are derived
+// from the tensor shape + dtype + GCB ring topology + DRISC L1 stage budget; the caller
+// (compute_tensor_geom) picks (rows_per_sub, M) by the fit ladder documented in
+// docs/prefetcher_matmul_design.md §6.
+//
+// Invariant: rows_per_sub > 1 implies M == 1 (the kernel cannot row-stride DMA).
+struct TensorGeom {
+    uint32_t bank_local_base = 0;      // GDDR offset where this tensor starts in the bank
+    uint32_t num_sub = 0;              // sub-bands per ring-block
+    uint32_t M = 0;                    // N-chunks per sub-band (divides num_receivers)
+    uint32_t rows_per_sub = 0;         // K-rows per sub-band
+    uint32_t coalesced_page_size = 0;  // bytes per K-row per receiver per coalesced page
+    uint32_t coalesced_num_pages = 0;  // coalesced pages per K-row per receiver
+    uint32_t sub_chunk_bytes = 0;      // bytes per DMA into one ring half
+    uint32_t sub_stride_bytes = 0;     // DRAM byte stride between sub-bands within a block
+    uint32_t block_stride_bytes = 0;   // DRAM byte stride between ring-blocks
+    uint32_t page_bytes_per_recv = 0;  // bytes per receiver per full block (fifo_page_size)
+};
+
+TensorGeom compute_tensor_geom(
+    const MeshTensor& t, uint32_t bank_local_base, uint32_t num_senders, uint32_t num_receivers, uint32_t ring_half) {
+    const auto* ref_buffer = t.mesh_buffer().get_reference_buffer();
+    const auto shard_shape = ref_buffer->shard_spec().shape();
+    const uint32_t tile_bytes = tt::tile_size(datatype_to_dataformat_converter(t.dtype()));
+    const uint32_t k_tiles_raw = shard_shape[0] / tt::constants::TILE_HEIGHT;
+    const uint32_t n_per_bank = shard_shape[1] / tt::constants::TILE_WIDTH;
+    const uint32_t num_blocks = num_senders * num_receivers;
+    TT_FATAL(
+        n_per_bank % num_receivers == 0,
+        "n_per_bank ({}) must divide num_receivers ({}); reduce N_per_bank or grow num_receivers",
+        n_per_bank,
+        num_receivers);
+    // ceil-up matches worker-core ttnn.dram_prefetcher's tt::round_up(height, num_blocks);
+    // the tail block reads past the tensor bytes for tensors whose K_tiles doesn't divide
+    // ring_size. See docs/prefetcher_matmul_design.md §5.
+    const uint32_t k_block_w_tiles = (k_tiles_raw + num_blocks - 1) / num_blocks;
+    const uint32_t n_per_recv = n_per_bank / num_receivers;
+    const uint32_t row_bytes = n_per_bank * tile_bytes;
+    const uint32_t block_bytes = k_block_w_tiles * row_bytes;
+    const auto [coalesced_page_size, coalesced_num_pages] = pick_page_size(kMaxStagePageSize, n_per_recv, tile_bytes);
+    TT_FATAL(
+        coalesced_page_size <= kNocMaxBurstSizeBytes,
+        "DRAM-core prefetcher coalesced page size ({} B) exceeds the one-packet NoC write "
+        "limit ({} B). Reduce N_per_bank or increase num_global_cb_receivers.",
+        coalesced_page_size,
+        kNocMaxBurstSizeBytes);
+
+    // Fit ladder (docs/prefetcher_matmul_design.md §6).
+    uint32_t rows_per_sub = 0;
+    uint32_t M = 1;
+    if (block_bytes <= ring_half) {
+        // Case 1: full block fits — fast path (matches the pre-refactor single-shot).
+        rows_per_sub = k_block_w_tiles;
+        M = 1;
+    } else if (row_bytes <= ring_half) {
+        // Case 2: K-sub only. Largest divisor of k_block_w_tiles whose row-band fits.
+        rows_per_sub = 1;
+        for (uint32_t d = k_block_w_tiles; d >= 1; --d) {
+            if (k_block_w_tiles % d == 0 && static_cast<uint64_t>(d) * row_bytes <= ring_half) {
+                rows_per_sub = d;
                 break;
             }
         }
-        if (ok) {
-            return m;
+        M = 1;
+    } else {
+        // Case 3: K-sub + N-chunk; rows_per_sub=1 forces M-chunking onto a single K-row,
+        // which is bit-exact today's M>1 N-chunked behavior (contiguous N-stripe per chunk).
+        rows_per_sub = 1;
+        bool picked = false;
+        for (uint32_t m = 1; m <= num_receivers; ++m) {
+            if (num_receivers % m == 0 && (row_bytes / m) <= ring_half) {
+                M = m;
+                picked = true;
+                break;
+            }
         }
+        TT_FATAL(
+            picked,
+            "DRAM-core prefetcher cannot fit one K-row of tensor (k_tiles={}, n_per_bank={}, "
+            "tile_bytes={}, row_bytes={} B) into DRISC L1 stage half ({} B) even with "
+            "M=num_receivers ({}). Increase num_global_cb_receivers, reduce N_per_bank, or "
+            "use the worker-core prefetcher.",
+            k_tiles_raw,
+            n_per_bank,
+            tile_bytes,
+            row_bytes,
+            ring_half,
+            num_receivers);
     }
-    return 0u;
+    const uint32_t num_sub = k_block_w_tiles / rows_per_sub;
+    const uint32_t sub_chunk_bytes = rows_per_sub * (n_per_bank / M) * tile_bytes;
+    TT_FATAL(
+        sub_chunk_bytes <= ring_half,
+        "Internal: chunk size {} B exceeds ring_half {} B after fit ladder. This is a bug "
+        "in compute_tensor_geom; please file an issue with k_tiles={}, n_per_bank={}, "
+        "tile_bytes={}, rows_per_sub={}, M={}.",
+        sub_chunk_bytes,
+        ring_half,
+        k_tiles_raw,
+        n_per_bank,
+        tile_bytes,
+        rows_per_sub,
+        M);
+
+    TensorGeom g;
+    g.bank_local_base = bank_local_base;
+    g.num_sub = num_sub;
+    g.M = M;
+    g.rows_per_sub = rows_per_sub;
+    g.coalesced_page_size = coalesced_page_size;
+    g.coalesced_num_pages = coalesced_num_pages;
+    g.sub_chunk_bytes = sub_chunk_bytes;
+    g.sub_stride_bytes = rows_per_sub * row_bytes;
+    g.block_stride_bytes = k_block_w_tiles * row_bytes;
+    g.page_bytes_per_recv = k_block_w_tiles * coalesced_num_pages * coalesced_page_size;
+    return g;
 }
 
 // Build a single-device DRISC prefetcher Program from the GCB + tensor metadata.
@@ -125,21 +213,14 @@ std::unique_ptr<Program> build_program(
             "All senders must have the same receiver count for the DRAM-core prefetcher");
     }
 
-    const uint32_t k_block_w_tiles = config.dram_core_k_block_w_tiles;
-    TT_FATAL(k_block_w_tiles > 0, "dram_core_k_block_w_tiles must be > 0");
+    // num_blocks (= ring_size) is the per-layer push count per receiver per tensor;
+    // matches the receiver matmul's wait_front(num_blocks) at
+    // ttnn/.../reader_bmm_tile_layout_in1_ring_all_gather.cpp:141. All tensors share it.
+    const uint32_t num_blocks = num_senders * num_receivers;
 
-    // Per-tensor block geometry; the manager assumes all tensors share num_blocks.
-    std::vector<BlockGeom> geoms;
-    geoms.reserve(data_tensors.size());
-    uint32_t first_num_blocks = 0;
-    for (size_t ti = 0; ti < data_tensors.size(); ++ti) {
-        auto g = compute_block_geom(*data_tensors[ti], num_receivers, k_block_w_tiles);
-        if (ti == 0) {
-            first_num_blocks = g.num_blocks;
-        }
-        TT_FATAL(g.num_blocks == first_num_blocks, "All tensors must share the same num_blocks");
-        geoms.push_back(g);
-    }
+    // DRISC L1 layout (see tt_metal/impl/buffers/drisc_l1_arena.hpp):
+    //   kernel_working_region_base + [noc_xy table][config][stage_ring]
+    // The stage_ring is split into two halves by the kernel (ping-pong, ring_depth=2).
     auto& arena = mesh_device->impl().drisc_l1_arena();
     const uint32_t kernel_region_size = arena.kernel_working_region_size();
     TT_FATAL(
@@ -147,46 +228,7 @@ std::unique_ptr<Program> build_program(
         "DRISC L1 kernel region ({} B) too small for the prefetcher kernel overhead ({} B)",
         kernel_region_size,
         kKernelOverheadBytes);
-    const uint32_t stage_budget = kernel_region_size - kKernelOverheadBytes;
-    const uint32_t M = pick_M(geoms, num_receivers, stage_budget);
-    TT_FATAL(
-        M > 0,
-        "No valid num_dma_chunks_per_block found: even with M=num_receivers ({}), the per-chunk "
-        "stage buffer ({} B) exceeds half the DRISC L1 stage budget ({} B). Increase the ring size or "
-        "reduce N_per_bank.",
-        num_receivers,
-        geoms.empty() ? 0 : geoms.front().dma_block_size / num_receivers,
-        stage_budget);
-    TT_FATAL(
-        k_block_w_tiles == 1 || M == 1,
-        "DRAM-core prefetcher only supports num_dma_chunks_per_block > 1 when "
-        "dram_core_k_block_w_tiles == 1. Got dram_core_k_block_w_tiles={} and "
-        "num_dma_chunks_per_block={}. Larger K-blocks need row-strided DMA chunking; "
-        "otherwise receiver slices are not contiguous in the staged DRAM block.",
-        k_block_w_tiles,
-        M);
-    for (const auto& g : geoms) {
-        const uint32_t row_push_size = g.push_page_size / k_block_w_tiles;
-        TT_FATAL(
-            row_push_size <= kNocMaxBurstSizeBytes,
-            "DRAM-core prefetcher row push size ({} B) exceeds the one-packet NoC write "
-            "limit ({} B). Increase num_global_cb_receivers / BENCH_RECV_PER_BANK or "
-            "reduce N_per_bank; larger writes are not split by the DRISC prefetcher.",
-            row_push_size,
-            kNocMaxBurstSizeBytes);
-    }
-
-    uint32_t max_chunk_size = 0;
-    for (const auto& g : geoms) {
-        max_chunk_size = std::max(max_chunk_size, g.dma_block_size / M);
-    }
     const uint32_t l1_alignment = hal::get_l1_alignment();
-    max_chunk_size = align_up(max_chunk_size, l1_alignment);
-
-    // The GCB owns pages_sent (arena-allocated inside the fixed GCB zone of DRISC L1).
-    // Our kernel-local working region (noc_xy / config / stages) sits at the arena's
-    // fixed kernel_working_region_base, which is unchanged by GCB allocations made
-    // either before OR after this prefetcher kernel starts.
     const uint32_t pages_sent_addr = static_cast<uint32_t>(experimental::pages_sent_drisc_l1_base(gcb));
     uint32_t cursor = static_cast<uint32_t>(arena.kernel_working_region_base());
     cursor = align_up(cursor, l1_alignment);
@@ -196,10 +238,31 @@ std::unique_ptr<Program> build_program(
     const uint32_t config_addr = cursor;
     cursor += 16;
     cursor = align_up(cursor, l1_alignment);
-    const uint32_t stage_a_addr = cursor;
-    cursor += max_chunk_size;
-    cursor = align_up(cursor, l1_alignment);
-    const uint32_t stage_b_addr = cursor;
+    const uint32_t stage_ring_base = cursor;
+    const uint32_t region_end = static_cast<uint32_t>(arena.kernel_working_region_base()) + kernel_region_size;
+    TT_FATAL(
+        region_end > stage_ring_base,
+        "DRISC L1 kernel region too small after overhead: region_end={} stage_ring_base={}",
+        region_end,
+        stage_ring_base);
+    // Two halves; each half must be l1-aligned, so round the total down.
+    uint32_t stage_ring_size = (region_end - stage_ring_base);
+    stage_ring_size &= ~(2 * l1_alignment - 1);  // ensure both halves are l1-aligned
+    TT_FATAL(
+        stage_ring_size >= 2 * l1_alignment,
+        "DRISC L1 stage ring too small: {} B (region_end={} stage_ring_base={})",
+        stage_ring_size,
+        region_end,
+        stage_ring_base);
+    const uint32_t ring_half = stage_ring_size / 2;
+
+    // Compute per-tensor geometry; the fit ladder lives in compute_tensor_geom.
+    std::vector<TensorGeom> geoms;
+    geoms.reserve(data_tensors.size());
+    for (const auto* t : data_tensors) {
+        const uint32_t bank_local_base = static_cast<uint32_t>(t->mesh_buffer().address());
+        geoms.push_back(compute_tensor_geom(*t, bank_local_base, num_senders, num_receivers, ring_half));
+    }
 
     auto program = std::make_unique<Program>();
 
@@ -208,11 +271,10 @@ std::unique_ptr<Program> build_program(
         std::vector<uint32_t> compile_args = {
             config.num_layers,
             num_tensors,
-            first_num_blocks,
+            num_blocks,
             num_receivers,
-            max_chunk_size,
-            stage_a_addr,
-            stage_b_addr,
+            stage_ring_base,
+            stage_ring_size,
             kRemoteCBId,
             pages_sent_addr,
             noc_xy_addr,
@@ -220,25 +282,46 @@ std::unique_ptr<Program> build_program(
             gcb.size(),
             static_cast<uint32_t>(gcb.buffer_address()),
             static_cast<uint32_t>(experimental::pages_sent_worker_l1_base(gcb)),
-            M,
-            k_block_w_tiles,
         };
 
         KernelHandle kernel_id = CreateKernel(
             *program, kKernelPath, sender_logical, DramConfig{.noc = NOC::NOC_0, .compile_args = compile_args});
 
-        // RT args: bank_id, [tensor_addrs], [dma_block_sizes], [push_page_sizes], [recv_xy]
+        // RT args: bank_id, then per-tensor blocks (length num_tensors each), then [recv_xy].
+        // Order must match the kernel's read order at the top of kernel_main; see
+        // docs/prefetcher_matmul_design.md §6 "Runtime args".
         std::vector<uint32_t> rt_args;
-        rt_args.reserve(1 + 3 * num_tensors + 2 * num_receivers);
+        rt_args.reserve(1 + 10 * num_tensors + 2 * num_receivers);
         rt_args.push_back(/*bank_id=*/sender_logical.x);
-        for (const auto* t : data_tensors) {
-            rt_args.push_back(static_cast<uint32_t>(t->mesh_buffer().address()));
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.bank_local_base);
         }
         for (const auto& g : geoms) {
-            rt_args.push_back(g.dma_block_size);
+            rt_args.push_back(g.num_sub);
         }
         for (const auto& g : geoms) {
-            rt_args.push_back(g.push_page_size);
+            rt_args.push_back(g.M);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.rows_per_sub);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.coalesced_page_size);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.coalesced_num_pages);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.sub_chunk_bytes);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.sub_stride_bytes);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.block_stride_bytes);
+        }
+        for (const auto& g : geoms) {
+            rt_args.push_back(g.page_bytes_per_recv);
         }
         const auto& receiver_phys = experimental::receiver_coords_per_sender(gcb).at(s);
         for (const auto& c : receiver_phys) {
