@@ -239,12 +239,13 @@ FORCE_INLINE void prefetcher_write_chunk(
     uint8_t noc);
 
 // Bumps local pages_sent + remote NoC semaphore for all receivers by one
-// page, advances iface.fifo_wr_ptr by one page. Called once per block, after
-// all chunks of that block have been written via prefetcher_write_chunk.
+// page (with wrap-gap adjustment), advances iface.fifo_wr_ptr by one page.
+// Called once per block, after all chunks of that block have been written
+// via prefetcher_write_chunk.
 template <bool skip_ptr_update>
 FORCE_INLINE void prefetcher_finalize_block(
     RemoteSenderCBInterface& iface,
-    uint32_t fifo_page_advance,                  // = per-receiver page bytes
+    uint32_t page_bytes_per_recv,                // bytes per receiver per block
     uint32_t num_receivers,
     uint8_t noc);
 ```
@@ -299,53 +300,61 @@ collapses to `rows_per_sub = 1` before allowing `M > 1`.
 Computed by `compute_tensor_geom` in `dram_core_prefetcher_manager.cpp` (the
 DRAM-core analogue of the worker-core's per-tensor derivations in §5):
 
-- `block_num_tiles[t]`, `tile_size[t]` — same as worker-core.
-- `(page_size[t], block_num_pages[t])` — same algorithm as worker-core's
-  `get_max_page_size_and_num_pages` (file-local copy named
-  `pick_page_size`; algorithm identical but kept duplicated by design — no
-  shared header).
-- `(coalesced_page_size[t], coalesced_num_pages[t])` — same.
-- `block_height_in_tiles[t]` — same.
+- `(coalesced_page_size[t], coalesced_num_pages[t])` — same `pick_page_size`
+  algorithm as worker-core's `get_max_page_size_and_num_pages` (file-local
+  copy in the manager; algorithm identical but kept duplicated by design —
+  no shared header).
 - `rows_per_sub[t]`, `num_sub[t]`, `M[t]`, `sub_chunk_bytes[t]` —
   DRAM-core-specific. Derived from the fit ladder above.
+- `sub_stride_bytes[t] = rows_per_sub × n_per_bank × tile_bytes` — GDDR
+  byte stride between sub-bands within a block.
+- `block_stride_bytes[t] = k_block_w_tiles × n_per_bank × tile_bytes` —
+  GDDR byte stride between ring-blocks.
+- `page_bytes_per_recv[t] = k_block_w_tiles × coalesced_num_pages ×
+  coalesced_page_size` — total bytes pushed per receiver per block (the
+  `resize_remote_sender_cb_interface` page size, and the argument to
+  `prefetcher_finalize_block`).
 
-### Compile-time args
+### Compile-time args (13)
 
 ```
 0  num_layers
 1  num_tensors
-2  num_blocks                (= ring_size)
-3  num_receivers             (= num_receivers_per_sender)
-4  stage_ring_base           (L1 addr)
-5  stage_ring_size           (bytes; 2 x ring_half)
-6  ring_depth                (= 2)
-7  remote_cb_id
-8  pages_sent_l1_addr
-9  noc_xy_l1_addr
-10 config_l1_addr
-11 fifo_size_per_receiver
-12 receiver_buffer_address
+2  num_blocks                          (= ring_size)
+3  num_receivers                       (= num_receivers_per_sender)
+4  stage_ring_base                     (L1 addr; split into two halves by kernel)
+5  stage_ring_size                     (bytes; 2 x ring_half)
+6  remote_cb_id                        (= 31)
+7  pages_sent_l1_addr                  (DRISC-local pages_sent slots)
+8  noc_xy_l1_addr                      (per-receiver noc xy table)
+9  config_l1_addr                      (4-uint32 iface config block)
+10 fifo_size_per_receiver              (= gcb.size())
+11 receiver_buffer_address             (GCB receiver-side fifo base)
+12 remote_pages_sent_worker_l1_addr    (per-receiver remote semaphore base)
 ```
+
+Ring depth is fixed at 2 in the kernel (ping-pong slots derived from
+`stage_ring_base` and `stage_ring_base + stage_ring_size / 2`).
 
 Notably absent vs the pre-refactor kernel: `max_chunk_size`, `stage_a_addr`,
 `stage_b_addr`, `num_dma_chunks_per_block (M)`, `k_block_w_tiles`. `M` and
-`k_block_w_tiles` are per-tensor RTAs now.
+`rows_per_sub` are per-tensor RTAs now; the kernel no longer needs a single
+`k_block_w_tiles` constant.
 
 ### Runtime args
 
 ```
 [0]                        bank_id
-[1 .. 1+num_tensors)       tensor_offsets[t]        (GDDR bank-local base)
-[+num_tensors]             page_size[t]
-[+num_tensors]             block_num_pages[t]
-[+num_tensors]             block_num_tiles[t]
-[+num_tensors]             tile_size[t]
-[+num_tensors]             coalesced_page_size[t]
-[+num_tensors]             coalesced_num_pages[t]
-[+num_tensors]             rows_per_sub[t]
+[1 .. 1+num_tensors)       bank_local_base[t]       (GDDR bank-local offset)
 [+num_tensors]             num_sub[t]
 [+num_tensors]             M[t]
+[+num_tensors]             rows_per_sub[t]
+[+num_tensors]             coalesced_page_size[t]
+[+num_tensors]             coalesced_num_pages[t]
 [+num_tensors]             sub_chunk_bytes[t]       (rows_per_sub*n_per_bank/M*tile_bytes)
+[+num_tensors]             sub_stride_bytes[t]
+[+num_tensors]             block_stride_bytes[t]
+[+num_tensors]             page_bytes_per_recv[t]
 [2*num_receivers]          noc_x/noc_y per receiver
 ```
 
@@ -353,40 +362,53 @@ Notably absent vs the pre-refactor kernel: `max_chunk_size`, `stage_a_addr`,
 
 ```
 setup_iface_once();                                       // noc_xy table, config, iface
+issue first DMA into stage_ring[0];                       // prologue for tensor 0
 for layer in [0, num_layers):
   for t in [0, num_tensors):
     pull per-tensor RTAs into locals;
-    issue first DMA into stage_ring[0];
 
-    for blk in [0, num_blocks):
-      experimental::remote_cb_reserve_back(remote_cb_id, 1);
-      fifo_snapshot = iface.fifo_wr_ptr;
-      cum_offset = 0;
+    for c in [0, num_blocks * num_sub[t] * M[t]):
+      blk = c / (num_sub[t] * M[t]);
+      sb  = (c % (num_sub[t] * M[t])) / M[t];
+      ch  = c % M[t];
 
-      for sb in [0, num_sub[t]):
-        for ch in [0, M[t]):
-          slot = (blk * num_sub * M + sb * M + ch) & 1;
+      // On block boundary: reserve a fifo page on every receiver, snapshot wr_ptr.
+      if (sb == 0 and ch == 0):
+        experimental::remote_cb_reserve_back(remote_cb_id, 1);
+        fifo_snapshot   = iface.fifo_wr_ptr;
+        cum_offset_in_page = 0;
 
-          if not last (sb, ch):
-            issue next DMA into stage_ring[slot ^ 1];
-          dma_async_read_wait_n(0, has_next ? 1 : 0);
+      // Issue NEXT DMA (depth=2 ping-pong) before waiting on the current chunk.
+      if (c + 1 < total_chunks):
+        compute (next_blk, next_sb, next_ch) and next_src;
+        experimental::dma_async_read(0, next_src, stage_ring[(c+1)&1], sub_chunk_bytes[t]);
+      experimental::dma_async_read_wait_n(0, has_next ? 1 : 0);
 
-          prefetcher_write_chunk(
-            /*src=*/   stage_ring[slot],
-            /*dest=*/  fifo_snapshot + cum_offset,
-            /*recv=*/  noc_xy_ptr + ch * recv_per_chunk * 2,
-            num_receivers_per_chunk,
-            rows_per_sub[t],
-            coalesced_num_pages[t],
-            coalesced_page_size[t],
-            noc_index);
-          cum_offset += rows_per_sub[t] * coalesced_num_pages[t]
-                      * coalesced_page_size[t] * num_receivers_per_chunk;
+      // Write this chunk to its receiver subset at (fifo_snapshot + cum_offset_in_page).
+      prefetcher_write_chunk(
+        /*src=*/   stage_ring[c & 1],
+        /*dest=*/  fifo_snapshot + cum_offset_in_page,
+        /*recv=*/  noc_xy_ptr + ch * recv_per_chunk * 2,
+        recv_per_chunk,
+        rows_per_sub[t],
+        coalesced_num_pages[t],
+        coalesced_page_size[t],
+        noc_index);
 
-      prefetcher_finalize_block<skip_ptr_update>(
-        iface, page_bytes_per_recv, num_receivers, noc_index);
+      // After the last chunk of a sub-band, advance dest offset by the sub-band's
+      // per-receiver bytes (each receiver in the subset got rows_per_sub K-rows of
+      // coalesced_num_pages * coalesced_page_size bytes).
+      if (ch + 1 == M[t]):
+        cum_offset_in_page += rows_per_sub[t] * coalesced_num_pages[t]
+                            * coalesced_page_size[t];
 
-    if t == num_tensors - 1:
+      // On block boundary: flush posted writes and finalize (one pages_sent inc per receiver).
+      if (sb + 1 == num_sub[t] and ch + 1 == M[t]):
+        noc_async_posted_writes_flushed();
+        prefetcher_finalize_block<skip_ptr_update=true>(
+          iface, page_bytes_per_recv[t], num_receivers, noc_index);
+
+    if (t == num_tensors - 1):
       experimental::remote_cb_sender_barrier(remote_cb_id);
 
 experimental::update_remote_cb_config_in_l1(remote_cb_id);
@@ -394,10 +416,12 @@ noc_async_atomic_barrier();
 experimental::drisc_set_noc2axi_mode();
 ```
 
-`enable_performance_mode` selects the `skip_ptr_update = true` instantiation
-of `prefetcher_finalize_block`, which omits the NoC pointer-update writes; a
-final `update_remote_cb_config_in_l1` + `noc_async_atomic_barrier` rolls them
-in once at the end of the stream.
+The finalize uses `skip_ptr_update=true` (posted NoC semaphore writes); the
+end-of-stream `update_remote_cb_config_in_l1` + `noc_async_atomic_barrier`
+drain them. `enable_performance_mode` in `DramCorePrefetcherConfig` is
+currently a no-op (this fast-path is always selected); the flag is kept as
+an API hook for future tuning, e.g. wiring a `<false>` instantiation for
+sub-band-grained ptr updates when measured to matter.
 
 When `(rows_per_sub, M) = (k_block_w_tiles, 1)` (fast path), the inner loop
 collapses to a single `prefetcher_write_chunk` followed by
