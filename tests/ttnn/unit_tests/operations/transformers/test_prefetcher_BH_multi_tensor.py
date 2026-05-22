@@ -28,7 +28,8 @@ _NUM_RECV_PER_BANK = 2
 _K = 2048
 # N must be divisible by `num_dram_banks * _NUM_RECV_PER_BANK * TILE_SIZE` for any
 # supported BH bank count. lcm(7, 8) * 2 * 32 = 56 * 64 = 3584, so 3584 works on both
-# P100 (7 banks) and P150/P300 (8 banks).
+# P100 (7 banks) and P150/P300 (8 banks). The DRAM-core prefetcher auto-derives K-sub
+# blocking from the DRISC L1 budget; K=2048 lands on the K-sub-with-M=1 path here.
 _N = 3584
 _TILE_BYTES = 1088  # bf8_b
 
@@ -103,15 +104,15 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
         ),
     )
 
-    # GCB sized to hold one tensor's data per receiver. Push page = kbw * n_tiles_per_recv
-    # * tile_bytes (1 * (N/num_dram_banks/recv_per_bank/TILE) tiles per push, bf8_b).
+    # The DRAM-core prefetcher auto-derives k_block_w_tiles = ceil(k_tiles / ring_size)
+    # and pushes ring_size blocks per (layer, tensor) regardless of k_tiles. GCB and
+    # consumer counts must follow ring_size, not k_tiles.
+    k_tiles = _K // ttnn.TILE_SIZE
+    ring_size = num_receivers
+    k_block_w_tiles = (k_tiles + ring_size - 1) // ring_size
     n_tiles_per_recv = (_N // num_dram_banks // _NUM_RECV_PER_BANK) // ttnn.TILE_SIZE
-    push_page_size = n_tiles_per_recv * _TILE_BYTES
-    k_tiles = _K // ttnn.TILE_SIZE  # 64
-    per_recv_bytes_per_tensor = k_tiles * push_page_size
-    # Round up to push-page multiple. Single-tensor's worth fits the worker-core validation
-    # (max_tensor_size <= gcb.size()); for multi-tensor the prefetcher just streams data
-    # through the same fifo, so one-tensor's worth is the right minimum.
+    push_page_size = k_block_w_tiles * n_tiles_per_recv * _TILE_BYTES
+    per_recv_bytes_per_tensor = ring_size * push_page_size
     gcb_size = _round_up(per_recv_bytes_per_tensor, push_page_size)
 
     bank_to_receivers = [
@@ -119,8 +120,8 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
     ]
     gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
-    # Per receiver per layer: 1 push per K-block per tensor.
-    num_iters_total = num_layers * num_tensors * k_tiles
+    # Per receiver per (layer, tensor): ring_size pushes.
+    num_iters_total = num_layers * num_tensors * ring_size
     logger.info(
         f"[multi_tensor] num_tensors={num_tensors} num_layers={num_layers} K={_K} N={_N} "
         f"banks={num_dram_banks} ring={num_receivers} push_page={push_page_size} gcb_size={gcb_size} "
