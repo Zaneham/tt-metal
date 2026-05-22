@@ -43,8 +43,8 @@ def run_reduce_scatter_impl(
     chunks_per_sync=None,
     num_workers_per_link=None,
     num_buffers_per_channel=None,
+    use_sub_devices=False,
 ):
-    use_sub_devices = False
     torch.manual_seed(0)
 
     # Set the default config
