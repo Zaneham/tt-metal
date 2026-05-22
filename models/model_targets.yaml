@@ -11,6 +11,16 @@ targets:
     skus:
       wh_n150:
         entries:
+          - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              prefill_time_to_first_token: 26
+              decode_t/s/u: 66.0
+              decode_t/s: 2112.0
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 1
             seq_len: 512
             status: active
@@ -44,6 +54,16 @@ targets:
     skus:
       wh_n150:
         entries:
+          - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              prefill_time_to_first_token: 57
+              decode_t/s/u: 35.0
+              decode_t/s: 1120.0
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 1
             seq_len: 512
             status: active
@@ -77,6 +97,16 @@ targets:
     skus:
       wh_n150:
         entries:
+          - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              prefill_time_to_first_token: 112
+              decode_t/s/u: 21.0
+              decode_t/s: 672.0
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 1
             seq_len: 512
             status: active
@@ -172,6 +202,15 @@ targets:
     skus:
       wh_n150:
         entries:
+          - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              decode_t/s/u: 23.0
+              decode_t/s: 736.0
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 1
             seq_len: 512
             status: active
@@ -205,6 +244,15 @@ targets:
     skus:
       wh_n300:
         entries:
+          - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              decode_t/s/u: 22.0
+              decode_t/s: 704.0
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 1
             seq_len: 512
             status: active
@@ -240,6 +288,14 @@ targets:
       wh_llmbox_perf:
         entries:
           - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              prefill_time_to_first_token: 188
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+          - batch_size: 32
             seq_len: 1024
             status: active
             perf:
@@ -259,6 +315,15 @@ targets:
     skus:
       wh_llmbox_perf:
         entries:
+          - batch_size: 32
+            seq_len: null
+            status: active
+            perf:
+              decode_t/s/u: 21.0
+              decode_t/s: 672.0
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 1
             seq_len: 512
             status: active
@@ -559,7 +624,9 @@ targets:
             perf:
               prefill_time_to_first_token: 130
               decode_t/s/u: 124.0
+              decode_t/s: 248.0
               prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
               decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
@@ -572,7 +639,9 @@ targets:
             perf:
               prefill_time_to_first_token: 140
               decode_t/s/u: 105.0
+              decode_t/s: 840.0
               prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
               decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
@@ -585,7 +654,70 @@ targets:
             perf:
               prefill_time_to_first_token: 220
               decode_t/s/u: 77.5
+              decode_t/s: 2480.0
               prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+      bh_p100:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: active
+            perf:
+              prefill_time_to_first_token: 60
+              decode_t/s/u: 310.0
+              decode_t/s: 310.0
+              prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+      bh_p150:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: active
+            perf:
+              prefill_time_to_first_token: 50
+              decode_t/s/u: 530.0
+              decode_t/s: 530.0
+              prefill_time_to_first_token_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+  mamba-2.8b-slimpj:
+    aliases: ["mamba-2.8b-slimpj", "state-spaces/mamba-2.8b-slimpj"]
+    skus:
+      wh_n150:
+        entries:
+          - batch_size: 32
+            seq_len: 32
+            status: active
+            perf:
+              prefill_t/s: 135.0
+              decode_t/s: 346.0
+              decode_t/s/u: 10.8
+              prefill_t_s_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
+              decode_t_s_u_tolerance: 0.2
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+          - batch_size: 32
+            seq_len: 128
+            status: active
+            perf:
+              prefill_t/s: 380.0
+              decode_t/s: 346.0
+              decode_t/s/u: 10.8
+              prefill_t_s_tolerance: 0.2
+              decode_t_s_tolerance: 0.2
               decode_t_s_u_tolerance: 0.2
             accuracy: {}
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
@@ -620,6 +752,16 @@ targets:
     skus:
       wh_n300:
         entries:
+          - batch_size: 1
+            seq_len: 8192
+            status: active
+            perf:
+              prefill_t/s: 23.0
+              decode_t/s/u: 21.5
+              decode_t/s: 21.5
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
           - batch_size: 16
             seq_len: null
             status: active
@@ -633,9 +775,12 @@ targets:
       wh_llmbox_perf:
         entries:
           - batch_size: 1
-            seq_len: null
-            status: TODO
-            perf: {}
+            seq_len: 8192
+            status: active
+            perf:
+              prefill_t/s: 20.0
+              decode_t/s/u: 35.0
+              decode_t/s: 35.0
             accuracy: {}
             owner_id: U03FJB5TM5Y # Colman Glagovich
             team: models
@@ -651,6 +796,16 @@ targets:
     skus:
       wh_llmbox_perf:
         entries:
+          - batch_size: 1
+            seq_len: 8192
+            status: active
+            perf:
+              prefill_t/s: 3.0
+              decode_t/s/u: 6.0
+              decode_t/s: 6.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
           - batch_size: 1
             seq_len: null
             status: active

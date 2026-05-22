@@ -36,7 +36,11 @@ def _load_llm_demo_utils_module():
         sys.modules["loguru"] = types.SimpleNamespace(logger=logger_stub)
 
     if "models.perf.benchmarking_utils" not in sys.modules:
-        benchmarking_stub = types.SimpleNamespace(BenchmarkData=object, BenchmarkProfiler=object)
+        benchmarking_stub = types.SimpleNamespace(
+            BenchmarkData=object,
+            BenchmarkProfiler=object,
+            perf_target_check=lambda *a, **k: None,
+        )
         sys.modules["models.perf.benchmarking_utils"] = benchmarking_stub
 
     spec = importlib.util.spec_from_file_location("llm_demo_utils", LLM_DEMO_UTILS_PATH)

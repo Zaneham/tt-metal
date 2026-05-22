@@ -33,7 +33,7 @@ from models.demos.gpt_oss.tests.test_factory import TestFactory, parametrize_mes
 # Import GPT-OSS components using our refactored patterns
 from models.demos.gpt_oss.tt.common import create_tt_model
 from models.demos.gpt_oss.utils.general_utils import throughput_experts_supported_on_arch
-from models.demos.utils.llm_demo_utils import create_benchmark_data, verify_perf
+from models.demos.utils.llm_demo_utils import create_benchmark_data
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_transformers.demo.simple_text_demo import create_tt_page_table, load_inputs
 from models.tt_transformers.tt.common import PagedAttentionConfig, get_padded_prefill_len, preprocess_inputs_prefill
@@ -998,63 +998,7 @@ def test_gpt_oss_demo(
             output_sequence_length=num_tokens_generated_decode[0],
         )
 
-        # check measurements against CI performance targets
         logger.info(
-            f"Checking measurements against CI performance targets for {model_name} on {tt_device_name} for padded prefill length {prefill_pad_length}"
+            "Skipping in-demo verify_perf checks for GPT-OSS. "
+            "Performance validation is handled by centralized target validation in CI."
         )
-        # Only call verify_perf if the model_device_key exists in the targets
-        if f"batch_{batch_size}" in perf_targets["ci"] and False:
-            if f"prefill_{prefill_pad_length}" in perf_targets["ci"][f"batch_{batch_size}"]:
-                if model_device_key in perf_targets["ci"][f"batch_{batch_size}"][f"prefill_{prefill_pad_length}"]:
-                    perf_config = perf_targets["ci"][f"batch_{batch_size}"][f"prefill_{prefill_pad_length}"][
-                        model_device_key
-                    ]
-
-                    # Parse TTFT target with tolerance
-                    current_ttft_target = perf_config["TTFT"]
-                    if isinstance(current_ttft_target, list):
-                        ttft_tolerance = current_ttft_target[1]
-                        current_ttft_target = current_ttft_target[0]
-                    else:
-                        ttft_tolerance = 0.15  # Default 15% tolerance
-
-                    # Parse decode_tok_s_u target with tolerance
-                    decode_tsu_target = perf_config["decode_tok_s_u"]
-                    if isinstance(decode_tsu_target, list):
-                        decode_tolerance = decode_tsu_target[1]
-                        decode_tsu_target = decode_tsu_target[0]
-                    else:
-                        decode_tolerance = 0.15  # Default 15% tolerance
-
-                    # Verify prefill performance with prefill-specific tolerance
-                    prefill_targets = {
-                        "prefill_time_to_token": current_ttft_target / 1000,  # convert to seconds
-                    }
-                    verify_perf(
-                        measurements,
-                        prefill_targets,
-                        expected_measurements={k: True for k in prefill_targets.keys()},
-                    )
-
-                    # Verify decode performance with decode-specific tolerance
-                    decode_targets = {
-                        "decode_t/s/u": decode_tsu_target,
-                        "decode_t/s": decode_tsu_target * global_batch_size,  # calculate from per-user rate
-                    }
-                    verify_perf(
-                        measurements,
-                        decode_targets,
-                        expected_measurements={k: True for k in decode_targets.keys()},
-                    )
-                else:
-                    logger.warning(
-                        f"No CI performance targets found for model {model_name} on device {tt_device_name} for prefill length {prefill_pad_length}. Skipping performance verification."
-                    )
-            else:
-                logger.warning(
-                    f"No CI performance targets found for prefill length {prefill_pad_length}. Skipping performance verification."
-                )
-        else:
-            logger.warning(
-                f"No CI performance targets found for batch size {batch_size}. Skipping performance verification."
-            )

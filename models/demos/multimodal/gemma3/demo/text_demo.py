@@ -19,7 +19,7 @@ from models.common.utility_functions import is_blackhole, is_wormhole_b0
 from models.demos.multimodal.gemma3.tt.gemma_e2e_model import TtGemmaModel
 from models.demos.multimodal.gemma3.tt.gemma_multimodal_generator import GemmaMultimodalGenerator as Generator
 from models.demos.utils.llm_demo_utils import create_benchmark_data, verify_perf
-from models.demos.utils.model_targets import resolve_accuracy_targets
+from models.demos.utils.model_targets import resolve_accuracy_targets, resolve_perf_targets
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_transformers.tt.common import PagedAttentionConfig, preprocess_inputs_prefill
 from models.tt_transformers.tt.generator import create_submeshes
@@ -1405,53 +1405,52 @@ def test_demo_text(
             logger.info(
                 f"Checking measurements against CI performance targets for batch size 32 of {model_name} on {tt_device_name}"
             )
-            # Targets set to 0.95x observed values for decode rates (higher is better)
-            # and observed/0.95 for TTFT (lower is better) to allow 5% buffer + 5% room for growth
-            ci_target_ttft = {
-                # N150 targets (milliseconds) - lower is better
-                "N150_Llama-3.2-1B": 26,
-                "N150_Llama-3.2-3B": 57,
-                "N150_Llama-3.1-8B": 112,
-                # "N150_Mistral-7B": 106, # https://github.com/tenstorrent/tt-metal/issues/24963
-                # N300 targets
-                # "N300_Qwen2.5-7B": 150,  # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24754)
-                # T3K targets
-                "T3K_Llama-3.1-70B": 188,
-                # "T3K_Qwen2.5-Coder-32B": 180,  # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24754)
-                # "T3K_Qwen2.5-72B": 211,  # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24754)
-                # "T3K_Qwen3-32B": 250, # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24754)
-            }
-            ci_target_decode_tok_s_u = {
-                # N150 targets - higher is better
-                "N150_Llama-3.2-1B": 66,
-                "N150_Llama-3.2-3B": 35,
-                "N150_Llama-3.1-8B": 21,
-                "N150_Mistral-7B": 23,
-                # N300 targets
-                "N300_Qwen2.5-7B": 22,
-                # T3K targets
-                # "T3K_Llama-3.1-70B": 16, # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24303)
-                # "T3K_Qwen2.5-72B": 13, # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24303)
-                "T3K_Qwen2.5-Coder-32B": 21,
-                # "T3K_Qwen3-32B": 20, # too much variability in CI (https://github.com/tenstorrent/tt-metal/issues/24303)
-            }
+            resolved_ci_targets = resolve_perf_targets(
+                model_name=model_name,
+                sku=tt_device_name,
+                batch_size=global_batch_size,
+                seq_len=max(prefill_lens),
+            )
+            if not resolved_ci_targets:
+                resolved_ci_targets = resolve_perf_targets(
+                    model_name=model_name,
+                    sku=tt_device_name,
+                    batch_size=global_batch_size,
+                    seq_len=max_seq_len,
+                )
+            if not resolved_ci_targets and max_seq_len != 1024:
+                resolved_ci_targets = resolve_perf_targets(
+                    model_name=model_name,
+                    sku=tt_device_name,
+                    batch_size=global_batch_size,
+                    seq_len=1024,
+                )
+            if not resolved_ci_targets:
+                resolved_ci_targets = resolve_perf_targets(
+                    model_name=model_name,
+                    sku=tt_device_name,
+                    batch_size=global_batch_size,
+                    seq_len=None,
+                )
 
-            # Only call verify_perf if the model_device_key exists in the targets
-            ci_targets = {}
-            if model_device_key in ci_target_ttft:
-                ci_targets["prefill_time_to_token"] = ci_target_ttft[model_device_key] / 1000  # convert to seconds
-            if model_device_key in ci_target_decode_tok_s_u:
-                ci_targets["decode_t/s/u"] = ci_target_decode_tok_s_u[model_device_key]
-                # calculate from per-user rate
-                ci_targets["decode_t/s"] = ci_target_decode_tok_s_u[model_device_key] * global_batch_size
+            expected_measurements = {}
+            if resolved_ci_targets:
+                if resolved_ci_targets.get("prefill_time_to_token") is not None or resolved_ci_targets.get(
+                    "prefill_time_to_first_token"
+                ) is not None:
+                    expected_measurements["prefill_time_to_token"] = True
+                if resolved_ci_targets.get("decode_t/s") is not None:
+                    expected_measurements["decode_t/s"] = True
+                if resolved_ci_targets.get("decode_t/s/u") is not None:
+                    expected_measurements["decode_t/s/u"] = True
 
-            if ci_targets:  # Only verify performance if we have targets for this model/device combination
+            if expected_measurements:
                 verify_perf(
                     measurements,
-                    ci_targets,
-                    expected_measurements={k: True for k in ci_targets.keys()},
+                    expected_perf_metrics=resolved_ci_targets,
+                    expected_measurements=expected_measurements,
                 )
             else:
                 logger.warning(
-                    f"No CI performance targets found for {model_device_key}. Skipping performance verification."
+                    f"No centralized CI performance targets found for {model_device_key}. Skipping performance verification."
                 )

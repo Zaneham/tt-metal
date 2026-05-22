@@ -39,6 +39,7 @@ from models.demos.audio.whisper.tt.ttnn_optimized_functional_whisper import (
 from models.demos.audio.whisper.tt.whisper_generator import GenerationParams, WhisperGenerator
 from models.demos.utils.common_demo_utils import get_mesh_mappers
 from models.demos.utils.llm_demo_utils import verify_perf
+from models.demos.utils.model_targets import resolve_perf_targets
 
 available_devices = len(ttnn.get_device_ids()) if ttnn.get_device_ids() else 1
 
@@ -879,44 +880,47 @@ def test_demo_for_conditional_generation(
     )
 
     if should_check_perf:
-        metrics_dictionary = {
-            2: {"prefill_time_to_token": 0.13, "decode_t/s/u": 124.0},
-            8: {"prefill_time_to_token": 0.14, "decode_t/s/u": 105.0},
-            32: {"prefill_time_to_token": 0.22, "decode_t/s/u": 77.5},
-        }
-        expected_perf_metrics = None
+        sku = None
         if is_blackhole():
-            if mesh_device.dram_grid_size().x == 7:  # P100 DRAM grid is 7x1
-                expected_perf_metrics = {"prefill_time_to_token": 0.06, "decode_t/s/u": 310.0}
-            else:
-                expected_perf_metrics = {"prefill_time_to_token": 0.05, "decode_t/s/u": 530.0}
-        elif mesh_device.get_num_devices() in metrics_dictionary:  # wormhole_b0
-            expected_perf_metrics = metrics_dictionary[mesh_device.get_num_devices()]
+            # P100 DRAM grid is 7x1.
+            sku = "bh_p100" if mesh_device.dram_grid_size().x == 7 else "bh_p150"
+        else:
+            sku = {
+                2: "wh_n300",
+                8: "wh_llmbox_perf",
+                32: "wh_galaxy_perf",
+            }.get(mesh_device.get_num_devices())
 
-        if expected_perf_metrics is not None:
+        if sku is not None:
             total_batch = mesh_device.get_num_devices() * batch_size_per_device
-            expected_perf_metrics["decode_t/s"] = expected_perf_metrics["decode_t/s/u"] * total_batch
-            expected_perf_metrics["prefill_time_to_token_tolerance"] = 0.20
-            expected_perf_metrics["decode_t_s_tolerance"] = 0.20
-            expected_perf_metrics["decode_t_s_u_tolerance"] = 0.20
-            measurements = {
-                "prefill_time_to_token": ttft,
-                "decode_t/s": decode_throughput * total_batch,
-                "decode_t/s/u": decode_throughput,
-            }
-            expected_measurements = {
-                "prefill_time_to_token": True,
-                "decode_t/s": True,
-                "decode_t/s/u": True,
-            }
-            verify_perf(
-                measurements,
-                expected_perf_metrics,
-                expected_measurements=expected_measurements,
+            resolved_perf_targets = resolve_perf_targets(
+                model_name=model_repo,
+                sku=sku,
+                batch_size=total_batch,
             )
+            if resolved_perf_targets:
+                measurements = {
+                    "prefill_time_to_token": ttft,
+                    "decode_t/s": decode_throughput * total_batch,
+                    "decode_t/s/u": decode_throughput,
+                }
+                expected_measurements = {
+                    "prefill_time_to_token": True,
+                    "decode_t/s": True,
+                    "decode_t/s/u": True,
+                }
+                verify_perf(
+                    measurements,
+                    expected_perf_metrics=resolved_perf_targets,
+                    expected_measurements=expected_measurements,
+                )
+            else:
+                logger.warning(
+                    f"Skipping perf check: no centralized perf targets found for model={model_repo}, sku={sku}"
+                )
         else:
             logger.warning(
-                f"Skipping perf check: no expected perf target for {mesh_device.get_num_devices()}-device wormhole_b0 mesh"
+                f"Skipping perf check: unsupported device topology for model={model_repo} with {mesh_device.get_num_devices()} devices"
             )
 
 
