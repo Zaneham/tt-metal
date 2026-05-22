@@ -18,8 +18,8 @@ from loguru import logger
 import ttnn
 from models.common.sampling import SamplingParams
 from models.common.utility_functions import is_blackhole, is_wormhole_b0
-from models.demos.utils.llm_demo_utils import create_benchmark_data, verify_perf
-from models.demos.utils.model_targets import is_tolerance_key, resolve_accuracy_targets, resolve_perf_targets
+from models.demos.utils.llm_demo_utils import create_benchmark_data, verify_accuracy, verify_perf
+from models.demos.utils.model_targets import resolve_accuracy_targets, resolve_perf_targets
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_transformers.tt.common import (
     PagedAttentionConfig,
@@ -1456,7 +1456,6 @@ def test_demo_text(
     # Benchmark targets
     tt_device_name = determine_device_name(mesh_device)  # submesh device should not decide performance target
     model_name = model_args[0].base_model_name
-    model_device_key = f"{tt_device_name}_{model_name}"
     resolved_perf_targets = resolve_perf_targets(
         model_name=model_name,
         sku=tt_device_name,
@@ -1553,44 +1552,18 @@ def test_demo_text(
             logger.info(
                 f"Checking measurements against CI performance targets for batch size 32 of {model_name} on {tt_device_name}"
             )
-            resolved_ci_targets = resolve_perf_targets(
+            verify_perf(
+                measurements,
+                expected_measurements={
+                    "prefill_time_to_token": True,
+                    "decode_t/s": True,
+                    "decode_t/s/u": True,
+                },
                 model_name=model_name,
                 sku=tt_device_name,
                 batch_size=global_batch_size,
                 seq_len=max_seq_len,
             )
-            if not resolved_ci_targets and max_seq_len != 1024:
-                resolved_ci_targets = resolve_perf_targets(
-                    model_name=model_name,
-                    sku=tt_device_name,
-                    batch_size=global_batch_size,
-                    seq_len=1024,
-                )
-            ci_targets = {}
-
-            if resolved_ci_targets:
-                if resolved_ci_targets.get("prefill_time_to_first_token") is not None:
-                    ci_targets["prefill_time_to_token"] = (
-                        float(resolved_ci_targets["prefill_time_to_first_token"]) / 1000
-                    )  # convert ms -> s
-                if resolved_ci_targets.get("decode_t/s/u") is not None:
-                    ci_targets["decode_t/s/u"] = float(resolved_ci_targets["decode_t/s/u"])
-                    ci_targets["decode_t/s"] = float(resolved_ci_targets["decode_t/s/u"]) * global_batch_size
-                for key, value in resolved_ci_targets.items():
-                    if is_tolerance_key(key):
-                        ci_targets[key] = float(value)
-
-            if ci_targets:  # Only verify performance if we have targets for this model/device combination
-                verify_perf(
-                    measurements,
-                    ci_targets,
-                    expected_measurements={k: True for k in ci_targets.keys() if not is_tolerance_key(k)},
-                )
-            else:
-                logger.warning(
-                    f"No centralized CI performance targets found for {model_device_key}. "
-                    "Skipping performance verification."
-                )
     if token_accuracy:
         total_top1_acc = math.ceil(acc[0] * 100)
         total_top5_acc = math.ceil(acc[1] * 100)
@@ -1598,12 +1571,13 @@ def test_demo_text(
         if not json_config_file:
             # Get accuracy thresholds from centralized model targets unless the config is loaded from json.
             min_top1_acc, min_top5_acc = get_accuracy_thresholds(model_args[0])
-            assert (
-                total_top1_acc >= min_top1_acc
-            ), f"Top-1 accuracy {total_top1_acc:.1f}% is too low (expected >={min_top1_acc}%)"
-            assert (
-                total_top5_acc >= min_top5_acc
-            ), f"Top-5 accuracy {total_top5_acc:.1f}% is too low (expected >={min_top5_acc}%)"
+            verify_accuracy(
+                measurements={
+                    "top1_token_accuracy": total_top1_acc,
+                    "top5_token_accuracy": total_top5_acc,
+                },
+                expected_accuracy_metrics={"top1": min_top1_acc, "top5": min_top5_acc},
+            )
             logger.info("Checks of top-1 and top-5 accuracy against centralized model targets passed")
 
     if (

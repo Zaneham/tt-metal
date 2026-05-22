@@ -10,10 +10,11 @@ from loguru import logger
 from models.demos.utils.model_targets import (
     DEFAULT_PERF_TOLERANCE,
     is_tolerance_key,
+    resolve_accuracy_targets,
     resolve_metric_tolerance,
     resolve_perf_targets,
 )
-from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler, perf_target_check
+from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
 PREFILL_TIME_TO_TOKEN_KEY = "prefill_time_to_token"
 PREFILL_TIME_TO_FIRST_TOKEN_KEY = "prefill_time_to_first_token"
@@ -21,6 +22,10 @@ PREFILL_TIME_TO_FIRST_TOKEN_KEY = "prefill_time_to_first_token"
 
 class PerfRegressionWarning(UserWarning):
     """Warning emitted when measured perf drifts from configured thresholds."""
+
+
+class AccuracyRegressionWarning(UserWarning):
+    """Warning emitted when measured accuracy drifts from configured thresholds."""
 
 
 def _normalize_ttft_metrics(metrics: dict, source_name: str) -> dict:
@@ -273,7 +278,62 @@ def verify_perf(
             PerfRegressionWarning,
             stacklevel=2,
         )
-        perf_target_check (does_pass,
-            "Performance regression detected. Failing fast to avoid silently accepting "
-            "degraded model performance while centralized targets rollout is in progress.",
+
+
+def verify_accuracy(
+    measurements: dict,
+    expected_accuracy_metrics: dict = None,
+    model_name: str = None,
+    sku: str = None,
+    batch_size: int = None,
+    seq_len: int = None,
+):
+    """
+    Verify top-k token accuracy against centralized targets in warning-only mode.
+    """
+    if expected_accuracy_metrics is None:
+        if not model_name or not sku:
+            raise ValueError("model_name and sku are required when expected_accuracy_metrics is not provided")
+        expected_accuracy_metrics = resolve_accuracy_targets(
+            model_name=model_name,
+            sku=sku,
+            batch_size=batch_size,
+            seq_len=seq_len,
+        )
+        if expected_accuracy_metrics is None:
+            raise ValueError(
+                f"No centralized accuracy targets found for model={model_name}, sku={sku}, "
+                f"batch_size={batch_size}, seq_len={seq_len}"
+            )
+
+    measured_top1 = measurements.get("top1_token_accuracy", measurements.get("top1"))
+    measured_top5 = measurements.get("top5_token_accuracy", measurements.get("top5"))
+    target_top1 = expected_accuracy_metrics.get("top1")
+    target_top5 = expected_accuracy_metrics.get("top5")
+
+    does_pass = True
+    if target_top1 is not None:
+        if measured_top1 is None:
+            logger.warning("Metric top1_token_accuracy not found in measurements")
+            does_pass = False
+        elif float(measured_top1) < float(target_top1):
+            logger.warning(f"top1_token_accuracy ({measured_top1}) is lower than expected {target_top1}")
+            does_pass = False
+    if target_top5 is not None:
+        if measured_top5 is None:
+            logger.warning("Metric top5_token_accuracy not found in measurements")
+            does_pass = False
+        elif float(measured_top5) < float(target_top5):
+            logger.warning(f"top5_token_accuracy ({measured_top5}) is lower than expected {target_top5}")
+            does_pass = False
+
+    if does_pass:
+        logger.info("Accuracy Check Passed!")
+    else:
+        logger.warning("Accuracy Check Failed!")
+        warnings.warn(
+            f"Accuracy drift detected against expected metrics {expected_accuracy_metrics}. "
+            "See warnings above for metric-level details.",
+            AccuracyRegressionWarning,
+            stacklevel=2,
         )

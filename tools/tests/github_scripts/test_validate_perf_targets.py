@@ -575,7 +575,6 @@ def test_verify_perf_prefers_prefill_time_to_first_token_with_unit_conversion(mo
 
 def test_verify_perf_respects_metric_specific_tolerance(monkeypatch):
     llm_demo_utils = _load_llm_demo_utils_module()
-    monkeypatch.setattr(llm_demo_utils, "perf_target_check", lambda *_args, **_kwargs: None)
 
     llm_demo_utils.verify_perf(
         measurements={

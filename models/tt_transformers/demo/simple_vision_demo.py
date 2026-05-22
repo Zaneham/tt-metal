@@ -668,6 +668,9 @@ def test_multimodal_demo_text(
             expected_measurements = {key: True for key in ("prefill_t/s", "decode_t/s", "decode_t/s/u") if key in perf_targets}
             verify_perf(
                 measurements,
-                expected_perf_metrics=resolved_perf_targets,
                 expected_measurements=expected_measurements,
+                model_name=base_model_name,
+                sku=tt_device_name,
+                batch_size=max_batch_size,
+                seq_len=max_seq_len,
             )

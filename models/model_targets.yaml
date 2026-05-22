@@ -413,6 +413,21 @@ targets:
               top5: 100.0
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
+      wh_galaxy_perf:
+        entries:
+          - batch_size: 32
+            seq_len: 507
+            status: active
+            perf:
+              prefill_time_to_first_token: 99.0
+              decode_t/s/u: 71.5
+              decode_t/s: 2288.0
+              prefill_time_to_first_token_tolerance: 0.3
+              decode_t_s_tolerance: 0.5
+              decode_t_s_u_tolerance: 0.5
+            accuracy: {}
+            owner_id: U053W15B6JF # Djordje Ivanovic
+            team: models
   gemma-3-4b:
     aliases: ["gemma-3-4b", "google/gemma-3-4b-it"]
     skus:
@@ -866,10 +881,16 @@ targets:
     skus:
       wh_galaxy_perf:
         entries:
-          - batch_size: null
-            seq_len: null
-            status: TODO
-            perf: {}
+          - batch_size: 32
+            seq_len: 507
+            status: active
+            perf:
+              prefill_time_to_first_token: 99.0
+              decode_t/s/u: 71.5
+              decode_t/s: 2288.0
+              prefill_time_to_first_token_tolerance: 0.3
+              decode_t_s_tolerance: 0.5
+              decode_t_s_u_tolerance: 0.5
             accuracy: {}
             owner_id: U053W15B6JF # Djordje Ivanovic
             team: models
@@ -890,10 +911,13 @@ targets:
     skus:
       wh_galaxy_perf:
         entries:
-          - batch_size: null
-            seq_len: null
-            status: TODO
-            perf: {}
+          - batch_size: 32
+            seq_len: 507
+            status: active
+            perf:
+              prefill_time_to_first_token: 700.0
+              decode_t/s/u: 60.0
+              decode_t/s: 1920.0
             accuracy: {}
             owner_id: U053W15B6JF # Djordje Ivanovic
             team: models
@@ -1025,10 +1049,97 @@ targets:
     skus:
       wh_n150:
         entries:
-          - batch_size: null
+          - batch_size: 32
+            seq_len: 128
+            status: active
+            perf:
+              prefill_t/s: 1990.0
+              decode_t/s/u: 17.16
+              decode_t/s: 549.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+          - batch_size: 32
             seq_len: 1024
-            status: TODO
-            perf: {}
+            status: active
+            perf:
+              prefill_t/s: 2855.0
+              decode_t/s/u: 15.24
+              decode_t/s: 487.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+          - batch_size: 32
+            seq_len: 2048
+            status: active
+            perf:
+              prefill_t/s: 2450.0
+              decode_t/s/u: 13.91
+              decode_t/s: 445.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+      wh_llmbox_perf:
+        entries:
+          - batch_size: 256
+            seq_len: 128
+            status: active
+            perf:
+              prefill_t/s: 15500.0
+              decode_t/s/u: 14.6
+              decode_t/s: 3737.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+          - batch_size: 256
+            seq_len: 1024
+            status: active
+            perf:
+              prefill_t/s: 22100.0
+              decode_t/s/u: 13.2
+              decode_t/s: 3379.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+          - batch_size: 256
+            seq_len: 2048
+            status: active
+            perf:
+              prefill_t/s: 19150.0
+              decode_t/s/u: 12.4
+              decode_t/s: 3174.0
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+      wh_galaxy_perf:
+        entries:
+          - batch_size: 1024
+            seq_len: 128
+            status: active
+            perf:
+              prefill_t/s: 24100.0
+              decode_t/s/u: 6.9
+              decode_t/s: 7065.6
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+          - batch_size: 1024
+            seq_len: 1024
+            status: active
+            perf:
+              prefill_t/s: 21200.0
+              decode_t/s/u: 6.3
+              decode_t/s: 6451.2
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+          - batch_size: 1024
+            seq_len: 2048
+            status: active
+            perf:
+              prefill_t/s: 20400.0
+              decode_t/s/u: 6.6
+              decode_t/s: 6758.4
             accuracy: {}
             owner_id: U07RY6B5FLJ # Gongyu Wang
             team: models
@@ -1037,10 +1148,12 @@ targets:
     skus:
       wh_llmbox_perf:
         entries:
-          - batch_size: null
+          - batch_size: 32
             seq_len: 128
-            status: TODO
-            perf: {}
+            status: active
+            perf:
+              decode_t/s/u: 36.0
+              decode_t/s: 1152.0
             accuracy: {}
             owner_id: U053W15B6JF # Djordje Ivanovic
             team: models

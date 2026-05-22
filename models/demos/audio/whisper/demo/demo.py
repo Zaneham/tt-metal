@@ -39,7 +39,6 @@ from models.demos.audio.whisper.tt.ttnn_optimized_functional_whisper import (
 from models.demos.audio.whisper.tt.whisper_generator import GenerationParams, WhisperGenerator
 from models.demos.utils.common_demo_utils import get_mesh_mappers
 from models.demos.utils.llm_demo_utils import verify_perf
-from models.demos.utils.model_targets import resolve_perf_targets
 
 available_devices = len(ttnn.get_device_ids()) if ttnn.get_device_ids() else 1
 
@@ -893,31 +892,23 @@ def test_demo_for_conditional_generation(
 
         if sku is not None:
             total_batch = mesh_device.get_num_devices() * batch_size_per_device
-            resolved_perf_targets = resolve_perf_targets(
+            measurements = {
+                "prefill_time_to_token": ttft,
+                "decode_t/s": decode_throughput * total_batch,
+                "decode_t/s/u": decode_throughput,
+            }
+            expected_measurements = {
+                "prefill_time_to_token": True,
+                "decode_t/s": True,
+                "decode_t/s/u": True,
+            }
+            verify_perf(
+                measurements,
+                expected_measurements=expected_measurements,
                 model_name=model_repo,
                 sku=sku,
                 batch_size=total_batch,
             )
-            if resolved_perf_targets:
-                measurements = {
-                    "prefill_time_to_token": ttft,
-                    "decode_t/s": decode_throughput * total_batch,
-                    "decode_t/s/u": decode_throughput,
-                }
-                expected_measurements = {
-                    "prefill_time_to_token": True,
-                    "decode_t/s": True,
-                    "decode_t/s/u": True,
-                }
-                verify_perf(
-                    measurements,
-                    expected_perf_metrics=resolved_perf_targets,
-                    expected_measurements=expected_measurements,
-                )
-            else:
-                logger.warning(
-                    f"Skipping perf check: no centralized perf targets found for model={model_repo}, sku={sku}"
-                )
         else:
             logger.warning(
                 f"Skipping perf check: unsupported device topology for model={model_repo} with {mesh_device.get_num_devices()} devices"

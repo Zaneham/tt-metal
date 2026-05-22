@@ -559,6 +559,9 @@ def test_multimodal_demo_text(
                 if expected_measurements:
                     verify_perf(
                         measurements,
-                        expected_perf_metrics=resolved_targets,
                         expected_measurements=expected_measurements,
+                        model_name=base_model_name,
+                        sku=tt_device_name,
+                        batch_size=max_batch_size,
+                        seq_len=max_seq_len,
                     )

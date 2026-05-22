@@ -414,7 +414,13 @@ def run_mamba_demo(
 
     if assert_on_performance_measurements:
         if resolved_targets:
-            verify_perf(measurements, expected_perf_metrics=resolved_targets)
+            verify_perf(
+                measurements,
+                model_name=model_version.removeprefix("state-spaces/"),
+                sku=determine_device_name(device),
+                batch_size=batch_size,
+                seq_len=prefill_chunk_size,
+            )
         else:
             logger.warning("Skipping performance checks because centralized perf targets are missing.")
     else:
