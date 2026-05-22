@@ -12,17 +12,36 @@
 
 namespace ckernel {
 
+/**
+ * @brief Initializes the SFPU for ternary where operations.
+ *
+ * Programs shared SFPU state (ADDR_MOD_7) via the common ternary init, then
+ * calls @c _init_where_() to set up the dest address-mod for per-row
+ * advancement and prime the CC stack to a known-empty lane mask.
+ *
+ * @tparam APPROXIMATE  Unused for where; kept for API parity with other SFPU ops.
+ */
 template <bool APPROXIMATE>
 inline void llk_math_eltwise_ternary_sfpu_where_init() {
     _llk_math_eltwise_ternary_sfpu_init_<SfpuType::where>();
     sfpu::_init_where_();
 }
 
-// Forwards to the sfpi-based ternary dispatch. `_calculate_where_` takes
-// DEST tile indices and computes per-tile SFPU offsets internally via the
-// sfpi `dst_reg[tile_idx * dst_tile_size_sfpi]` indexing. The params wrapper
-// sets section base to DEST tile 0 and advances by one face between
-// invocations; sfpi emits TTINCRWC for the per-row advance inside the body.
+/**
+ * @brief Executes a ternary per-lane where select over DEST tiles.
+ *
+ * Dispatches @c _calculate_where_ face-by-face via the ternary params wrapper.
+ * Per-lane result: @c out = (cond != 0) ? true_val : false_val.
+ *
+ * @tparam APPROXIMATE   Unused for where; kept for API parity with other SFPU ops.
+ * @tparam data_format   Unused at call time; kept for API parity with other SFPU ops.
+ *
+ * @param dst_index0  DEST tile index for the condition operand.
+ * @param dst_index1  DEST tile index for the true-branch operand.
+ * @param dst_index2  DEST tile index for the false-branch operand.
+ * @param odst        DEST tile index that receives the result.
+ * @param vector_mode Must be @c VectorMode::RC; Quasar only supports full-tile mode.
+ */
 template <bool APPROXIMATE, [[maybe_unused]] DataFormat data_format>
 inline void llk_math_eltwise_ternary_sfpu_where(
     uint dst_index0, uint dst_index1, uint dst_index2, uint odst, int vector_mode = (int)VectorMode::RC) {

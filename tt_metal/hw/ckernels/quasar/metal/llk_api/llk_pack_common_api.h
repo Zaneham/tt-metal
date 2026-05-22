@@ -46,16 +46,6 @@ inline void llk_pack_hw_configure(const std::uint32_t pack_output) {
 }
 
 /**
- * @brief Syncs packer0's DST bank-offset HW register with the C-side bank tracker.
- *
- * The C variable `dest_register_offset` is reset to 0 at kernel load, but the HW config
- * register `THCON_PACKER0_REG0_SRC_ADDR_OFFSET_ADDR32` persists across kernel loads. Call
- * this once after `llk_pack_init` to write the current C-side bank base into HW, so the
- * first pack reads the bank MATH is writing to.
- */
-inline void llk_pack_dest_init() { ckernel::trisc::_set_packer_dest_registers_<p_pacr::PACK0, DST_SYNC_MODE>(); }
-
-/**
  * @brief Clears the data valid for destination register after Packer 0 is done packing
  * and zeroes out the dest bank(s) used by packer 0
  *
