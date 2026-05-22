@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import random
 
 import pytest
@@ -552,9 +553,9 @@ def verify_output(
     if not allclose_passed:
         logger.warning(f"FAILED Final Output - Iteration: {iteration} - AllClose: {allclose_output}")
         mask = (tt_output_tensor - output_reference_tensor).abs() > atol_threshold
-        # logger.warning(
-    #             f"Elements out of bounds: {tt_output_tensor[mask]} ref: {output_reference_tensor[mask]} idx: {mask.nonzero(as_tuple=True)}"
-    #         )
+        logger.warning(
+            f"Elements out of bounds: {tt_output_tensor[mask]} ref: {output_reference_tensor[mask]} idx: {mask.nonzero(as_tuple=True)}"
+        )
 
     return pcc_passed and allclose_passed
 
@@ -584,11 +585,11 @@ def _expert_tensor_to_list(expert_tensor: torch.Tensor) -> list[torch.Tensor]:
     return [expert_tensor[:, i : i + 1, ...] for i in range(num_experts)]
 
 
-# @pytest.mark.requires_device(["QUAD"])
-# @pytest.mark.skipif(
-#     (os.getenv("USE_TORUS_MODE") is None),
-#     reason=f"Requires ring fabric",
-# )
+@pytest.mark.requires_device(["QUAD"])
+@pytest.mark.skipif(
+    (os.getenv("USE_TORUS_MODE") is None),
+    reason=f"Requires ring fabric",
+)
 @pytest.mark.parametrize(
     "mesh_shape, mesh_device",
     [
