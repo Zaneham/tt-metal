@@ -4,35 +4,30 @@
 
 #pragma once
 
-#include "llk_math_eltwise_unary_sfpu_init.h"
-#include "llk_math_eltwise_unary_sfpu_common.h"
 #include "ckernel_sfpu_where.h"
 #include "llk_assert.h"
 #include "llk_defs.h"
+#include "llk_math_eltwise_ternary_sfpu.h"
+#include "llk_math_eltwise_ternary_sfpu_params.h"
 
 namespace ckernel {
 
-template <[[maybe_unused]] bool APPROXIMATE>
+template <bool APPROXIMATE>
 inline void llk_math_eltwise_ternary_sfpu_where_init() {
-    llk_math_eltwise_unary_sfpu_init<SfpuType::where>(sfpu::_init_where_);
+    _llk_math_eltwise_ternary_sfpu_init_<SfpuType::where>();
+    sfpu::_init_where_();
 }
 
-// Tile-stride in SFPU dest_reg_addr units for a 32x32 tile (32 rows × 2 units/row = 64).
-// Offsets passed to _calculate_where_ are multiples of this stride, selecting which
-// tile (relative to dst_index0's section base) each operand is read from or written to.
-template <[[maybe_unused]] bool APPROXIMATE, [[maybe_unused]] DataFormat data_format>
+// Forwards to the new Blackhole-style ternary SFPU dispatch. The underlying
+// `_calculate_where_<SFPU_ITERATIONS>` takes DEST tile indices and computes
+// per-tile SFPU offsets internally; the params wrapper sets section base to
+// DEST tile 0 and runs the kernel face-by-face.
+template <bool APPROXIMATE, [[maybe_unused]] DataFormat data_format>
 inline void llk_math_eltwise_ternary_sfpu_where(
     uint dst_index0, uint dst_index1, uint dst_index2, uint odst, int vector_mode = (int)VectorMode::RC) {
     LLK_ASSERT(vector_mode == (int)VectorMode::RC, "Quasar currently only supports vector mode RC");
-    constexpr int TILE_STRIDE = 64;
-    _llk_math_eltwise_sfpu_params_(
-        sfpu::_calculate_where_,
-        dst_index0,
-        SFPU_ITERATIONS,
-        0,
-        static_cast<int>(dst_index1 - dst_index0) * TILE_STRIDE,
-        static_cast<int>(dst_index2 - dst_index0) * TILE_STRIDE,
-        static_cast<int>(odst - dst_index0) * TILE_STRIDE);
+    _llk_math_eltwise_ternary_sfpu_params_(
+        sfpu::_calculate_where_<APPROXIMATE, SFPU_ITERATIONS>, dst_index0, dst_index1, dst_index2, odst);
 }
 
 }  // namespace ckernel

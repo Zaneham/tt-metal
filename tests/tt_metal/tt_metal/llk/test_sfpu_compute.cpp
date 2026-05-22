@@ -78,7 +78,7 @@ const map<std::string, std::map<std::string, std::string>> sfpu_op_to_op_name = 
 //                       the Quasar binary div pattern.
 const map<std::string, std::map<std::string, std::string>> sfpu_ternary_op_to_op_name = {
     {"where",
-     {{"SFPU_OP_INIT_0", "where_tile_init();"}, {"SFPU_OP_CHAIN_0", "where_tile<DataFormat::Float16_b>(0, 1, 2, 3);"}}},
+     {{"SFPU_OP_INIT_0", "where_tile_init();"}, {"SFPU_OP_CHAIN_0", "where_tile<DataFormat::Float16_b>(0, 1, 2, 0);"}}},
 };
 
 bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
@@ -769,49 +769,152 @@ bool run_sfpu_ternary_three_input_buffer(
     std::vector<uint32_t> dest_buffer_data;
     tt_metal::detail::ReadFromBuffer(output_dram_buffer, dest_buffer_data);
 
-    // PROBE: dump the first elements of result vs each input so we can see
-    // which input the output actually matches. SFPU is a no-op, so result
-    // should equal cond (in0) if datacopy worked.
+    // PROBE: dump the first elements of result vs each input + golden so we can
+    // see exactly where outputs land and how they relate to cond's branches.
     {
         auto out_vals = unpack_vector<bfloat16, uint32_t>(dest_buffer_data);
         auto in0_vals = unpack_vector<bfloat16, uint32_t>(packed_in0);
         auto in1_vals = unpack_vector<bfloat16, uint32_t>(packed_in1);
         auto in2_vals = unpack_vector<bfloat16, uint32_t>(packed_in2);
+        auto golden_vals = unpack_vector<bfloat16, uint32_t>(packed_golden);
+
+        // Per-element first 16 with expected (golden) and ✓/✗
         const size_t n = std::min<size_t>(16, out_vals.size());
-        log_info(tt::LogTest, "PROBE: idx |   out    |   in0(cond) |   in1(true) |  in2(false)");
+        log_info(tt::LogTest, "PROBE: idx |   out    |  golden  | cond  | in1(t) | in2(f) | branch | ok?");
         for (size_t i = 0; i < n; ++i) {
+            const float o = static_cast<float>(out_vals[i]);
+            const float g = static_cast<float>(golden_vals[i]);
+            const float c = static_cast<float>(in0_vals[i]);
+            const char* branch = (c == 0.0f) ? "false" : "true ";
+            const char* ok = (o == g) ? "OK" : "BAD";
             log_info(
                 tt::LogTest,
-                "PROBE: {:3}  | {:+.4f} | {:+.4f}     | {:+.4f}     | {:+.4f}",
+                "PROBE: {:3}  | {:+.4f} | {:+.4f} | {:+.2f} | {:+.4f} | {:+.4f} | {}  | {}",
                 i,
-                static_cast<float>(out_vals[i]),
-                static_cast<float>(in0_vals[i]),
+                o,
+                g,
+                c,
                 static_cast<float>(in1_vals[i]),
-                static_cast<float>(in2_vals[i]));
+                static_cast<float>(in2_vals[i]),
+                branch,
+                ok);
         }
-        size_t mismatch_in0 = 0, mismatch_in1 = 0, mismatch_in2 = 0;
+
+        // Match histogram: where does each output element land?
+        size_t match_golden = 0, match_in0 = 0, match_in1 = 0, match_in2 = 0;
+        size_t match_neg_in0 = 0, match_neg_in1 = 0, match_neg_in2 = 0;
+        size_t out_is_zero = 0, no_match = 0;
+        // Branch-conditional accuracy
+        size_t cond_eq0 = 0, cond_ne0 = 0;
+        size_t correct_cond_eq0 = 0, correct_cond_ne0 = 0;
+        size_t cond_eq0_got_true = 0, cond_eq0_got_false = 0;
+        size_t cond_ne0_got_true = 0, cond_ne0_got_false = 0;
         for (size_t i = 0; i < out_vals.size(); ++i) {
-            float o = static_cast<float>(out_vals[i]);
-            if (o != static_cast<float>(in0_vals[i])) {
-                ++mismatch_in0;
+            const float o = static_cast<float>(out_vals[i]);
+            const float g = static_cast<float>(golden_vals[i]);
+            const float c = static_cast<float>(in0_vals[i]);
+            const float t = static_cast<float>(in1_vals[i]);
+            const float f = static_cast<float>(in2_vals[i]);
+            if (o == g) {
+                ++match_golden;
             }
-            if (o != static_cast<float>(in1_vals[i])) {
-                ++mismatch_in1;
+            bool m_in0 = (o == c), m_in1 = (o == t), m_in2 = (o == f);
+            if (m_in0) {
+                ++match_in0;
             }
-            if (o != static_cast<float>(in2_vals[i])) {
-                ++mismatch_in2;
+            if (m_in1) {
+                ++match_in1;
+            }
+            if (m_in2) {
+                ++match_in2;
+            }
+            if (o == -c) {
+                ++match_neg_in0;
+            }
+            if (o == -t) {
+                ++match_neg_in1;
+            }
+            if (o == -f) {
+                ++match_neg_in2;
+            }
+            if (o == 0.0f) {
+                ++out_is_zero;
+            }
+            if (!m_in0 && !m_in1 && !m_in2 && o != 0.0f) {
+                ++no_match;
+            }
+
+            if (c == 0.0f) {
+                ++cond_eq0;
+                if (o == g) {
+                    ++correct_cond_eq0;
+                }
+                if (o == t) {
+                    ++cond_eq0_got_true;
+                }
+                if (o == f) {
+                    ++cond_eq0_got_false;
+                }
+            } else {
+                ++cond_ne0;
+                if (o == g) {
+                    ++correct_cond_ne0;
+                }
+                if (o == t) {
+                    ++cond_ne0_got_true;
+                }
+                if (o == f) {
+                    ++cond_ne0_got_false;
+                }
             }
         }
         log_info(
             tt::LogTest,
-            "PROBE: total {} elems, mismatches vs in0={}, vs in1={}, vs in2={}",
+            "PROBE: total {} elems | match: golden={}  in0={}  in1={}  in2={}  -in0={}  -in1={}  -in2={}  zero={}  "
+            "no_match={}",
             out_vals.size(),
-            mismatch_in0,
-            mismatch_in1,
-            mismatch_in2);
+            match_golden,
+            match_in0,
+            match_in1,
+            match_in2,
+            match_neg_in0,
+            match_neg_in1,
+            match_neg_in2,
+            out_is_zero,
+            no_match);
+        log_info(
+            tt::LogTest,
+            "PROBE: cond==0 branch: {}/{} correct  [got_true={}  got_false={}]",
+            correct_cond_eq0,
+            cond_eq0,
+            cond_eq0_got_true,
+            cond_eq0_got_false);
+        log_info(
+            tt::LogTest,
+            "PROBE: cond!=0 branch: {}/{} correct  [got_true={}  got_false={}]",
+            correct_cond_ne0,
+            cond_ne0,
+            cond_ne0_got_true,
+            cond_ne0_got_false);
 
-        // Per-tile and per-face mismatch breakdown (vs in0/cond). 1 tile = 1024 elems
-        // (4 faces × 16×16). Element layout is face-major within a tile.
+        // First mismatch vs golden, with full context
+        for (size_t i = 0; i < out_vals.size(); ++i) {
+            if (static_cast<float>(out_vals[i]) != static_cast<float>(golden_vals[i])) {
+                log_info(
+                    tt::LogTest,
+                    "PROBE: first golden-mismatch @ idx {} | out={:+.4f}  expected={:+.4f}  cond={:+.2f}  in1={:+.4f}  "
+                    "in2={:+.4f}",
+                    i,
+                    static_cast<float>(out_vals[i]),
+                    static_cast<float>(golden_vals[i]),
+                    static_cast<float>(in0_vals[i]),
+                    static_cast<float>(in1_vals[i]),
+                    static_cast<float>(in2_vals[i]));
+                break;
+            }
+        }
+
+        // Per-tile/per-face mismatch breakdown (now vs golden).
         constexpr size_t elems_per_tile = 32 * 32;
         constexpr size_t elems_per_face = 16 * 16;
         const size_t total_tiles = out_vals.size() / elems_per_tile;
@@ -822,7 +925,7 @@ bool run_sfpu_ternary_three_input_buffer(
             for (size_t f = 0; f < 4; ++f) {
                 for (size_t e = 0; e < elems_per_face; ++e) {
                     size_t idx = t * elems_per_tile + f * elems_per_face + e;
-                    if (static_cast<float>(out_vals[idx]) != static_cast<float>(in0_vals[idx])) {
+                    if (static_cast<float>(out_vals[idx]) != static_cast<float>(golden_vals[idx])) {
                         ++tile_mm;
                         ++face_mm[f];
                         if (first_bad < 0) {
@@ -833,7 +936,7 @@ bool run_sfpu_ternary_three_input_buffer(
             }
             log_info(
                 tt::LogTest,
-                "PROBE: tile {}: mismatches={}/1024 [face0={} face1={} face2={} face3={}] first_bad_idx={}",
+                "PROBE: tile {}: mismatches-vs-golden={}/1024 [face0={} face1={} face2={} face3={}] first_bad_idx={}",
                 t,
                 tile_mm,
                 face_mm[0],

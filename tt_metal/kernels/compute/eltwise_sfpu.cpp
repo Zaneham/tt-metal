@@ -70,7 +70,7 @@ void kernel_main() {
             tile_regs_commit();
 
             tile_regs_wait();
-            pack_tile(3, out_id);
+            pack_tile(0, out_id);
             tile_regs_release();
 
             dfb_out.push_back(1);
