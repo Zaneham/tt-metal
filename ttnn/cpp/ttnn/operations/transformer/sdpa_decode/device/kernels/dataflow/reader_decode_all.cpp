@@ -4,12 +4,17 @@
 
 #include <stdint.h>
 #include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/noc.h"
+#include "api/dataflow/circular_buffer.h"
+#include "api/dataflow/core_local_mem.h"
 #include <vector>
 
 #include "ttnn/operations/transformer/sdpa_decode/device/kernels/rt_args_common.hpp"
 #include "dataflow_common.hpp"
 
 void kernel_main() {
+    Noc noc;
+
     /*
     In DRAM, Q is (B, PNHt, DHt), K is (B, St, DHt), V is (B, St, DHt), mask is (B, PNHt, PSt)
     We want to read for a particular batch cur_batch, and sequence length up to padded layer length.
@@ -98,16 +103,16 @@ void kernel_main() {
             cur_pos = cur_pos_arg;
         } else {
             constexpr uint32_t cb_index_id = tt::CBIndex::c_8;
-            cb_reserve_back(cb_index_id, 1);
-            uint32_t index_cb_wr_ptr = get_write_ptr(cb_index_id);
+            CircularBuffer cb_index(cb_index_id);
+            cb_index.reserve_back(1);
+            uint32_t index_cb_wr_ptr = cb_index.get_write_ptr();
             if constexpr (!is_cur_pos_tensor_sharded) {
                 const auto addrg = TensorAccessor(pos_args, pos_addr);
                 // index_tensor has one page to read
-                uint64_t tensor_index_noc_addr = addrg.get_noc_addr(0);
-                noc_async_read(tensor_index_noc_addr, index_cb_wr_ptr, index_stick_size_B);
-                noc_async_read_barrier();
+                noc.async_read(addrg, CoreLocalMem<uint32_t>(index_cb_wr_ptr), index_stick_size_B, {.page_id = 0}, {});
+                noc.async_read_barrier();
             }
-            cb_push_back(cb_index_id, 1);
+            cb_index.push_back(1);
             volatile tt_l1_ptr uint32_t* index_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(index_cb_wr_ptr);
             cur_pos = index_ptr[cur_batch / q_heads_parallel_factor];
         }
@@ -173,12 +178,11 @@ void kernel_main() {
     // Read Q entirely - always read into cb_q_in
     // When tilize_q is true, compute will tilize back to cb_q_in
     // When tilize_q is false, Q is already tilized
-    uint32_t k_mcast_sem_addr = get_semaphore(k_mcast_semaphore_id);
-    volatile tt_l1_ptr uint32_t* k_mcast_sem_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(k_mcast_sem_addr);
     const uint32_t q_batch_offset = cur_batch * q_chunk_tiles;
 
     // Read Q
     read_q<cb_q_in, cb_q_rm, q_tile_bytes, q_chunk_tiles, is_q_sharded, tilize_q, use_half_tile, barrier_threshold>(
+        noc,
         q_locally_available,
         is_output_core,
         q_addr,
@@ -199,19 +203,23 @@ void kernel_main() {
     if constexpr (use_attention_sink) {
         const auto attention_sink_reader = TensorAccessor(attention_sink_args, attention_sink_addr);
 
-        cb_reserve_back(cb_attention_sink, PNHt);
-        uint32_t attention_sink_write_ptr = get_write_ptr(cb_attention_sink);
+        CircularBuffer cb_sink(cb_attention_sink);
+        cb_sink.reserve_back(PNHt);
+        uint32_t attention_sink_write_ptr = cb_sink.get_write_ptr();
 
         for (uint32_t tile = 0; tile < PNHt; ++tile) {
-            uint64_t sink_noc_addr = attention_sink_reader.get_noc_addr(tile);
-            // Use noc_async_read with explicit size instead of noc_async_read_tile because
-            // the CB may use half tiles (16x32) while the DRAM buffer stores full tiles (32x32).
-            // noc_async_read_tile would read buffer->aligned_page_size() bytes, overflowing the CB.
-            noc_async_read(sink_noc_addr, attention_sink_write_ptr, attention_sink_tile_bytes);
+            // Use noc.async_read with explicit size because the CB may use half tiles (16x32)
+            // while the DRAM buffer stores full tiles (32x32). Explicit size prevents overflow.
+            noc.async_read(
+                attention_sink_reader,
+                CoreLocalMem<uint32_t>(attention_sink_write_ptr),
+                attention_sink_tile_bytes,
+                {.page_id = tile},
+                {});
             attention_sink_write_ptr += attention_sink_tile_bytes;
         }
-        noc_async_read_barrier();
-        cb_push_back(cb_attention_sink, PNHt);
+        noc.async_read_barrier();
+        cb_sink.push_back(PNHt);
     }
 
     // Read page table
@@ -221,11 +229,13 @@ void kernel_main() {
     volatile tt_l1_ptr uint32_t* page_table_ptr_u32 = nullptr;
     if constexpr (is_paged_attention) {
         constexpr uint32_t cb_id_page_table = tt::CBIndex::c_9;
+        CircularBuffer cb_page_table(cb_id_page_table);
         uint32_t num_pages_to_read = is_page_table_sharded ? B : 1;
-        cb_reserve_back(cb_id_page_table, num_pages_to_read);
+        cb_page_table.reserve_back(num_pages_to_read);
         // Read page table from DRAM
         if constexpr (!is_page_table_sharded) {
             page_table_ptr = read_page_table_for_batch(
+                noc,
                 cb_id_page_table,
                 cur_batch / q_heads_parallel_factor,
                 page_table_args,
@@ -234,10 +244,10 @@ void kernel_main() {
             page_table_ptr_u32 = page_table_ptr;
         } else {  // Read page table from dynamically allocated L1 buffer
             page_table_cb_wr_ptr =
-                get_write_ptr(cb_id_page_table) + (cur_batch / q_heads_parallel_factor) * page_table_page_size;
+                cb_page_table.get_write_ptr() + (cur_batch / q_heads_parallel_factor) * page_table_page_size;
             page_table_ptr_u16 = reinterpret_cast<volatile tt_l1_ptr uint16_t*>(page_table_cb_wr_ptr);
         }
-        cb_push_back(cb_id_page_table, num_pages_to_read);
+        cb_page_table.push_back(num_pages_to_read);
     }
 
     for (uint32_t cur_head = cur_head_group * num_heads_per_core;
@@ -253,8 +263,7 @@ void kernel_main() {
             .mcast_y0 = mcast_y0,
             .mcast_y1 = mcast_y1,
             .num_dests = num_dests,
-            .mcast_sem_addr = k_mcast_sem_addr,
-            .mcast_sem_ptr = k_mcast_sem_ptr};
+            .mcast_sem_id = k_mcast_semaphore_id};
 
         if constexpr (is_paged_attention) {
             for (uint32_t k_chunk = k_chunk_start; k_chunk < k_chunk_end; ++k_chunk) {
@@ -271,6 +280,7 @@ void kernel_main() {
                     barrier_threshold,
                     is_page_table_sharded,
                     use_k_mcast>(
+                    noc,
                     k_chunk_tiles,
                     cur_head,
                     Sk_chunk_t_dynamic,
@@ -283,7 +293,7 @@ void kernel_main() {
 
                 if constexpr (use_attention_mask) {
                     mask_start_tile_id = read_mask_chunk<cb_mask_in, mask_tile_bytes, barrier_threshold, PNHt>(
-                        PSt, Sk_chunk_t_dynamic, mask_chunk_tiles, mask_start_tile_id, mask_reader);
+                        noc, PSt, Sk_chunk_t_dynamic, mask_chunk_tiles, mask_start_tile_id, mask_reader);
                 }
                 // Read V chunk - either from DRAM or from K's L1 buffer (transpose) when reuse_k is true
                 read_v<
@@ -295,6 +305,7 @@ void kernel_main() {
                     barrier_threshold,
                     is_page_table_sharded,
                     reuse_k>(
+                    noc,
                     v_chunk_tiles,
                     cur_head,
                     Sk_chunk_t_dynamic,
@@ -332,6 +343,7 @@ void kernel_main() {
                 cb_v_in,
                 cb_mask_in,
                 reuse_k>(
+                noc,
                 k_chunk_start,
                 k_chunk_end,
                 k_start_tile_id,
