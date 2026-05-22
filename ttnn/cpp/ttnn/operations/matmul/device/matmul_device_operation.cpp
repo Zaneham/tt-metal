@@ -40,6 +40,17 @@ void check_tensor_in_grid(const Tensor& tensor, const CoreCoord& grid_size) {
     }
 }
 
+void check_tensor_in_core_range_set(const Tensor& tensor, const CoreRangeSet& allowed_cores) {
+    if (tensor.memory_config().is_sharded() && tensor.memory_config().buffer_type() != BufferType::DRAM) {
+        const auto& shard_grid = tensor.memory_config().shard_spec().value().grid;
+        TT_FATAL(
+            allowed_cores.contains(shard_grid),
+            "Tensor shard spec grid {} must lie within allowed_worker_cores {}",
+            shard_grid,
+            allowed_cores);
+    }
+}
+
 void validate_matmul_matrix_dimensions(
     const ttnn::Shape& a_shape,
     const ttnn::Shape& b_shape,
@@ -286,9 +297,14 @@ void validate_matmul_sharded_operand_grids_within_program_compute_grid(
         [&](const auto& program_config) {
             using ProgramConfigType = std::decay_t<decltype(program_config)>;
             if constexpr (std::is_same_v<ProgramConfigType, operations::matmul::MatmulMultiCoreReuseProgramConfig>) {
-                const auto& grid = program_config.compute_with_storage_grid_size;
-                check_tensor_in_grid(input_tensor_a, grid);
-                check_tensor_in_grid(input_tensor_b, grid);
+                if (program_config.allowed_worker_cores.has_value()) {
+                    check_tensor_in_core_range_set(input_tensor_a, program_config.allowed_worker_cores.value());
+                    check_tensor_in_core_range_set(input_tensor_b, program_config.allowed_worker_cores.value());
+                } else {
+                    const auto& grid = program_config.compute_with_storage_grid_size;
+                    check_tensor_in_grid(input_tensor_a, grid);
+                    check_tensor_in_grid(input_tensor_b, grid);
+                }
             }
         },
         chosen_program_config);
