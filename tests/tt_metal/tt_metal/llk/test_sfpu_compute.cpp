@@ -181,17 +181,6 @@ static vector<uint32_t> generate_add_int_operand(unsigned numel, int seed) {
     return packed;
 }
 
-// --- INT8 add_int host operands: widened int32 in uint32 words (uncomment to test) ---
-// static constexpr int32_t kAddInt8Lhs = 4;
-// static constexpr int32_t kAddInt8Rhs = 2;
-// static constexpr int32_t kAddInt8Golden = kAddInt8Lhs + kAddInt8Rhs;
-// static vector<uint32_t> generate_add_int8_hardcoded_words(int32_t value, unsigned num_words) {
-//     return vector<uint32_t>(num_words, std::bit_cast<uint32_t>(value));
-// }
-// static vector<uint32_t> generate_add_int_operand(unsigned num_words, int32_t value) {
-//     return generate_add_int8_hardcoded_words(value, num_words);
-// }
-
 // Per-operand stimuli for binary SFPU ops. LHS and RHS use independent seeds so
 // their signs and magnitudes vary independently.
 std::pair<vector<uint32_t>, vector<uint32_t>> generate_packed_sfpu_binary_inputs(
