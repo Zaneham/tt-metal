@@ -909,7 +909,7 @@ def test_demo_for_conditional_generation(
             verify_perf(
                 measurements,
                 expected_perf_metrics,
-                high_tol_percentage=1.20,
+                high_tol_percentage=0.20,
                 expected_measurements=expected_measurements,
             )
         else:

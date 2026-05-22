@@ -1016,7 +1016,7 @@ def test_gpt_oss_demo(
                         ttft_tolerance = current_ttft_target[1]
                         current_ttft_target = current_ttft_target[0]
                     else:
-                        ttft_tolerance = 1.15  # Default 15% tolerance
+                        ttft_tolerance = 0.15  # Default 15% tolerance
 
                     # Parse decode_tok_s_u target with tolerance
                     decode_tsu_target = perf_config["decode_tok_s_u"]
@@ -1024,7 +1024,7 @@ def test_gpt_oss_demo(
                         decode_tolerance = decode_tsu_target[1]
                         decode_tsu_target = decode_tsu_target[0]
                     else:
-                        decode_tolerance = 1.15  # Default 15% tolerance
+                        decode_tolerance = 0.15  # Default 15% tolerance
 
                     # Verify prefill performance with prefill-specific tolerance
                     prefill_targets = {

@@ -559,4 +559,4 @@ def test_multimodal_demo_text(
                 "gemma-3-27b",  # Gemma-3 functional only - perf tests are not reliable yet
             ]
             if base_model_name not in skip_perf_verification:
-                verify_perf(measurements, targets, high_tol_percentage=1.15)
+                verify_perf(measurements, targets, high_tol_percentage=0.15)

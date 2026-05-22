@@ -1567,13 +1567,13 @@ def test_demo_text(
                     seq_len=1024,
                 )
             ci_targets = {}
-            high_tol_percentage = 1.15
+            high_tol_percentage = 0.15
 
             if resolved_ci_targets:
                 if resolved_ci_targets.get("prefill_tolerance") is not None:
-                    high_tol_percentage = max(high_tol_percentage, 1 + float(resolved_ci_targets["prefill_tolerance"]))
+                    high_tol_percentage = max(high_tol_percentage, float(resolved_ci_targets["prefill_tolerance"]))
                 if resolved_ci_targets.get("decode_tolerance") is not None:
-                    high_tol_percentage = max(high_tol_percentage, 1 + float(resolved_ci_targets["decode_tolerance"]))
+                    high_tol_percentage = max(high_tol_percentage, float(resolved_ci_targets["decode_tolerance"]))
 
                 if resolved_ci_targets.get("prefill_time_to_first_token") is not None:
                     ci_targets["prefill_time_to_token"] = (

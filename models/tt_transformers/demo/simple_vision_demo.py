@@ -644,7 +644,7 @@ def test_multimodal_demo_text(
                 "decode_t/s/u": targets_decode_tok_s_u[run_config][0],
             }
 
-            perf_tolerance = targets_decode_tok_s_u[run_config][1] or 1.15  # default to 15% tolerance
+            perf_tolerance = targets_decode_tok_s_u[run_config][1] or 0.15  # default to 15% tolerance
 
         # Save benchmark data for CI
         N_warmup_iter = {"inference_prefill": 0, "inference_decode": 0}

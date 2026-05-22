@@ -398,7 +398,7 @@ def run_mamba_demo(
     )
 
     if assert_on_performance_measurements:
-        verify_perf(measurements, targets, high_tol_percentage=1.20)
+        verify_perf(measurements, targets, high_tol_percentage=0.20)
     else:
         logger.warning(f"Skipping performance checks (this is expected for functional tests)")
 

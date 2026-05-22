@@ -1449,7 +1449,7 @@ def test_demo_text(
                 verify_perf(
                     measurements,
                     ci_targets,
-                    high_tol_percentage=1.15,
+                    high_tol_percentage=0.15,
                     expected_measurements={k: True for k in ci_targets.keys()},
                 )
             else:
