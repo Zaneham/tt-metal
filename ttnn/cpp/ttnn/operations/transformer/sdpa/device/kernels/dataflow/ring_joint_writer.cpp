@@ -442,7 +442,7 @@ void kernel_main() {
     constexpr bool needs_lightweight_mask =
         (local_n_has_padding || global_n_has_padding || joint_has_padding) || is_causal;
     if constexpr (needs_lightweight_mask) {
-        generate_lightweight_mask_tiles<global_n_partial_col, joint_l_partial_col, cb_mask_in, is_causal>();
+        generate_lightweight_mask_tiles<global_n_partial_col, joint_l_partial_col, cb_mask_in, is_causal>(noc);
     }
 
     const uint32_t last_active_ring_iter = find_last_active_ring_iter(
