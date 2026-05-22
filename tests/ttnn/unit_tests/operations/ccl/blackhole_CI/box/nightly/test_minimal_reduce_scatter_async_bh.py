@@ -182,63 +182,64 @@ def run_reduce_scatter_impl(
 
         return tt_reduce_scatter_output_tensor
 
-    if enable_trace:
-        # Compile the op
-        tt_reduce_scatter_output_trace_list = []
-        for i in range(num_iters):
-            tt_reduce_scatter_output_tensor = run_op(i)
-        logger.info(f"Done compiling Op")
+    try:
+        if enable_trace:
+            # Compile the op
+            tt_reduce_scatter_output_trace_list = []
+            for i in range(num_iters):
+                tt_reduce_scatter_output_tensor = run_op(i)
+            logger.info(f"Done compiling Op")
 
-        # Capture the trace
-        trace_id = ttnn.begin_trace_capture(bh_1d_mesh_device, cq_id=0)
-        for i in range(num_iters):
-            tt_reduce_scatter_output_tensor = run_op(i)
-            tt_reduce_scatter_output_trace_list.append(tt_reduce_scatter_output_tensor)
-        ttnn.end_trace_capture(bh_1d_mesh_device, trace_id, cq_id=0)
-        logger.info(f"Done capturing trace")
+            # Capture the trace
+            trace_id = ttnn.begin_trace_capture(bh_1d_mesh_device, cq_id=0)
+            for i in range(num_iters):
+                tt_reduce_scatter_output_tensor = run_op(i)
+                tt_reduce_scatter_output_trace_list.append(tt_reduce_scatter_output_tensor)
+            ttnn.end_trace_capture(bh_1d_mesh_device, trace_id, cq_id=0)
+            logger.info(f"Done capturing trace")
 
-        # Execute trace
-        ttnn.execute_trace(bh_1d_mesh_device, trace_id, cq_id=0, blocking=False)
-        logger.info(f"Done executing trace")
+            # Execute trace
+            ttnn.execute_trace(bh_1d_mesh_device, trace_id, cq_id=0, blocking=False)
+            logger.info(f"Done executing trace")
 
-        # Synchronize the devices
-        ttnn.synchronize_device(bh_1d_mesh_device, sub_device_ids=sub_device_stall_group)
-        for tt_tensor in tt_reduce_scatter_output_trace_list:
-            tt_rs_out = ttnn.from_device(tt_tensor)
-            tt_rs_out = ttnn.to_torch(tt_rs_out, mesh_composer=ttnn.ConcatMeshToTensor(bh_1d_mesh_device, dim=dim))
-            tt_tensor.deallocate(True)
-            tt_reduce_scatter_output_list.append(tt_rs_out)
-    else:
-        for i in range(num_iters):
-            tt_reduce_scatter_output_tensor = run_op(i)
-            tt_rs_out = ttnn.from_device(tt_reduce_scatter_output_tensor)
-            tt_rs_out = ttnn.to_torch(tt_rs_out, mesh_composer=ttnn.ConcatMeshToTensor(bh_1d_mesh_device, dim=dim))
-            tt_reduce_scatter_output_tensor.deallocate(True)
-            tt_reduce_scatter_output_list.append(tt_rs_out)
-
-            logger.info(f"Waiting for op")
+            # Synchronize the devices
             ttnn.synchronize_device(bh_1d_mesh_device, sub_device_ids=sub_device_stall_group)
-            logger.info(f"Done op")
-
-            logger.info(f"Done iteration {i}")
-
-    for i in range(num_iters):
-        tt_rs_out = tt_reduce_scatter_output_list[i]
-        torch_rs_out_tensor = torch_reduce_scatter_output_list[i]
-
-        torch_rs_out = torch.cat(torch_rs_out_tensor, dim)
-
-        if ones_tensor:
-            eq, output = comp_equal(tt_rs_out, torch_rs_out)
+            for tt_tensor in tt_reduce_scatter_output_trace_list:
+                tt_rs_out = ttnn.from_device(tt_tensor)
+                tt_rs_out = ttnn.to_torch(tt_rs_out, mesh_composer=ttnn.ConcatMeshToTensor(bh_1d_mesh_device, dim=dim))
+                tt_tensor.deallocate(True)
+                tt_reduce_scatter_output_list.append(tt_rs_out)
         else:
-            eq, output = comp_pcc(tt_rs_out, torch_rs_out)
+            for i in range(num_iters):
+                tt_reduce_scatter_output_tensor = run_op(i)
+                tt_rs_out = ttnn.from_device(tt_reduce_scatter_output_tensor)
+                tt_rs_out = ttnn.to_torch(tt_rs_out, mesh_composer=ttnn.ConcatMeshToTensor(bh_1d_mesh_device, dim=dim))
+                tt_reduce_scatter_output_tensor.deallocate(True)
+                tt_reduce_scatter_output_list.append(tt_rs_out)
 
-        logger.info(f"{output}, iteration {i}")
-        assert eq, f"{i} FAILED ag: {output}"
+                logger.info(f"Waiting for op")
+                ttnn.synchronize_device(bh_1d_mesh_device, sub_device_ids=sub_device_stall_group)
+                logger.info(f"Done op")
 
-    bh_1d_mesh_device.reset_sub_device_stall_group()
-    if use_sub_devices:
-        bh_1d_mesh_device.remove_sub_device_manager(sub_device_manager)
+                logger.info(f"Done iteration {i}")
+
+        for i in range(num_iters):
+            tt_rs_out = tt_reduce_scatter_output_list[i]
+            torch_rs_out_tensor = torch_reduce_scatter_output_list[i]
+
+            torch_rs_out = torch.cat(torch_rs_out_tensor, dim)
+
+            if ones_tensor:
+                eq, output = comp_equal(tt_rs_out, torch_rs_out)
+            else:
+                eq, output = comp_pcc(tt_rs_out, torch_rs_out)
+
+            logger.info(f"{output}, iteration {i}")
+            assert eq, f"{i} FAILED ag: {output}"
+    finally:
+        bh_1d_mesh_device.reset_sub_device_stall_group()
+        if use_sub_devices:
+            bh_1d_mesh_device.remove_sub_device_manager(sub_device_manager)
 
 
 @skip_for_wormhole_b0()
