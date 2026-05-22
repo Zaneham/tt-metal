@@ -28,7 +28,6 @@ class GlobalCircularBuffer;
 struct DramCorePrefetcherConfig {
     uint32_t num_layers = 1;
     bool enable_performance_mode = false;
-    uint32_t dram_core_k_block_w_tiles = 1;
 };
 
 // Launch the DRAM-core prefetcher on `mesh_device`. The prefetcher streams

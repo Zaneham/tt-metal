@@ -61,7 +61,11 @@ void bind_dram_core_prefetcher_lifecycle(nb::module_& mod) {
                 global_cb (GlobalCircularBuffer): must be a DRAM-sender GCB
                     (created via ttnn.create_global_circular_buffer_with_dram_senders).
                 enable_performance_mode (bool, optional): kept for API parity; currently a no-op.
-                dram_core_k_block_w_tiles (int, optional): K-block width in tiles. Default 1.
+
+            The prefetcher derives its per-block K width automatically from the tensor
+            shape and the GCB's ring size (num_senders * num_receivers_per_sender) and
+            picks DMA chunking based on the DRISC L1 stage budget. It will raise on
+            start() if the shape and ring don't admit a fitting staging configuration.
 
             Returns:
                 None
@@ -71,8 +75,7 @@ void bind_dram_core_prefetcher_lifecycle(nb::module_& mod) {
         nb::arg("num_layers"),
         nb::arg("global_cb"),
         nb::kw_only(),
-        nb::arg("enable_performance_mode") = false,
-        nb::arg("dram_core_k_block_w_tiles") = 1);
+        nb::arg("enable_performance_mode") = false);
 
     mod.def(
         "stop_dram_core_prefetcher",

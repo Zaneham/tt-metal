@@ -207,7 +207,6 @@ def test_bench_dram_core_repeats(device):
     ring_cols = max(c for c in range(min(_NUM_DRAM_BANKS, ring_size), 0, -1) if ring_size % c == 0)
     ring_rows = ring_size // ring_cols
     k_padded = _round_up(_K, ring_size * ttnn.TILE_SIZE)
-    dram_core_k_block_w_tiles = (k_padded // ttnn.TILE_SIZE) // ring_size
 
     receiver_core_range_set = ttnn.CoreRangeSet(
         {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(ring_cols - 1, ring_rows - 1))}
@@ -291,8 +290,7 @@ def test_bench_dram_core_repeats(device):
 
     logger.info(
         f"[bench] K={_K} K_padded={k_padded} N={_N} banks={num_dram_banks} ring={ring_size} "
-        f"dram_core_k_block_w_tiles={dram_core_k_block_w_tiles} gcb_size={gcb_size} "
-        f"trace_repeats={trace_repeats} num_prefetch_layers={num_prefetch_layers}"
+        f"gcb_size={gcb_size} trace_repeats={trace_repeats} num_prefetch_layers={num_prefetch_layers}"
     )
 
     optional_output_tensor = ttnn.from_torch(
@@ -321,7 +319,6 @@ def test_bench_dram_core_repeats(device):
         [tt_weight, addrs],
         num_layers=num_prefetch_layers,
         global_cb=gcb,
-        dram_core_k_block_w_tiles=dram_core_k_block_w_tiles,
     )
 
     # Correctness + program-cache warmup: one real one-matmul launch.

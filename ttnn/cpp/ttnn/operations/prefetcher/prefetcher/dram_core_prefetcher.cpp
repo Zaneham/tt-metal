@@ -14,8 +14,7 @@ void start_dram_core_prefetcher(
     const std::vector<ttnn::Tensor>& tensors,
     uint32_t num_layers,
     const GlobalCircularBuffer& global_cb,
-    bool enable_performance_mode,
-    uint32_t dram_core_k_block_w_tiles) {
+    bool enable_performance_mode) {
     std::vector<const tt::tt_metal::MeshTensor*> mesh_tensors;
     mesh_tensors.reserve(tensors.size());
     for (const auto& t : tensors) {
@@ -24,7 +23,6 @@ void start_dram_core_prefetcher(
     tt::tt_metal::experimental::DramCorePrefetcherConfig config{
         .num_layers = num_layers,
         .enable_performance_mode = enable_performance_mode,
-        .dram_core_k_block_w_tiles = dram_core_k_block_w_tiles,
     };
     tt::tt_metal::experimental::StartDramCorePrefetcher(mesh_device, mesh_tensors, global_cb, config);
 }

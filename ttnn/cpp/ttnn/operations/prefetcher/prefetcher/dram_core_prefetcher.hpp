@@ -27,8 +27,7 @@ void start_dram_core_prefetcher(
     const std::vector<ttnn::Tensor>& tensors,
     uint32_t num_layers,
     const GlobalCircularBuffer& global_cb,
-    bool enable_performance_mode = false,
-    uint32_t dram_core_k_block_w_tiles = 1);
+    bool enable_performance_mode = false);
 
 void stop_dram_core_prefetcher(tt::tt_metal::distributed::MeshDevice* mesh_device);
 
