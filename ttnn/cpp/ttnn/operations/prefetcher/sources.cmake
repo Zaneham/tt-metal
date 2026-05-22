@@ -7,4 +7,5 @@ set(TTNN_OP_PREFETCHER_SRCS
     prefetcher/dram_prefetcher.cpp
     prefetcher/dram_core_prefetcher.cpp
     prefetcher_consumer/dram_prefetcher_consumer.cpp
+    prefetcher_consumer/dram_prefetcher_validator.cpp
 )

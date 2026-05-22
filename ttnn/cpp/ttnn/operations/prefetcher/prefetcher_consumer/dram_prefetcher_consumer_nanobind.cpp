@@ -9,6 +9,7 @@
 
 #include "ttnn-nanobind/bind_function.hpp"
 #include "dram_prefetcher_consumer.hpp"
+#include "dram_prefetcher_validator.hpp"
 
 namespace ttnn::operations::dram_prefetcher_consumer::detail {
 
@@ -32,6 +33,29 @@ void bind_dram_prefetcher_consumer(nb::module_& mod) {
         nb::arg("mesh_device"),
         nb::arg("num_iters"),
         nb::arg("page_size_bytes"),
+        nb::kw_only(),
+        nb::arg("global_cb"));
+
+    ttnn::bind_function<"dram_prefetcher_validator">(
+        mod,
+        R"doc(
+            Diagnostic receiver: wait_front(1) + DPRINT(first 16 bytes) + pop_front(1) for
+            num_iters iterations, then polls briefly for any extra pages (sender overshoot)
+            and DPRINTs success or DPRINTs + hangs on overflow. Used to debug prefetcher
+            push behavior without involving the matmul kernels.
+
+            Args:
+                mesh_device: the MeshDevice to enqueue on.
+                num_iters (int): expected total pages each receiver should see.
+                page_size_bytes (int): receiver-side page size (must match the sender push size).
+                print_stride (int): DPRINT every Nth iter; first/last always logged. 0 = first/last only.
+                global_cb (GlobalCircularBuffer): worker-sender or DRAM-sender GCB.
+        )doc",
+        &ttnn::dram_prefetcher_validator,
+        nb::arg("mesh_device"),
+        nb::arg("num_iters"),
+        nb::arg("page_size_bytes"),
+        nb::arg("print_stride"),
         nb::kw_only(),
         nb::arg("global_cb"));
 }
