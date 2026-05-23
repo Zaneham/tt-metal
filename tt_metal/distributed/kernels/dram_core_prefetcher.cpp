@@ -305,12 +305,15 @@ void kernel_main() {
             uint32_t fifo_snapshot = 0;
             uint32_t cum_offset_in_page = 0;
 
+            // Track (blk, sb, ch) via incremental successor logic instead of
+            // c / t_sub_band_per_block / (sb_ch / t_M) etc. — those generated `divu`/`remu`
+            // (6+ cyc each on BabyRISCV); we now just compare & increment counters.
+            uint32_t blk = 0;
+            uint32_t sb = 0;
+            uint32_t ch = 0;
+            uint32_t parity = 0;  // tracks (c & 1) for stage_slot ping-pong
+
             for (uint32_t c = 0; c < total_chunks; ++c) {
-                const uint32_t blk = c / t_sub_band_per_block;
-                const uint32_t sb_ch = c % t_sub_band_per_block;
-                const uint32_t sb = sb_ch / t_M;
-                const uint32_t ch = sb_ch % t_M;
-                (void)blk;
                 PROFILE_T0();
 
                 if (sb == 0 && ch == 0) {
@@ -320,24 +323,34 @@ void kernel_main() {
                     PROFILE_ACCUM(prof_reserve);
                 }
 
+                // Successor: next (blk, sb, ch). Cheap branches replace 4 div/mods.
+                uint32_t next_ch = ch + 1;
+                uint32_t next_sb = sb;
+                uint32_t next_blk = blk;
+                if (next_ch == t_M) {
+                    next_ch = 0;
+                    ++next_sb;
+                    if (next_sb == t_num_sub) {
+                        next_sb = 0;
+                        ++next_blk;
+                    }
+                }
+                const bool has_next = (next_blk < num_blocks);
+
                 // Issue the next DMA before waiting on this one (ping-pong, depth 2).
-                if (c + 1 < total_chunks) {
-                    const uint32_t next_c = c + 1;
-                    const uint32_t next_blk = next_c / t_sub_band_per_block;
-                    const uint32_t next_sb_ch = next_c % t_sub_band_per_block;
-                    const uint32_t next_sb = next_sb_ch / t_M;
-                    const uint32_t next_ch = next_sb_ch % t_M;
+                if (has_next) {
                     const uint32_t next_src =
                         tensor_base + next_blk * t_block_stride + next_sb * t_sub_stride + next_ch * t_chunk_bytes;
-                    const uint32_t next_slot = ((c + 1) & 1u) == 0 ? stage_slot_a : stage_slot_b;
+                    // next_slot is opposite parity of current.
+                    const uint32_t next_slot = (parity == 0) ? stage_slot_b : stage_slot_a;
                     experimental::dma_async_read(/*stream=*/0, next_src, next_slot, t_chunk_bytes);
                 }
                 PROFILE_ACCUM(prof_issue);
-                const uint32_t outstanding_after_wait = (c + 1 < total_chunks) ? 1u : 0u;
+                const uint32_t outstanding_after_wait = has_next ? 1u : 0u;
                 experimental::dma_async_read_wait_n(/*stream=*/0, outstanding_after_wait);
                 PROFILE_ACCUM(prof_wait);
 
-                const uint32_t stage_slot = (c & 1u) == 0 ? stage_slot_a : stage_slot_b;
+                const uint32_t stage_slot = (parity == 0) ? stage_slot_a : stage_slot_b;
                 volatile tt_l1_ptr uint32_t* chunk_recv_xy =
                     reinterpret_cast<volatile tt_l1_ptr uint32_t*>(noc_xy_l1_addr) + ch * t_recv_per_chunk * 2;
                 // Per-tensor-stable predicate; branches are 100% predictable across the
@@ -401,6 +414,12 @@ void kernel_main() {
                         iface, t_page_bytes_per_recv, num_receivers, noc_index);
                     PROFILE_ACCUM(prof_finalize);
                 }
+
+                // Advance counters to next chunk.
+                blk = next_blk;
+                sb = next_sb;
+                ch = next_ch;
+                parity ^= 1u;
 #ifdef DRISC_PROFILE
                 prof_chunks++;
 #endif
