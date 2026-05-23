@@ -4,48 +4,57 @@
 
 """Benchmark: DRAM-core prefetcher vs worker-core prefetcher on Blackhole.
 
-Both paths share the same gather_in0 matmul kernels. The worker-core path uses the
-`num_kernel_repeats` knob on `MatmulMultiCoreReuseMultiCast1DProgramConfig` to collapse
-N matmuls into a single op invocation (gather_in0 matmul kernels wrap their per-batch
-loop in an outer `for (r = 0; r < num_kernel_repeats; ++r)`, and the prefetcher's
-`num_layers` matches). The DRAM-core path instead issues N single-matmul launches
-(num_kernel_repeats=1) inside a captured trace; the prefetcher's `num_layers` is 1+N.
+Parametrized over Llama-3.2-1B, Llama-3.2-3B, Llama-3.1-8B, Llama-3.3-70B production
+prefetcher matmuls (QKV / WO / FF1 / FF2). For models that need multi-device tensor
+parallelism in production (`is_prefetcher_supported` returns False at lower device
+counts), tensor shapes are computed at the smallest device count where the worker
+prefetcher fits: 1B/3B at 1 device, 8B at 2 devices, 70B at 8 devices.
 
-Bench shape: under fast dispatch, capture a trace of N matmul dispatches and replay it
-once. The trace eliminates the host-side per-op dispatch overhead.
+Both paths share the same gather_in0 matmul kernels. Differences:
+- DRAM-core: trace captures N single-matmul launches (`num_kernel_repeats=1`); the
+  DRISC prefetcher kernel runs out-of-band via DramCorePrefetcherManager with
+  `num_layers = 1 + N` (1 warmup + N traced) and feeds one layer per matmul. The
+  receiver matmul runs on a contiguous receiver-grid sub-device.
+- Worker-core: trace captures one `(dram_prefetcher_op + matmul)` pair with device-side
+  `num_kernel_repeats=N` and `num_layers=N`. Both ops run under FD inside the trace.
+  Sender/receiver layout from `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml`
+  (production col-0/col-7 senders, scattered receivers); matmul pinned to receivers via
+  `sub_device_id`.
 
-DRAM-core path: the DRISC prefetcher kernel is launched out-of-band by
-DramCorePrefetcherManager (force_slow_dispatch=true) BEFORE the trace executes, with
-num_layers = 1 + N (one warmup + N traced). It runs continuously across warmup +
-traced execution and feeds one layer per matmul. The warmup matmul JITs the program
-and validates PCC; the trace then holds N cached single-matmul dispatches that replay
-in one shot.
+Shape envs `BENCH_K / BENCH_N / BENCH_DTYPE / BENCH_RECV_PER_BANK` override the
+parametrize values for ad-hoc runs. `BENCH_REPEATS` (default 1000) controls the
+worker-core's device-side loop count; `BENCH_TRACE_REPEATS` (default 100) controls
+the DRAM-core trace replay length. All shapes use ring=64 (8 banks × 8 receivers/bank)
+and bfloat8_b.
 
-Worker-core path: ttnn.dram_prefetcher + matmul both run under FD and both live inside
-the trace; each trace execution re-issues the prefetcher op.
+Measured on P150 (8-bank unharvested Blackhole) with BENCH_REPEATS=1000 /
+BENCH_TRACE_REPEATS=100 (full sweep below; M=32 for decode):
 
-Shape is env-parameterized: BENCH_K, BENCH_N, BENCH_DTYPE, BENCH_RECV_PER_BANK control
-the matmul dims and ring topology (ring = 8 * BENCH_RECV_PER_BANK; BH has 8 DRAM banks).
-Use scripts/run_llama_matmul_sweep.sh to drive a sweep across Llama-3.1-8B shapes.
+  Shape (model_op @ ndev)  K     N      DRAM-core               Worker-core            DRAM/Worker
+  1B_QKV   @ 1 dev          2048  3072    201us  2.01 TFLOP/s    68us  5.91 TFLOP/s    0.34x
+  1B_WO    @ 1 dev          2048  2048    220us  1.22 TFLOP/s    67us  3.98 TFLOP/s    0.31x
+  1B_FF1   @ 1 dev          2048  8192    206us  5.22 TFLOP/s    75us 14.37 TFLOP/s    0.36x
+  1B_FF2   @ 1 dev          8192  2048    189us  5.68 TFLOP/s   118us  9.09 TFLOP/s    0.62x
+  3B_QKV   @ 1 dev          3072  5120    244us  4.13 TFLOP/s    98us 10.30 TFLOP/s    0.40x
+  3B_WO    @ 1 dev          3072  3072    187us  3.23 TFLOP/s    91us  6.62 TFLOP/s    0.49x
+  3B_FF1   @ 1 dev          3072  8192    286us  5.63 TFLOP/s   116us 13.92 TFLOP/s    0.40x
+  3B_FF2   @ 1 dev          8192  3072    243us  6.63 TFLOP/s   132us 12.16 TFLOP/s    0.55x
+  8B_QKV   @ 2 dev          4096  3072    211us  3.82 TFLOP/s    91us  8.83 TFLOP/s    0.43x
+  8B_WO    @ 2 dev          2048  4096    178us  3.02 TFLOP/s    68us  7.88 TFLOP/s    0.38x
+  8B_FF1   @ 2 dev          4096  7168    288us  6.53 TFLOP/s   116us 16.25 TFLOP/s    0.40x
+  8B_FF2   @ 2 dev          7168  4096    270us  6.95 TFLOP/s   132us 14.20 TFLOP/s    0.49x
+  70B_QKV  @ 8 dev          8192  1280    274us  2.45 TFLOP/s   118us  5.68 TFLOP/s    0.43x
+  70B_WO   @ 8 dev          1024  8192    221us  2.43 TFLOP/s    75us  7.19 TFLOP/s    0.34x
+  70B_FF1  @ 8 dev          8192  3584    234us  8.05 TFLOP/s   132us 14.18 TFLOP/s    0.57x
+  70B_FF2  @ 8 dev          3584  8192    244us  7.70 TFLOP/s   116us 16.25 TFLOP/s    0.47x
 
-Llama-3.1-8B on single Blackhole uses ring=64 (8 banks * 8 recv/bank) for the prefetcher
-matmuls. The DRAM-core path covers FF1, O, and QKV at this ring size. FF2 (K=14336)
-exceeds the worker-side L1 budget on the prefetcher path; production uses a DRAM-sharded
-matmul variant (no prefetcher) for FF2 instead.
-
-Use BENCH_REPEATS to set the repeat count (default 1000). For useful asymptotic numbers,
-1000+ is recommended.
-
-Measured at production ring=64 (BENCH_REPEATS=1000):
-
-  Shape                      DRAM-core              Worker-core
-  K=4096 N=14336 bf8_b (FF1) 253us, 14.84 TFLOP/s   627us, 5.99 TFLOP/s   (DRAM 2.48x)
-  K=4096 N=12288 bf8_b (QKV) 225us, 14.29 TFLOP/s   537us, 6.00 TFLOP/s   (DRAM 2.38x)
-  K=4096 N=4096  bf8_b (O)   120us,  8.96 TFLOP/s   192us, 5.60 TFLOP/s   (DRAM +60%)
-
-Smaller shapes (KV proj at ring=16, ff_widest at ring=8) favor worker-core by ~10-20%.
-The crossover is at the boundary where push BW becomes the matmul bottleneck — see
-docs/dram_core_prefetcher_bw_measurements.md for the full picture.
+Caveats:
+- The two paths trace differently: DRAM-core captures N single matmuls (production-
+  faithful: each decoder layer is a separate dispatch); worker-core captures 1 op
+  with device-side N-iteration loop (zero dispatch overhead). Per-op overhead in the
+  DRAM-core column reflects host dispatch cost that worker-core's N-loop amortizes.
+- TFLOP/s uses unpadded (K, N) for both paths (the formula honors the actual matmul
+  work; padding for ring divisibility doesn't count as useful flops).
 """
 
 import math
@@ -84,17 +93,96 @@ def _select_num_receivers_per_bank(num_dram_banks: int) -> int:
 
 
 _M = 32
-_K = int(os.environ.get("BENCH_K", "512"))
-_N = int(os.environ.get("BENCH_N", "1024"))
 _NUM_DRAM_BANKS = 8
-_NUM_RECV_PER_BANK = int(os.environ.get("BENCH_RECV_PER_BANK", "1"))
+
+# Module-level shape vars. Mutable: rewritten by `_apply_shape()` at the top of each test
+# from the pytest parameter (with BENCH_* env overrides for ad-hoc runs). Helpers below
+# read these as ambient module state so we don't have to thread `K, N, dtype, recv_per_bank`
+# through every helper signature. `_N` is the **padded** N (up to ring*TILE_SIZE) used by
+# all sizing math; `_N_ORIG` is the original N used only in the TFLOP/s formula.
+_K = 512
+_K_ORIG = 512
+_N = 1024
+_N_ORIG = 1024
+_NUM_RECV_PER_BANK = 1
 _RING_SIZE = _NUM_DRAM_BANKS * _NUM_RECV_PER_BANK
 _RING_COLS = 8
-_RING_ROWS = (_RING_SIZE + _RING_COLS - 1) // _RING_COLS
-assert _RING_SIZE == _RING_COLS * _RING_ROWS, f"ring_size {_RING_SIZE} not a clean rect on 8-col grid"
-_DTYPE_NAME = os.environ.get("BENCH_DTYPE", "bfloat16")  # "bfloat16" or "bfloat8_b"
-_DTYPE = {"bfloat16": ttnn.bfloat16, "bfloat8_b": ttnn.bfloat8_b}[_DTYPE_NAME]
-_DTYPE_BYTES = {"bfloat16": 2, "bfloat8_b": 1088 / 1024.0}[_DTYPE_NAME]  # avg bytes/elem (bf8_b includes header)
+_RING_ROWS = 1
+_DTYPE_NAME = "bfloat16"
+_DTYPE = ttnn.bfloat16
+_DTYPE_BYTES = 2
+
+_DTYPE_FROM_NAME = {"bfloat16": ttnn.bfloat16, "bfloat8_b": ttnn.bfloat8_b}
+_DTYPE_BYTES_FROM_NAME = {"bfloat16": 2, "bfloat8_b": 1088 / 1024.0}  # bf8_b includes per-tile header
+
+
+# Production Llama prefetcher-fed matmul shapes on Blackhole (ring=64, bf8_b).
+# Per-device shapes from tests/ttnn/unit_tests/operations/transformers/test_prefetcher_BH.py:
+# QKV is N-sharded (qkv_size = head_dim*(2*n_kv_heads + n_heads)), WO is K-sharded
+# (n_heads*head_dim), FF1/FF3 are N-sharded (hidden_dim), FF2 is K-sharded (hidden_dim).
+# For models that don't fit single-device (Llama-3.1-8B, Llama-3.3-70B), shapes are
+# computed for tensor parallelism = 2 devices (per the goal).
+#
+# Llama-3.2-1B  (1 dev): dim=2048, hidden_dim=8192,  n_heads=32, n_kv_heads=8, head_dim=64,  qkv=3072
+# Llama-3.2-3B  (1 dev): dim=3072, hidden_dim=8192,  n_heads=24, n_kv_heads=8, head_dim=128, qkv=5120
+# Llama-3.1-8B  (2 dev): dim=4096, hidden_dim=14336, n_heads=32, n_kv_heads=8, head_dim=128, qkv=6144
+# Llama-3.3-70B (2 dev): dim=8192, hidden_dim=28672, n_heads=64, n_kv_heads=8, head_dim=128, qkv=10240
+#
+# All shapes use ring=64 (8 banks × 8 receivers/bank); N gets padded up to ring*TILE_SIZE in
+# the test body when not already a multiple.
+LLAMA_SHAPES = [
+    # Llama-3.2-1B, single-device per-op shapes (no TP).
+    pytest.param("1B_QKV", dict(K=2048, N=3072, dtype="bfloat8_b", recv_per_bank=8), id="1B_QKV"),
+    pytest.param("1B_WO", dict(K=2048, N=2048, dtype="bfloat8_b", recv_per_bank=8), id="1B_WO"),
+    pytest.param("1B_FF1", dict(K=2048, N=8192, dtype="bfloat8_b", recv_per_bank=8), id="1B_FF1"),
+    pytest.param("1B_FF2", dict(K=8192, N=2048, dtype="bfloat8_b", recv_per_bank=8), id="1B_FF2"),
+    # Llama-3.2-3B, single-device.
+    pytest.param("3B_QKV", dict(K=3072, N=5120, dtype="bfloat8_b", recv_per_bank=8), id="3B_QKV"),
+    pytest.param("3B_WO", dict(K=3072, N=3072, dtype="bfloat8_b", recv_per_bank=8), id="3B_WO"),
+    pytest.param("3B_FF1", dict(K=3072, N=8192, dtype="bfloat8_b", recv_per_bank=8), id="3B_FF1"),
+    pytest.param("3B_FF2", dict(K=8192, N=3072, dtype="bfloat8_b", recv_per_bank=8), id="3B_FF2"),
+    # Llama-3.1-8B at 2 devices (single-device doesn't fit worker L1 budget).
+    pytest.param("8B_QKV_2d", dict(K=4096, N=3072, dtype="bfloat8_b", recv_per_bank=8), id="8B_QKV_2d"),
+    pytest.param("8B_WO_2d", dict(K=2048, N=4096, dtype="bfloat8_b", recv_per_bank=8), id="8B_WO_2d"),
+    pytest.param("8B_FF1_2d", dict(K=4096, N=7168, dtype="bfloat8_b", recv_per_bank=8), id="8B_FF1_2d"),
+    pytest.param("8B_FF2_2d", dict(K=7168, N=4096, dtype="bfloat8_b", recv_per_bank=8), id="8B_FF2_2d"),
+    # Llama-3.3-70B at 8 devices (2/4 don't fit is_prefetcher_supported's 1 MB/core).
+    # dim=8192, hidden=28672, n_heads=64, n_kv_heads=8, head_dim=128, qkv_size=10240.
+    # Per-device: qkv N=10240/8=1280, wo K=64*128/8=1024, ff1 N=28672/8=3584, ff2 K=28672/8=3584.
+    pytest.param("70B_QKV_8d", dict(K=8192, N=1280, dtype="bfloat8_b", recv_per_bank=8), id="70B_QKV_8d"),
+    pytest.param("70B_WO_8d", dict(K=1024, N=8192, dtype="bfloat8_b", recv_per_bank=8), id="70B_WO_8d"),
+    pytest.param("70B_FF1_8d", dict(K=8192, N=3584, dtype="bfloat8_b", recv_per_bank=8), id="70B_FF1_8d"),
+    pytest.param("70B_FF2_8d", dict(K=3584, N=8192, dtype="bfloat8_b", recv_per_bank=8), id="70B_FF2_8d"),
+]
+
+
+def _apply_shape(shape: dict) -> None:
+    """Set module globals from the parametrize dict, allowing BENCH_* env vars to override.
+
+    Tests call this at the top of their body so all helpers below see the shape via ambient
+    module state. Run with `BENCH_K=... BENCH_N=...` to override the parametrize values for
+    ad-hoc one-off runs.
+
+    `_N` is the padded N (up to ring*TILE_SIZE) used by all sizing math; `_N_ORIG` is the
+    original N from the shape, used in the TFLOP/s formula so headline numbers reflect the
+    actual matmul work (not the padded extra).
+    """
+    global _K, _K_ORIG, _N, _N_ORIG, _NUM_RECV_PER_BANK, _RING_SIZE, _RING_ROWS
+    global _DTYPE_NAME, _DTYPE, _DTYPE_BYTES
+    _K_ORIG = int(os.environ.get("BENCH_K", shape["K"]))
+    _N_ORIG = int(os.environ.get("BENCH_N", shape["N"]))
+    _NUM_RECV_PER_BANK = int(os.environ.get("BENCH_RECV_PER_BANK", shape["recv_per_bank"]))
+    _RING_SIZE = _NUM_DRAM_BANKS * _NUM_RECV_PER_BANK
+    assert _RING_SIZE % _RING_COLS == 0, f"ring_size {_RING_SIZE} not a clean rect on 8-col grid"
+    _RING_ROWS = _RING_SIZE // _RING_COLS
+    # Pad K and N to multiples of (ring_size * TILE_SIZE) so every ring receiver gets at
+    # least one tile in each direction. Matches production's pad_n_to_ring_size() in
+    # test_prefetcher_BH.py and the h_tiles_padded round-up in is_prefetcher_supported.
+    _K = _round_up(_K_ORIG, _RING_SIZE * ttnn.TILE_SIZE)
+    _N = _round_up(_N_ORIG, _RING_SIZE * ttnn.TILE_SIZE)
+    _DTYPE_NAME = os.environ.get("BENCH_DTYPE", shape["dtype"])
+    _DTYPE = _DTYPE_FROM_NAME[_DTYPE_NAME]
+    _DTYPE_BYTES = _DTYPE_BYTES_FROM_NAME[_DTYPE_NAME]
 
 
 # Cap GCB to leave headroom in L1 for the matmul CBs (in1 double-buffered, in2 ring history,
@@ -181,15 +269,27 @@ def _build_program_config(
 
 
 def _flops_per_matmul(k: int) -> int:
-    return 2 * _M * k * _N
+    # Use the unpadded K and N: padded zeros aren't useful flops. (Callers pass _K or
+    # _K_padded depending on what they have at hand; either way swap in _K_ORIG.)
+    return 2 * _M * _K_ORIG * _N_ORIG
 
 
-@pytest.mark.parametrize("device_params", [{"trace_region_size": 23887872}], indirect=True)
+@pytest.mark.parametrize(
+    "device_params",
+    [{"dispatch_core_axis": ttnn.DispatchCoreAxis.COL, "trace_region_size": 23887872}],
+    indirect=True,
+)
+@pytest.mark.parametrize("op_name,shape", LLAMA_SHAPES)
 @pytest.mark.skipif(
     not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
 )
-def test_bench_dram_core_repeats(device):
-    """Trace replay of N single-matmul launches fed by the DRISC prefetcher."""
+def test_bench_dram_core_repeats(device, op_name, shape):
+    """Trace replay of N single-matmul launches fed by the DRISC prefetcher.
+
+    Parametrized over Llama-3.1-8B prefetcher-fed matmul shapes (FF1, QKV, O, FF2).
+    BENCH_K / BENCH_N / BENCH_DTYPE / BENCH_RECV_PER_BANK env vars override per-parameter.
+    """
+    _apply_shape(shape)
     arch = getattr(device, "arch", lambda: None)()
     if arch is not None and "BLACKHOLE" not in str(arch).upper():
         pytest.skip("DRAM-core prefetcher requires Blackhole")
@@ -260,6 +360,8 @@ def test_bench_dram_core_repeats(device):
 
     # bytes/elem: bf16=2, bf8_b≈1.0625 (1088B/tile / 1024 elems/tile)
     block_size_bytes = int((k_padded * (_N // num_dram_banks) // num_receivers_per_bank) * _DTYPE_BYTES)
+    # max_buffered_blocks=1 keeps GCB ~= one fifo-page, leaving room for matmul receiver
+    # CBs in worker L1 (1.4 MB). Larger shapes (70B FF1/FF2) overflow at deeper GCBs.
     gcb_size = _gcb_size_capped(block_size_bytes, k=k_padded, ring_size=ring_size, max_buffered_blocks=1)
     bank_to_receivers = [
         (b, _bank_receivers_row_major(b, num_receivers_per_bank, ring_cols=ring_cols)) for b in range(num_dram_banks)
@@ -289,7 +391,7 @@ def test_bench_dram_core_repeats(device):
     )
 
     logger.info(
-        f"[bench] K={_K} K_padded={k_padded} N={_N} banks={num_dram_banks} ring={ring_size} "
+        f"[dram_core][{op_name}] K={_K} K_padded={k_padded} N={_N} banks={num_dram_banks} ring={ring_size} "
         f"gcb_size={gcb_size} trace_repeats={trace_repeats} num_prefetch_layers={num_prefetch_layers}"
     )
 
@@ -345,49 +447,96 @@ def test_bench_dram_core_repeats(device):
     ttnn.stop_dram_core_prefetcher(device)
 
     per_matmul_us = elapsed / trace_repeats * 1e6
-    tflops = _flops_per_matmul(k_padded) * trace_repeats / elapsed / 1e12
+    # Use unpadded K in the TFLOP/s formula so it's comparable across paths (worker-core uses
+    # _K directly; padding to ring-aligned K is wasted work that doesn't count as useful flops).
+    tflops = _flops_per_matmul(_K) * trace_repeats / elapsed / 1e12
     logger.info(
-        f"[dram_core] trace_elapsed={elapsed * 1e3:.2f}ms repeats={trace_repeats} "
+        f"[dram_core][{op_name}] trace_elapsed={elapsed * 1e3:.2f}ms repeats={trace_repeats} "
         f"per_matmul={per_matmul_us:.2f}us -> {tflops:.4f} TFLOP/s"
     )
 
 
-@pytest.mark.parametrize("device_params", [{"trace_region_size": 23887872}], indirect=True)
-def test_bench_workercore_repeats(device):
+@pytest.mark.parametrize(
+    "device_params",
+    [{"dispatch_core_axis": ttnn.DispatchCoreAxis.COL, "trace_region_size": 23887872}],
+    indirect=True,
+)
+@pytest.mark.parametrize("op_name,shape", LLAMA_SHAPES)
+def test_bench_workercore_repeats(device, op_name, shape):
     """A/B baseline: same shape under trace replay with the worker-core prefetcher
     (BRISC+NCRISC senders on worker cores instead of DRISC on DRAM cores). Both the
     prefetcher op and the matmuls execute under FD inside the trace.
+
+    Parametrized over the same Llama shapes as the DRAM-core test. FF2 skipped because
+    it exceeds the worker prefetcher's L1 budget (matches production behavior — the
+    full-model `Prefetcher` class in models/tt_transformers/tt/prefetcher.py routes FF2
+    to a DRAM-sharded matmul instead of the prefetcher path).
+
+    Uses dispatch_core_axis=COL like the canonical `test_prefetcher_BH` to keep the
+    sender/receiver core grid (logical rows 0..ring_rows) clear of dispatch cores.
     """
+    _apply_shape(shape)
     arch = getattr(device, "arch", lambda: None)()
     if arch is not None and "BLACKHOLE" not in str(arch).upper():
         pytest.skip("Bench tuned for Blackhole topology")
 
     if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
         pytest.skip("Trace benchmark requires fast dispatch")
+    if device.dram_grid_size().x != 8:
+        pytest.skip("Worker-sender bench expects 8 unharvested DRAM banks")
 
     num_kernel_repeats = _bench_repeats()
-    # Worker-core path uses the module-level _NUM_DRAM_BANKS=8 (the unharvested topology).
-    # On harvested cards (P100, 7 banks) this still hits the same DRAM-allocation failure
-    # as today; adapting this path is out of scope for the DRAM-core test work.
     num_senders = _NUM_DRAM_BANKS
     ring_size = _RING_SIZE
     ring_cols = _RING_COLS
     ring_rows = _RING_ROWS
 
-    # Receivers as row-major ring_cols x ring_rows rectangle on rows 0..(ring_rows-1).
-    # Senders on row ring_rows, one per DRAM bank, in column order.
-    receiver_core_range_set = ttnn.CoreRangeSet(
-        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(ring_cols - 1, ring_rows - 1))}
-    )
-    sender_core_range_set = ttnn.CoreRangeSet(
-        {ttnn.CoreRange(ttnn.CoreCoord(0, ring_rows), ttnn.CoreCoord(num_senders - 1, ring_rows))}
-    )
+    # Use the production sender/receiver layout from
+    # models/tt_transformers/tt/prefetcher/prefetcher_config.yaml. The naive row-major
+    # grid in the original bench collides with dispatch cores at physical workers
+    # 14-2/14-3 on Blackhole P150; the production layout avoids them by placing
+    # senders on cols 0 (left) and 7 (right) with bank-ordered rows.
+    from models.tt_transformers.tt.prefetcher import generate_sender_receiver_mapping, ARCH_CONFIG
 
-    # Sender s sends to receivers at row-major-adjacent ring positions [s*recv_per, (s+1)*recv_per).
+    bh_cfg = ARCH_CONFIG["blackhole"]
+    raw_mapping = generate_sender_receiver_mapping(num_receivers_per_sender=_NUM_RECV_PER_BANK)
+    left_y = bh_cfg["bank_ordered_y_coords"]["left"]
+    right_y = bh_cfg["bank_ordered_y_coords"]["right"]
+    left_col = bh_cfg["sender_cols"]["left"]
+    right_col = bh_cfg["sender_cols"]["right"]
+    # Senders in bank-ID order: left first, then right.
+    ordered_senders = [(left_col, y) for y in left_y] + [(right_col, y) for y in right_y]
+    assert len(ordered_senders) == num_senders, f"want {num_senders} senders, got {len(ordered_senders)}"
+
     sender_receiver_mapping = [
-        (ttnn.CoreCoord(s, ring_rows), _bank_receivers_row_major(s, _NUM_RECV_PER_BANK, ring_cols=ring_cols))
-        for s in range(num_senders)
+        (
+            ttnn.CoreCoord(sx, sy),
+            ttnn.CoreRangeSet(
+                [ttnn.CoreRange(ttnn.CoreCoord(rx, ry), ttnn.CoreCoord(rx, ry)) for rx, ry in raw_mapping[(sx, sy)]]
+            ),
+        )
+        for sx, sy in ordered_senders
     ]
+    sender_core_range_set = ttnn.CoreRangeSet(
+        [ttnn.CoreRange(ttnn.CoreCoord(sx, sy), ttnn.CoreCoord(sx, sy)) for sx, sy in ordered_senders]
+    )
+    receiver_core_range_set = ttnn.CoreRangeSet(
+        [
+            ttnn.CoreRange(ttnn.CoreCoord(rx, ry), ttnn.CoreCoord(rx, ry))
+            for sx, sy in ordered_senders
+            for rx, ry in raw_mapping[(sx, sy)]
+        ]
+    )
+    # gather_in0 matmul ignores compute_with_storage_grid_size and runs on the cores given
+    # by sub_device_id. Set up: sub_device 0 = senders, sub_device 1 = receivers; matmul
+    # runs on the second sub-device.
+    sender_sub_device = ttnn.SubDevice([sender_core_range_set])
+    receiver_sub_device = ttnn.SubDevice([receiver_core_range_set])
+    sub_device_manager = device.create_sub_device_manager([sender_sub_device, receiver_sub_device], 0)
+    device.load_sub_device_manager(sub_device_manager)
+    receiver_sub_device_id = ttnn.SubDeviceId(1)
+    device.set_sub_device_stall_group([receiver_sub_device_id])
+
     # Per-sender, per-block bytes (each sender pushes its share of the weight).
     block_size_bytes = int((_K * (_N // num_senders) // _NUM_RECV_PER_BANK) * _DTYPE_BYTES)
     gcb_size = _gcb_size_capped(block_size_bytes, k=_K, ring_size=ring_size)
@@ -473,7 +622,8 @@ def test_bench_workercore_repeats(device):
     )
 
     logger.info(
-        f"[workercore] K={_K} N={_N} ring={ring_size} gcb_size={gcb_size} " f"num_kernel_repeats={num_kernel_repeats}"
+        f"[workercore][{op_name}] K={_K} N={_N} ring={ring_size} gcb_size={gcb_size} "
+        f"num_kernel_repeats={num_kernel_repeats}"
     )
 
     # Correctness: dram_prefetcher pushes 1 layer, one matmul (repeats=1) consumes it.
@@ -486,6 +636,7 @@ def test_bench_workercore_repeats(device):
         compute_kernel_config=compute_kernel_config,
         dtype=ttnn.bfloat16,
         global_cb=gcb,
+        sub_device_id=receiver_sub_device_id,
     )
     cc_torch = ttnn.to_torch(cc_out)
     expected = pt_act.float() @ pt_weight.float()
@@ -503,6 +654,7 @@ def test_bench_workercore_repeats(device):
             compute_kernel_config=compute_kernel_config,
             dtype=ttnn.bfloat16,
             global_cb=gcb,
+            sub_device_id=receiver_sub_device_id,
         )
 
     # Warmup outside the trace: prefetcher + matmul once. JIT/program-build lands here.
@@ -526,6 +678,6 @@ def test_bench_workercore_repeats(device):
     per_matmul_us = elapsed / num_kernel_repeats * 1e6
     tflops = _flops_per_matmul(_K) * num_kernel_repeats / elapsed / 1e12
     logger.info(
-        f"[workercore] trace_elapsed={elapsed * 1e3:.2f}ms repeats={num_kernel_repeats} "
+        f"[workercore][{op_name}] trace_elapsed={elapsed * 1e3:.2f}ms repeats={num_kernel_repeats} "
         f"per_matmul={per_matmul_us:.2f}us -> {tflops:.4f} TFLOP/s"
     )
