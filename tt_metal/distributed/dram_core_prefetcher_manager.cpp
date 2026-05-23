@@ -42,11 +42,12 @@ constexpr const char* kKernelPath = "tt_metal/distributed/kernels/dram_core_pref
 
 inline uint32_t align_up(uint32_t a, uint32_t align) { return (a + align - 1) & ~(align - 1); }
 
-// Cap for DMA-side page selection (mirrors worker-core ttnn.dram_prefetcher; see
-// docs/prefetcher_matmul_design.md §5 / §6 and dram_prefetcher_program_factory.cpp:21).
+// Cap for DMA-side page selection. Matches Blackhole's `NOC_MAX_BURST_SIZE`
+// (NOC_MAX_BURST_WORDS=256 × NOC_WORD_BYTES=64 = 16 KB; see
+// `tt_metal/hw/inc/internal/tt-1xx/blackhole/noc/noc_parameters.h:287-290`).
 // File-local duplicate by design — the two prefetcher paths share the algorithm but
-// not a header (see the plan file: prefetcher_matmul_design.md cross-component invariants).
-constexpr uint32_t kMaxStagePageSize = 8 * 1024;
+// not a header (see docs/prefetcher_matmul_design.md cross-component invariants).
+constexpr uint32_t kMaxStagePageSize = 16 * 1024;
 
 // Largest `page` (multiple of tile_size, <= max_page_size) such that num_tiles*tile_size
 // is divisible by page. Returns (page_size, num_pages). Identical algorithm to

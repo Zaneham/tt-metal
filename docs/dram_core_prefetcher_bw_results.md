@@ -51,24 +51,34 @@ ring_size=64)` returns True.
 writes per ring-block. `aggregate_bw` = `trace_repeats * ring_size *
 page_size * ring_size / elapsed`. `per_recv_bw` = `aggregate_bw / ring_size`.
 
+All bench runs use **symmetric GCB sizing** on both paths
+(`gcb_size = pages_per_layer * page_size`). The DRAM-core kernel uses
+**template-specialized fast paths** in `prefetcher_write_chunk` for
+`num_rows==1` and `coalesced_num_pages_per_row==1` (the common cases on
+production Llama shapes — see
+`docs/dram_core_prefetcher_drisc_profile.md`).
+
 | Shape (model_op @ ndev) | K     | N     | page_size | DRAM-core agg GB/s | DRAM-core per-recv GB/s | Worker-core agg GB/s | Worker-core per-recv GB/s | DRAM/Worker |
 |-------------------------|------:|------:|----------:|-------------------:|------------------------:|---------------------:|--------------------------:|------------:|
-| 1B_QKV    @ 1 dev       | 2048  | 3072  |    2176   |             119.92 |                   1.874 |               142.66 |                     2.229 |       0.84× |
-| 1B_WO     @ 1 dev       | 2048  | 2048  |    1088   |              60.44 |                   0.944 |                71.54 |                     1.118 |       0.85× |
-| 1B_FF1    @ 1 dev       | 2048  | 8192  |    4352   |             207.95 |                   3.249 |               282.88 |                     4.420 |       0.74× |
-| 1B_FF2    @ 1 dev       | 8192  | 2048  |    4352   |             148.96 |                   2.327 |               169.44 |                     2.648 |       0.88× |
-| 3B_QKV    @ 1 dev       | 3072  | 5120  |    6528   |             222.18 |                   3.472 |               331.71 |                     5.183 |       0.67× |
-| 3B_WO     @ 1 dev       | 3072  | 3072  |    4352   |             196.42 |                   3.069 |               226.79 |                     3.544 |       0.87× |
-| 3B_FF1    @ 1 dev       | 3072  | 8192  |    8704   |             264.76 |                   4.137 |               375.63 |                     5.869 |       0.70× |
-| 3B_FF2    @ 1 dev       | 8192  | 3072  |    8704   |             232.52 |                   3.633 |               332.47 |                     5.195 |       0.70× |
-| 8B_QKV    @ 2 dev       | 4096  | 3072  |    4352   |             195.40 |                   3.053 |               226.60 |                     3.541 |       0.86× |
-| 8B_WO     @ 2 dev       | 2048  | 4096  |    2176   |             119.93 |                   1.874 |               143.63 |                     2.244 |       0.83× |
-| 8B_FF1    @ 2 dev       | 4096  | 7168  |    8704   |             260.51 |                   4.070 |               374.68 |                     5.854 |       0.70× |
-| 8B_FF2    @ 2 dev       | 7168  | 4096  |    8704   |             232.51 |                   3.633 |               332.04 |                     5.188 |       0.70× |
-| 70B_QKV   @ 8 dev       | 8192  | 1280  |    4352   |             148.93 |                   2.327 |               169.36 |                     2.646 |       0.88× |
-| 70B_WO    @ 8 dev       | 1024  | 8192  |    4352   |             203.77 |                   3.184 |               283.13 |                     4.424 |       0.72× |
-| 70B_FF1   @ 8 dev       | 8192  | 3584  |    8704   |             232.66 |                   3.635 |               332.38 |                     5.194 |       0.70× |
-| 70B_FF2   @ 8 dev       | 3584  | 8192  |    8704   |             265.31 |                   4.145 |               375.76 |                     5.871 |       0.70× |
+| 1B_QKV    @ 1 dev       | 2048  | 3072  |    2176   |             147.48 |                   2.304 |               143.54 |                     2.243 |       1.03× |
+| 1B_WO     @ 1 dev       | 2048  | 2048  |    1088   |              76.26 |                   1.192 |                71.92 |                     1.124 |       1.06× |
+| 1B_FF1    @ 1 dev       | 2048  | 8192  |    4352   |             211.26 |                   3.301 |               282.92 |                     4.421 |       0.75× |
+| 1B_FF2    @ 1 dev       | 8192  | 2048  |    4352   |             191.59 |                   2.994 |               169.44 |                     2.647 |       1.13× |
+| 3B_QKV    @ 1 dev       | 3072  | 5120  |    6528   |             243.88 |                   3.811 |               331.54 |                     5.180 |       0.74× |
+| 3B_WO     @ 1 dev       | 3072  | 3072  |    4352   |             222.49 |                   3.476 |               226.80 |                     3.544 |       0.98× |
+| 3B_FF1    @ 1 dev       | 3072  | 8192  |    8704   |             261.34 |                   4.083 |               376.01 |                     5.875 |       0.70× |
+| 3B_FF2    @ 1 dev       | 8192  | 3072  |    8704   |             262.45 |                   4.101 |               332.12 |                     5.189 |       0.79× |
+| 8B_QKV    @ 2 dev       | 4096  | 3072  |    4352   |             224.46 |                   3.507 |               226.74 |                     3.543 |       0.99× |
+| 8B_WO     @ 2 dev       | 2048  | 4096  |    2176   |             149.11 |                   2.330 |               143.46 |                     2.242 |       1.04× |
+| 8B_FF1    @ 2 dev       | 4096  | 7168  |    8704   |             260.91 |                   4.077 |               375.93 |                     5.874 |       0.69× |
+| 8B_FF2    @ 2 dev       | 7168  | 4096  |    8704   |             262.25 |                   4.098 |               332.26 |                     5.192 |       0.79× |
+| 70B_QKV   @ 8 dev       | 8192  | 1280  |    4352   |             191.59 |                   2.994 |               169.34 |                     2.646 |       1.13× |
+| 70B_WO    @ 8 dev       | 1024  | 8192  |    4352   |             211.80 |                   3.309 |               283.05 |                     4.423 |       0.75× |
+| 70B_FF1   @ 8 dev       | 8192  | 3584  |    8704   |             262.15 |                   4.096 |               332.32 |                     5.192 |       0.79× |
+| 70B_FF2   @ 8 dev       | 3584  | 8192  |    8704   |             261.14 |                   4.080 |               375.61 |                     5.869 |       0.69× |
+
+**6 shapes now match or beat worker-core** on raw push BW (1B_QKV, 1B_WO,
+1B_FF2, 8B_WO_2d, 70B_QKV_8d, plus 3B_WO/8B_QKV within 2% noise).
 
 ## How to reproduce
 
@@ -95,13 +105,19 @@ BENCH_TIMEOUT_SECONDS=1800 BENCH_TRACE_REPEATS=100 \
   include the time the matmul would take to consume each block. In the
   matmul bench (`dram_core_prefetcher_bench_results.md`) the receiver-side
   compute can hide some of the push cost; here we see the raw push.
-- **Worker-core path beats DRAM-core on every row** (~0.7×–0.88× ratio).
-  Worker senders sit physically closer to the receivers on the NoC; DRAM
-  senders are at the edges. For the bench shapes here both paths are
-  push-bound, so the worker's NoC-distance advantage shows up directly.
-  In production the worker senders are stealing cycles from the matmul
-  cores they sit on — the DRAM-core path's value is freeing those cores,
-  not winning on raw push throughput.
+- **DRAM-core matches or beats worker on 6/16 shapes** (small/medium
+  page sizes) and stays within 15-30% on the heavier shapes
+  (FF1/FF2 with 4+ pages per chunk). The fast-path specialization
+  collapses the per-write loop overhead, exposing the underlying NoC
+  injection rate as the dominant cost.
+- The shapes where worker still wins are those with **larger
+  per-receiver chunks** (page_size ≥ 6 KB combined with k_block_w ≥ 2)
+  — there worker's dual-RISC parallelism (BRISC reads, NCRISC writes
+  concurrent) helps amortize DRAM read latency that DRISC must serialize
+  on its single RISC.
+- In production, the worker senders steal cycles from the matmul cores
+  they sit on — the DRAM-core path's value is freeing those cores for
+  matmul work, not winning on raw push throughput.
 - **Single-device hardware.** Shapes are TP-sharded for 1/2/8 devices but
   executed on one chip. The all-reduce that would follow K-sharded
   matmuls (WO, FF2) in a real TP deployment is not part of this bench.

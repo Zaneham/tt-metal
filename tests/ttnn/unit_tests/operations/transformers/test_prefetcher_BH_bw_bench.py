@@ -133,13 +133,14 @@ def _per_receiver_page_size_bytes() -> int:
     return k_block_w_tiles * n_per_recv_tiles * int(_DTYPE_BYTES * ttnn.TILE_SIZE * ttnn.TILE_SIZE)
 
 
-def _gcb_size_bytes(page_size: int, max_buffered_blocks: int = 4) -> int:
-    """Small enough to leave room in worker L1 for the consumer kernel's own state.
-
-    The consumer just runs wait_front(1)/pop_front(1) and a small DPRINT loop, so it
-    needs very little L1; max_buffered_blocks=4 is plenty.
+def _gcb_size_bytes(page_size: int, pages_per_layer: int) -> int:
+    """Per-receiver GCB size = one full layer's worth of pages. Matches what the worker
+    path passes (`pages_per_layer * page_size`) so the two paths have symmetric buffer
+    depth. Previously this was `4 * page_size` for the DRAM-core path, which left only
+    4 pages of in-flight headroom and gave `reserve_back` a ~16× backpressure tax vs the
+    worker — making the comparison unfair (see docs/dram_core_prefetcher_drisc_profile.md).
     """
-    return max_buffered_blocks * page_size
+    return pages_per_layer * page_size
 
 
 def _build_weight(device, num_dram_banks: int) -> ttnn.Tensor:
@@ -222,7 +223,7 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
         )
         for b in range(num_dram_banks)
     ]
-    gcb_size = _gcb_size_bytes(page_size)
+    gcb_size = _gcb_size_bytes(page_size, pages_per_layer)
     gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     logger.info(
@@ -250,6 +251,9 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
     elapsed = time.perf_counter() - t0
     ttnn.release_trace(device, bench_trace)
     ttnn.stop_dram_core_prefetcher(device)
+
+    if os.environ.get("TT_METAL_WATCHER", "0") == "1":
+        time.sleep(3)  # let watcher dump DRISC ring buffers before device close
 
     bytes_per_recv = trace_repeats * pages_per_layer * page_size
     bytes_total = bytes_per_recv * num_receivers

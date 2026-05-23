@@ -26,6 +26,25 @@
 #include "experimental/drisc_mode.h"
 #include "experimental/gddr_dma.h"
 
+#if defined(WATCHER_ENABLED) && !defined(WATCHER_DISABLE_RING_BUFFER)
+#include "api/debug/ring_buffer.h"
+#include "internal/tt-1xx/risc_common.h"
+#define DRISC_PROFILE 1
+#endif
+
+#ifdef DRISC_PROFILE
+#define PROFILE_T0() uint32_t _prof_t0 = get_timestamp_32b()
+#define PROFILE_ACCUM(acc)                       \
+    do {                                         \
+        uint32_t _prof_t1 = get_timestamp_32b(); \
+        (acc) += _prof_t1 - _prof_t0;            \
+        _prof_t0 = _prof_t1;                     \
+    } while (0)
+#else
+#define PROFILE_T0() ((void)0)
+#define PROFILE_ACCUM(acc) ((void)0)
+#endif
+
 // DRISC firmware doesn't define cb_interface (no CB infra on DRAM cores).
 CBInterface cb_interface[NUM_CIRCULAR_BUFFERS] __attribute__((used));
 
@@ -46,6 +65,12 @@ namespace {
 // and dest offset directly. No pages_sent / semaphore side effects, no
 // iface.fifo_wr_ptr advance — those happen exactly once per block in
 // prefetcher_finalize_block.
+// Template-specialized fast paths for the common cases:
+//   - `single_row`        — num_rows == 1 (no outer h loop)
+//   - `single_page`       — coalesced_num_pages_per_row == 1 (no inner w loop)
+// Dispatched at per-tensor scope so the per-chunk hot path has no branch on
+// loop-shape. The general path remains for `<false,false>`.
+template <bool single_row, bool single_page>
 FORCE_INLINE void prefetcher_write_chunk(
     uint32_t src_l1_addr,
     uint32_t dest_l1_base,
@@ -67,15 +92,37 @@ FORCE_INLINE void prefetcher_write_chunk(
         noc_async_write_one_packet_set_state</*posted=*/true>(set_state_dest, coalesced_page_size, noc);
 
         uint32_t src_addr = src_l1_addr + recv_src_offset;
-        for (uint32_t h = 0; h < num_rows; ++h) {
-            const uint32_t row_src_start = src_addr;
+        if constexpr (single_row && single_page) {
+            // 1 write per receiver. dest_addr == dest_l1_base, so reuse set_state_dest.
+            noc_async_write_one_packet_with_state</*posted=*/true>(src_addr, set_state_dest, noc);
+        } else if constexpr (single_row) {
+            // num_rows == 1; only inner w loop runs.
             for (uint32_t w = 0; w < coalesced_num_pages_per_row; ++w) {
                 const uint64_t dest_noc = get_noc_addr_helper(remote_noc_xy, dest_addr);
                 noc_async_write_one_packet_with_state</*posted=*/true>(src_addr, dest_noc, noc);
                 src_addr += coalesced_page_size;
                 dest_addr += coalesced_page_size;
             }
-            src_addr = row_src_start + row_stride_in_stage;
+        } else if constexpr (single_page) {
+            // coalesced_num_pages_per_row == 1; only outer h loop runs.
+            for (uint32_t h = 0; h < num_rows; ++h) {
+                const uint64_t dest_noc = get_noc_addr_helper(remote_noc_xy, dest_addr);
+                noc_async_write_one_packet_with_state</*posted=*/true>(src_addr, dest_noc, noc);
+                src_addr += row_stride_in_stage;
+                dest_addr += coalesced_page_size;
+            }
+        } else {
+            // General: nested h × w loops.
+            for (uint32_t h = 0; h < num_rows; ++h) {
+                const uint32_t row_src_start = src_addr;
+                for (uint32_t w = 0; w < coalesced_num_pages_per_row; ++w) {
+                    const uint64_t dest_noc = get_noc_addr_helper(remote_noc_xy, dest_addr);
+                    noc_async_write_one_packet_with_state</*posted=*/true>(src_addr, dest_noc, noc);
+                    src_addr += coalesced_page_size;
+                    dest_addr += coalesced_page_size;
+                }
+                src_addr = row_src_start + row_stride_in_stage;
+            }
         }
         recv_src_offset += row_bytes_per_recv;
     }
@@ -217,6 +264,17 @@ void kernel_main() {
     const uint32_t* block_stride_bytes = reinterpret_cast<uint32_t*>(get_arg_addr(block_stride_bytes_idx));
     const uint32_t* page_bytes_per_recv = reinterpret_cast<uint32_t*>(get_arg_addr(page_bytes_per_recv_idx));
 
+    // ---- Profiling accumulators (zero-cost when WATCHER_DISABLE_RING_BUFFER) ----
+#ifdef DRISC_PROFILE
+    uint32_t prof_reserve = 0;   // 0xA3
+    uint32_t prof_issue = 0;     // 0xA1 (next-DMA issue)
+    uint32_t prof_wait = 0;      // 0xA2 (DMA wait)
+    uint32_t prof_push = 0;      // 0xA4 (prefetcher_write_chunk)
+    uint32_t prof_flush = 0;     // 0xA5 (noc_async_posted_writes_flushed)
+    uint32_t prof_finalize = 0;  // 0xA6 (prefetcher_finalize_block)
+    uint32_t prof_chunks = 0;    // 0xFF (chunk count divisor)
+#endif
+
     // ---- Main loop ----
     for (uint32_t layer = 0; layer < num_layers; ++layer) {
         for (uint32_t t = 0; t < num_tensors; ++t) {
@@ -253,11 +311,13 @@ void kernel_main() {
                 const uint32_t sb = sb_ch / t_M;
                 const uint32_t ch = sb_ch % t_M;
                 (void)blk;
+                PROFILE_T0();
 
                 if (sb == 0 && ch == 0) {
                     experimental::remote_cb_reserve_back(remote_cb_id, 1);
                     fifo_snapshot = iface.fifo_wr_ptr;
                     cum_offset_in_page = 0;
+                    PROFILE_ACCUM(prof_reserve);
                 }
 
                 // Issue the next DMA before waiting on this one (ping-pong, depth 2).
@@ -272,21 +332,63 @@ void kernel_main() {
                     const uint32_t next_slot = ((c + 1) & 1u) == 0 ? stage_slot_a : stage_slot_b;
                     experimental::dma_async_read(/*stream=*/0, next_src, next_slot, t_chunk_bytes);
                 }
+                PROFILE_ACCUM(prof_issue);
                 const uint32_t outstanding_after_wait = (c + 1 < total_chunks) ? 1u : 0u;
                 experimental::dma_async_read_wait_n(/*stream=*/0, outstanding_after_wait);
+                PROFILE_ACCUM(prof_wait);
 
                 const uint32_t stage_slot = (c & 1u) == 0 ? stage_slot_a : stage_slot_b;
                 volatile tt_l1_ptr uint32_t* chunk_recv_xy =
                     reinterpret_cast<volatile tt_l1_ptr uint32_t*>(noc_xy_l1_addr) + ch * t_recv_per_chunk * 2;
-                prefetcher_write_chunk(
-                    stage_slot,
-                    fifo_snapshot + cum_offset_in_page,
-                    chunk_recv_xy,
-                    t_recv_per_chunk,
-                    t_rows_per_sub,
-                    t_coal_num_pages,
-                    t_coal_page_size,
-                    noc_index);
+                // Per-tensor-stable predicate; branches are 100% predictable across the
+                // chunk loop. Compiler folds the fast-path bodies via `if constexpr` in
+                // `prefetcher_write_chunk`.
+                if (t_rows_per_sub == 1) {
+                    if (t_coal_num_pages == 1) {
+                        prefetcher_write_chunk</*single_row=*/true, /*single_page=*/true>(
+                            stage_slot,
+                            fifo_snapshot + cum_offset_in_page,
+                            chunk_recv_xy,
+                            t_recv_per_chunk,
+                            t_rows_per_sub,
+                            t_coal_num_pages,
+                            t_coal_page_size,
+                            noc_index);
+                    } else {
+                        prefetcher_write_chunk</*single_row=*/true, /*single_page=*/false>(
+                            stage_slot,
+                            fifo_snapshot + cum_offset_in_page,
+                            chunk_recv_xy,
+                            t_recv_per_chunk,
+                            t_rows_per_sub,
+                            t_coal_num_pages,
+                            t_coal_page_size,
+                            noc_index);
+                    }
+                } else {
+                    if (t_coal_num_pages == 1) {
+                        prefetcher_write_chunk</*single_row=*/false, /*single_page=*/true>(
+                            stage_slot,
+                            fifo_snapshot + cum_offset_in_page,
+                            chunk_recv_xy,
+                            t_recv_per_chunk,
+                            t_rows_per_sub,
+                            t_coal_num_pages,
+                            t_coal_page_size,
+                            noc_index);
+                    } else {
+                        prefetcher_write_chunk</*single_row=*/false, /*single_page=*/false>(
+                            stage_slot,
+                            fifo_snapshot + cum_offset_in_page,
+                            chunk_recv_xy,
+                            t_recv_per_chunk,
+                            t_rows_per_sub,
+                            t_coal_num_pages,
+                            t_coal_page_size,
+                            noc_index);
+                    }
+                }
+                PROFILE_ACCUM(prof_push);
 
                 if (ch + 1 == t_M) {
                     cum_offset_in_page += t_rows_per_sub * t_coal_num_pages * t_coal_page_size;
@@ -294,9 +396,14 @@ void kernel_main() {
 
                 if (sb + 1 == t_num_sub && ch + 1 == t_M) {
                     noc_async_posted_writes_flushed();
+                    PROFILE_ACCUM(prof_flush);
                     prefetcher_finalize_block</*skip_ptr_update=*/true>(
                         iface, t_page_bytes_per_recv, num_receivers, noc_index);
+                    PROFILE_ACCUM(prof_finalize);
                 }
+#ifdef DRISC_PROFILE
+                prof_chunks++;
+#endif
             }
 
             if (t == num_tensors - 1) {
@@ -308,4 +415,17 @@ void kernel_main() {
     experimental::update_remote_cb_config_in_l1(remote_cb_id);
     noc_async_atomic_barrier();
     experimental::drisc_set_noc2axi_mode();
+
+#ifdef DRISC_PROFILE
+    // Tag-prefixed totals; decode newest-first via `grep debug_ring_buffer`. Each entry's
+    // top byte is the stage tag; the low 24 bits are the cycle count (sufficient for
+    // a few hundred thousand cycles — wraps cleanly at large counts).
+    WATCHER_RING_BUFFER_PUSH(0xA1000000u | (prof_issue & 0x00FFFFFFu));
+    WATCHER_RING_BUFFER_PUSH(0xA2000000u | (prof_wait & 0x00FFFFFFu));
+    WATCHER_RING_BUFFER_PUSH(0xA3000000u | (prof_reserve & 0x00FFFFFFu));
+    WATCHER_RING_BUFFER_PUSH(0xA4000000u | (prof_push & 0x00FFFFFFu));
+    WATCHER_RING_BUFFER_PUSH(0xA5000000u | (prof_flush & 0x00FFFFFFu));
+    WATCHER_RING_BUFFER_PUSH(0xA6000000u | (prof_finalize & 0x00FFFFFFu));
+    WATCHER_RING_BUFFER_PUSH(0xFF000000u | (prof_chunks & 0x00FFFFFFu));
+#endif
 }
