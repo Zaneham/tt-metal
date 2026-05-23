@@ -105,19 +105,70 @@ BENCH_TIMEOUT_SECONDS=1800 BENCH_TRACE_REPEATS=100 \
   include the time the matmul would take to consume each block. In the
   matmul bench (`dram_core_prefetcher_bench_results.md`) the receiver-side
   compute can hide some of the push cost; here we see the raw push.
-- **DRAM-core matches or beats worker on 6/16 shapes** (small/medium
-  page sizes) and stays within 15-30% on the heavier shapes
-  (FF1/FF2 with 4+ pages per chunk). The fast-path specialization
-  collapses the per-write loop overhead, exposing the underlying NoC
-  injection rate as the dominant cost.
-- The shapes where worker still wins are those with **larger
-  per-receiver chunks** (page_size ≥ 6 KB combined with k_block_w ≥ 2)
-  — there worker's dual-RISC parallelism (BRISC reads, NCRISC writes
-  concurrent) helps amortize DRAM read latency that DRISC must serialize
-  on its single RISC.
-- In production, the worker senders steal cycles from the matmul cores
-  they sit on — the DRAM-core path's value is freeing those cores for
-  matmul work, not winning on raw push throughput.
 - **Single-device hardware.** Shapes are TP-sharded for 1/2/8 devices but
   executed on one chip. The all-reduce that would follow K-sharded
   matmuls (WO, FF2) in a real TP deployment is not part of this bench.
+- In production, the worker senders steal cycles from the matmul cores
+  they sit on — the DRAM-core path's value is freeing those cores for
+  matmul work, not winning on raw push throughput.
+
+## Why DRAM-core wins on some shapes and loses on others
+
+The structural difference between the two paths:
+
+- **DRAM-core**: one DRISC per bank runs the whole pipeline serially —
+  GDDR DMA → push to receivers → finalize. Wall-clock per block ≈
+  `DMA_latency + push_cycles`.
+- **Worker-core**: two RISCs per sender run in parallel. BRISC reads
+  from DRAM into local L1; NCRISC writes from L1 to receivers. Wall-clock
+  per block ≈ `max(DMA_latency, push_cycles)` (overlapped), plus a
+  BRISC↔NCRISC handshake overhead per block.
+
+This predicts the bench results almost exactly. Bucketing the 16 shapes
+by `block_bytes_per_receiver` (= `k_block_w_tiles × n_per_recv_tiles ×
+tile_bytes`, the per-block payload each receiver gets):
+
+| Bucket | block_bytes/recv | DRAM/Worker | Shapes |
+|--------|------------------:|-------------|--------|
+| **Small** (≤ 4 KB, Case 1 fit) | 1,088–4,352 | **1.06×–1.14×** ✓ | 1B_WO, 1B_QKV, 1B_FF2, 3B_WO, 8B_QKV_2d, 8B_WO_2d, 70B_QKV_8d |
+| **Medium** (~4 KB, Case 1 but with `writes_per_recv=1`) | 4,352 | 0.74× | 1B_FF1, 70B_WO_8d |
+| **Large** (Case 2: block > ring_half, splits into 2 chunks) | 8,704 | 0.70×–0.81× | 1B_FF1-class, 3B_*, 8B_FF*_2d, 70B_FF*_8d |
+
+**The crossover is at `block_bytes_per_receiver ≈ 4 KB`.** Below that,
+DMA is short enough that paying it serially on one RISC doesn't cost
+much; DRAM-core also avoids the worker's BRISC↔NCRISC sync overhead.
+Above 4 KB — and especially when the block doesn't fit in `ring_half`
+and gets split into two Case 2 chunks — the GDDR read becomes a
+significant fraction of the per-block wall clock, and worker's parallel
+RISCs amortize it for free while DRAM-core pays it serially.
+
+Two finer points the table makes visible:
+
+- **At identical `block_bytes/recv = 4,352`, write-count matters.**
+  Compare 1B_FF1 (`writes_per_recv = 1`, one big 4,352 B write) vs
+  3B_WO/8B_QKV_2d (`writes_per_recv = 2`, two smaller writes). DRAM-core
+  loses on the former, wins on the latter. The fast-path specialization
+  (single 4,352 B write per receiver per block) ends up being the
+  least-amortized regime — set_state is a fixed cost paid per receiver,
+  and with only one write per receiver the `set_state ≈ with_state`
+  cycle ratio is poor. Worker's `remote_cb_push_back_and_write_pages`
+  has the same overhead, but its BRISC reader is doing GDDR work in
+  parallel so the writer's per-write overhead is "free time".
+- **All Case 2 shapes lose.** Case 2 means `block_bytes > ring_half`
+  (35,984 B), so the kernel issues two DMAs and two push rounds per
+  block. DRAM-core pays both serially → 2× the DMA wait. Worker pipelines
+  the same two reads + two pushes across BRISC and NCRISC → much less
+  exposed latency.
+
+**Closing the remaining gap** would need one of:
+
+1. Larger `ring_half` to push more shapes from Case 2 → Case 1
+   (kernel-region L1 budget is already ~92 KB of 128 KB on Blackhole;
+   not much headroom).
+2. Bigger coalesced page (multi-row per NoC write) to reduce the
+   per-receiver `set_state` overhead on the medium-bucket shapes —
+   would require transposing the L1 stage layout from `[row][recv][page]`
+   to `[recv][row][page]`, i.e. scatter-gather DMA from GDDR.
+3. A second DRISC-equivalent RISC per bank for true reader/writer
+   parallelism. Doesn't exist on Blackhole — there's only one DRISC
+   per DRAM bank.
