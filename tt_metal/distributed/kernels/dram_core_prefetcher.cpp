@@ -89,12 +89,20 @@ FORCE_INLINE void prefetcher_write_chunk(
             uint32_t(NOC_XY_ENCODING(DYNAMIC_NOC_X(noc, recv_xy[2 * i]), DYNAMIC_NOC_Y(noc, recv_xy[2 * i + 1])));
         uint32_t dest_addr = dest_l1_base;
         const uint64_t set_state_dest = get_noc_addr_helper(remote_noc_xy, dest_addr);
-        noc_async_write_one_packet_set_state</*posted=*/true>(set_state_dest, coalesced_page_size, noc);
+        if constexpr (!(single_row && single_page)) {
+            // Multi-write paths use with_state, which requires set_state to have configured
+            // the cmd_buf first.
+            noc_async_write_one_packet_set_state</*posted=*/true>(set_state_dest, coalesced_page_size, noc);
+        }
 
         uint32_t src_addr = src_l1_addr + recv_src_offset;
         if constexpr (single_row && single_page) {
-            // 1 write per receiver. dest_addr == dest_l1_base, so reuse set_state_dest.
-            noc_async_write_one_packet_with_state</*posted=*/true>(src_addr, set_state_dest, noc);
+            // 1 write per receiver. Use the fused noc_async_write_one_packet to skip
+            // the redundant `set_state` cmd_buf_ready spin — only one cmd is issued per
+            // receiver, so amortizing state across multiple `with_state` calls buys
+            // nothing here. One spin per receiver instead of two.
+            noc_async_write_one_packet</*enable_noc_tracing=*/false, /*posted=*/true>(
+                src_addr, set_state_dest, coalesced_page_size, noc);
         } else if constexpr (single_row) {
             // num_rows == 1; only inner w loop runs.
             for (uint32_t w = 0; w < coalesced_num_pages_per_row; ++w) {
