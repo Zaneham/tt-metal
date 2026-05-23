@@ -311,7 +311,14 @@ void kernel_main() {
             uint32_t blk = 0;
             uint32_t sb = 0;
             uint32_t ch = 0;
-            uint32_t parity = 0;  // tracks (c & 1) for stage_slot ping-pong
+            // Maintain stage_slot directly; toggle via `(a + b) - slot`. Saves the
+            // per-iter conditional select that `parity == 0 ? slot_a : slot_b` compiled to.
+            constexpr uint32_t stage_slot_sum = stage_slot_a + stage_slot_b;
+            uint32_t stage_slot = stage_slot_a;
+            // has_next is true for every chunk except the very last; track as a flag and
+            // only flip when the successor crosses num_blocks. Avoids the per-iter
+            // `(next_blk < num_blocks)` sltu+branch in the hot path.
+            bool has_next = (total_chunks > 1);
 
             for (uint32_t c = 0; c < total_chunks; ++c) {
                 PROFILE_T0();
@@ -333,24 +340,23 @@ void kernel_main() {
                     if (next_sb == t_num_sub) {
                         next_sb = 0;
                         ++next_blk;
+                        if (next_blk == num_blocks) {
+                            has_next = false;
+                        }
                     }
                 }
-                const bool has_next = (next_blk < num_blocks);
+                const uint32_t next_slot = stage_slot_sum - stage_slot;
 
                 // Issue the next DMA before waiting on this one (ping-pong, depth 2).
                 if (has_next) {
                     const uint32_t next_src =
                         tensor_base + next_blk * t_block_stride + next_sb * t_sub_stride + next_ch * t_chunk_bytes;
-                    // next_slot is opposite parity of current.
-                    const uint32_t next_slot = (parity == 0) ? stage_slot_b : stage_slot_a;
                     experimental::dma_async_read(/*stream=*/0, next_src, next_slot, t_chunk_bytes);
                 }
                 PROFILE_ACCUM(prof_issue);
                 const uint32_t outstanding_after_wait = has_next ? 1u : 0u;
                 experimental::dma_async_read_wait_n(/*stream=*/0, outstanding_after_wait);
                 PROFILE_ACCUM(prof_wait);
-
-                const uint32_t stage_slot = (parity == 0) ? stage_slot_a : stage_slot_b;
                 volatile tt_l1_ptr uint32_t* chunk_recv_xy =
                     reinterpret_cast<volatile tt_l1_ptr uint32_t*>(noc_xy_l1_addr) + ch * t_recv_per_chunk * 2;
                 // Per-tensor-stable predicate; branches are 100% predictable across the
@@ -419,7 +425,7 @@ void kernel_main() {
                 blk = next_blk;
                 sb = next_sb;
                 ch = next_ch;
-                parity ^= 1u;
+                stage_slot = next_slot;
 #ifdef DRISC_PROFILE
                 prof_chunks++;
 #endif
