@@ -31,29 +31,31 @@ K-sharded. The K and N values below are per-device (after TP sharding).
 
 ## Results
 
-Re-measured after the worker-core path was moved from a device-side
-`num_kernel_repeats=N` matmul loop to N discrete `ttnn.linear` launches inside
-the trace (preceded by one `dram_prefetcher(num_layers=N)`). Both paths now
-carry the same per-launch dispatch cost.
+Symmetric trace shape between the two paths: prefetcher is dispatched once
+ahead of the trace (`start_dram_core_prefetcher(num_layers=N+1)` /
+`dram_prefetcher(num_layers=N+1)`), a warmup matmul consumes 1 layer, then the
+trace replays N `ttnn.linear` launches that consume the remaining layers. The
+only difference is the prefetcher implementation; matmul kernels, receiver
+layout, sub-device pinning, and GCB structure are identical.
 
 | Shape (model_op @ ndev) | K     | N     | DRAM-core µs | DRAM-core TFLOP/s | Worker-core µs | Worker-core TFLOP/s | Worker/DRAM |
 |-------------------------|------:|------:|-------------:|------------------:|---------------:|--------------------:|------------:|
-| 1B_QKV   @ 1 dev        | 2048  | 3072  |          155 |              2.60 |             69 |               5.85  | 0.44×       |
-| 1B_WO    @ 1 dev        | 2048  | 2048  |          141 |              1.91 |             67 |               3.99  | 0.48×       |
-| 1B_FF1   @ 1 dev        | 2048  | 8192  |          213 |              5.04 |             75 |              14.25  | 0.35×       |
-| 1B_FF2   @ 1 dev        | 8192  | 2048  |          170 |              6.33 |            119 |               9.03  | 0.70×       |
-| 3B_QKV   @ 1 dev        | 3072  | 5120  |          214 |              4.70 |             98 |              10.24  | 0.46×       |
-| 3B_WO    @ 1 dev        | 3072  | 3072  |          192 |              3.14 |             92 |               6.56  | 0.48×       |
-| 3B_FF1   @ 1 dev        | 3072  | 8192  |          272 |              5.92 |            115 |              13.96  | 0.42×       |
-| 3B_FF2   @ 1 dev        | 8192  | 3072  |          282 |              5.72 |            133 |              12.11  | 0.47×       |
-| 8B_QKV   @ 2 dev        | 4096  | 3072  |          211 |              3.82 |             92 |               8.77  | 0.44×       |
-| 8B_WO    @ 2 dev        | 2048  | 4096  |          150 |              3.57 |             69 |               7.80  | 0.46×       |
-| 8B_FF1   @ 2 dev        | 4096  | 7168  |          302 |              6.22 |            115 |              16.29  | 0.38×       |
-| 8B_FF2   @ 2 dev        | 7168  | 4096  |          225 |              8.35 |            133 |              14.16  | 0.59×       |
-| 70B_QKV  @ 8 dev        | 8192  | 1280  |          173 |              3.87 |            119 |               5.65  | 0.69×       |
-| 70B_WO   @ 8 dev        | 1024  | 8192  |          162 |              3.32 |             75 |               7.11  | 0.47×       |
-| 70B_FF1  @ 8 dev        | 8192  | 3584  |          289 |              6.49 |            133 |              14.17  | 0.46×       |
-| 70B_FF2  @ 8 dev        | 3584  | 8192  |          219 |              8.60 |            116 |              16.27  | 0.53×       |
+| 1B_QKV   @ 1 dev        | 2048  | 3072  |          215 |              1.87 |            201 |               2.00  | 0.94×       |
+| 1B_WO    @ 1 dev        | 2048  | 2048  |          169 |              1.58 |            209 |               1.28  | 1.24×       |
+| 1B_FF1   @ 1 dev        | 2048  | 8192  |          225 |              4.78 |            219 |               4.89  | 0.97×       |
+| 1B_FF2   @ 1 dev        | 8192  | 2048  |          231 |              4.64 |            270 |               3.98  | 1.17×       |
+| 3B_QKV   @ 1 dev        | 3072  | 5120  |          240 |              4.20 |            162 |               6.20  | 0.68×       |
+| 3B_WO    @ 1 dev        | 3072  | 3072  |          180 |              3.35 |            216 |               2.80  | 1.20×       |
+| 3B_FF1   @ 1 dev        | 3072  | 8192  |          234 |              6.88 |            254 |               6.33  | 1.09×       |
+| 3B_FF2   @ 1 dev        | 8192  | 3072  |          281 |              5.73 |            212 |               7.60  | 0.75×       |
+| 8B_QKV   @ 2 dev        | 4096  | 3072  |          143 |              5.64 |            225 |               3.58  | 1.57×       |
+| 8B_WO    @ 2 dev        | 2048  | 4096  |          178 |              3.01 |            128 |               4.20  | 0.72×       |
+| 8B_FF1   @ 2 dev        | 4096  | 7168  |          254 |              7.39 |            177 |              10.62  | 0.70×       |
+| 8B_FF2   @ 2 dev        | 7168  | 4096  |          293 |              6.41 |            209 |               8.97  | 0.71×       |
+| 70B_QKV  @ 8 dev        | 8192  | 1280  |          184 |              3.64 |            193 |               3.49  | 1.05×       |
+| 70B_WO   @ 8 dev        | 1024  | 8192  |          238 |              2.26 |            204 |               2.63  | 0.86×       |
+| 70B_FF1  @ 8 dev        | 8192  | 3584  |          262 |              7.18 |            282 |               6.67  | 1.08×       |
+| 70B_FF2  @ 8 dev        | 3584  | 8192  |          241 |              7.80 |            176 |              10.69  | 0.73×       |
 
 PCC ≥ 0.99996 on every row. Run on 2026-05-24 (Blackhole P150, 8 unharvested
 DRAM banks, `BENCH_TRACE_REPEATS=100`).
@@ -79,22 +81,20 @@ BENCH_K=4096 BENCH_N=14336 BENCH_DTYPE=bfloat8_b BENCH_RECV_PER_BANK=8 \
 
 ## Caveats / what these numbers do and don't say
 
-- **Both paths now trace N discrete matmul launches.** The DRAM-core trace is
-  N single-matmul launches fed by an out-of-band DRISC prefetcher (1 warmup +
-  N traced layers). The worker-core trace is `dram_prefetcher(num_layers=N)`
-  followed by N `ttnn.linear` launches inside the same trace. Both paths now
-  carry the same per-launch host dispatch overhead — the comparison is
-  production-faithful (each decoder layer is a separate dispatch on both paths).
+- **Both paths now trace N discrete matmul launches.** The prefetcher is
+  dispatched once ahead of the trace (out-of-band on both sides); the trace
+  itself contains only the N `ttnn.linear` launches. Production-faithful —
+  each decoder layer is a separate dispatch on both paths.
 - **TFLOP/s formula uses the unpadded (K, N)** on both paths. K and N are padded
   internally to a multiple of `ring_size * TILE_SIZE` for ring divisibility, but
   the padded zeros aren't counted as useful flops.
-- **Worker-core layout**: senders and receivers from
+- **Receiver layout** (shared by both paths): senders and receivers from
   `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml` (col-0 / col-7
-  senders, scattered receivers per the production placement). The matmul is
-  pinned to the receiver set via a sub-device and `sub_device_id=` on
-  `ttnn.linear`. Without this the matmul lands on the (0..7, 0..7) logical
-  rectangle which doesn't overlap the production receivers and hangs at the
-  dispatch cores.
+  workers as the worker-sender path's senders; matmul receivers scattered per
+  the production placement). The matmul is pinned to the receiver set via a
+  sub-device and `sub_device_id=` on `ttnn.linear`. DRAM bank `i` is paired
+  with the receivers at the `i`-th sorted y-row, so the gather_in0 matmul's
+  bank-to-receivers ordering assertion is satisfied.
 - **The 70B shapes are 8-device per-device shapes**; 2-device and 4-device
   configs fail `is_prefetcher_supported`'s 1 MB/core L1 bound (`bytes_per_core`
   too high). The 70B numbers are still valid as a benchmark — they reflect what
@@ -104,22 +104,29 @@ BENCH_K=4096 BENCH_N=14336 BENCH_DTYPE=bfloat8_b BENCH_RECV_PER_BANK=8 \
   would follow K-sharded matmuls (WO, FF2) in a real TP deployment is not part
   of this bench.
 
-## Why per-op cost matters here
+## Earlier asymmetric measurements
 
-The DRAM-core path was originally designed to win on shapes where push
-bandwidth bottlenecks the matmul (large N with many ring positions); on those
-shapes the per-block DMA dominates and dispatch overhead amortizes. The bench
-numbers here are decode-style (M=32) matmuls where neither push BW nor compute
-dominates.
+A previous version of this bench captured the worker-core path's
+`dram_prefetcher` op *inside* the trace alongside the N matmul launches (while
+the DRAM-core path used out-of-band `start_dram_core_prefetcher`, which has no
+in-trace analog). That asymmetry gave the worker-core path a ~2-3× headline
+advantage (67-133 µs vs DRAM-core 150-300 µs).
 
-Worth noting: the worker-core µs column is essentially unchanged from the
-previous device-side `num_kernel_repeats=N` measurements (e.g. 1B_QKV 68→69,
-8B_FF1 116→115, 70B_FF1 132→133). FD trace-replay dispatch overhead per
-launch is ~zero on this hardware, so the N matmul launches inside the trace
-amortize to the same per-op cost as a single op with an N-iteration kernel
-loop. The DRAM-core µs column then reflects something else (per-launch DRISC
-prefetcher hand-off, sub-device handshake, smaller in-flight pipeline depth)
-rather than raw dispatch overhead.
+When the worker-core prefetcher was hoisted out of the trace to match the
+DRAM-core structure, worker-core regressed to the 130-280 µs range while
+DRAM-core was unchanged — closing the gap. The mechanism behind the
+in-trace advantage isn't fully understood (the prefetcher kernel is dispatched
+before any matmul kernel begins running in both cases, and the device-side
+pipeline is credit-gated regardless of when the dispatch command was issued);
+hypotheses worth investigating include whether `ttnn.dram_prefetcher` is
+synchronous on dispatch (which would make the out-of-trace structure a
+serialization point that doesn't exist with in-trace capture), and whether
+`set_sub_device_stall_group([receiver])` actually excludes the sender
+sub-device from `ttnn.to_torch` / `ttnn.synchronize_device` host waits.
+
+What the current numbers do say: with structurally identical trace shape, the
+two implementations have comparable per-matmul cost on these decode-style
+shapes. No consistent winner per-shape.
 
 For an apples-to-apples comparison of just the push throughput, see the BW
 bench: `tests/ttnn/unit_tests/operations/transformers/test_prefetcher_BH_bw_bench.py`.
