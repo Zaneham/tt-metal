@@ -118,7 +118,7 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
     bank_to_receivers = [
         (b, _bank_receivers_row_major(b, _NUM_RECV_PER_BANK, ring_cols=num_dram_banks)) for b in range(num_dram_banks)
     ]
-    gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     # Per receiver per (layer, tensor): ring_size pushes.
     num_iters_total = num_layers * num_tensors * ring_size
@@ -129,7 +129,7 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
     )
 
     # Sender: push all `num_tensors` weights through the prefetcher, num_layers times.
-    ttnn.start_dram_core_prefetcher(
+    ttnn.experimental.start_dram_core_prefetcher(
         device,
         weights + [addrs],
         num_layers=num_layers,
@@ -142,6 +142,6 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
         page_size_bytes=push_page_size,
         global_cb=gcb,
     )
-    ttnn.stop_dram_core_prefetcher(device)
+    ttnn.experimental.stop_dram_core_prefetcher(device)
     ttnn.synchronize_device(device)
     logger.info(f"[multi_tensor] num_tensors={num_tensors} num_layers={num_layers} completed cleanly")

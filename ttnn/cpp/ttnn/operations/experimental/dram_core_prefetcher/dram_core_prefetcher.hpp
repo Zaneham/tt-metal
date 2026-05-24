@@ -14,7 +14,7 @@ namespace tt::tt_metal::distributed {
 class MeshDevice;
 }
 
-namespace ttnn {
+namespace ttnn::operations::experimental {
 
 // Thin ttnn-side wrappers around tt::tt_metal::experimental::Start/StopDramCorePrefetcher.
 // `tensors` is the same list shape as ttnn::dram_prefetcher: data tensors followed by a
@@ -31,4 +31,4 @@ void start_dram_core_prefetcher(
 
 void stop_dram_core_prefetcher(tt::tt_metal::distributed::MeshDevice* mesh_device);
 
-}  // namespace ttnn
+}  // namespace ttnn::operations::experimental

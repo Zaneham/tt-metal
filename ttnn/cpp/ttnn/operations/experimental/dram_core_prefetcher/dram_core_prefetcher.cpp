@@ -7,7 +7,7 @@
 #include <tt-metalium/experimental/dram_core_prefetcher.hpp>
 #include <tt-metalium/experimental/tensor/mesh_tensor.hpp>
 
-namespace ttnn {
+namespace ttnn::operations::experimental {
 
 void start_dram_core_prefetcher(
     tt::tt_metal::distributed::MeshDevice* mesh_device,
@@ -31,4 +31,4 @@ void stop_dram_core_prefetcher(tt::tt_metal::distributed::MeshDevice* mesh_devic
     tt::tt_metal::experimental::StopDramCorePrefetcher(mesh_device);
 }
 
-}  // namespace ttnn
+}  // namespace ttnn::operations::experimental

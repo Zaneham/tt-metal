@@ -383,7 +383,7 @@ def test_bench_dram_core_repeats(device, op_name, shape):
         )
         for bank_idx, row in enumerate(receivers_per_y)
     ]
-    gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     cc_program_config = _build_program_config(
         ring_size=ring_size,
@@ -433,7 +433,7 @@ def test_bench_dram_core_repeats(device, op_name, shape):
         )
 
     # One long-lived DRISC stream: 1 warmup/correctness layer + trace_repeats traced layers.
-    ttnn.start_dram_core_prefetcher(
+    ttnn.experimental.start_dram_core_prefetcher(
         device,
         [tt_weight, addrs],
         num_layers=num_prefetch_layers,
@@ -461,7 +461,7 @@ def test_bench_dram_core_repeats(device, op_name, shape):
     elapsed = time.perf_counter() - t0
     ttnn.release_trace(device, bench_trace)
 
-    ttnn.stop_dram_core_prefetcher(device)
+    ttnn.experimental.stop_dram_core_prefetcher(device)
 
     per_matmul_us = elapsed / trace_repeats * 1e6
     # Use unpadded K in the TFLOP/s formula so it's comparable across paths (worker-core uses

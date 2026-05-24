@@ -224,7 +224,7 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
         for b in range(num_dram_banks)
     ]
     gcb_size = _gcb_size_bytes(page_size, pages_per_layer)
-    gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     logger.info(
         f"[dram_core_bw][{op_name}] K={_K_ORIG} K_padded={_K} N={_N_ORIG} N_padded={_N} "
@@ -232,7 +232,9 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
         f"gcb_size={gcb_size} trace_repeats={trace_repeats} num_prefetch_layers={num_prefetch_layers}"
     )
 
-    ttnn.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=num_prefetch_layers, global_cb=gcb)
+    ttnn.experimental.start_dram_core_prefetcher(
+        device, [tt_weight, addrs], num_layers=num_prefetch_layers, global_cb=gcb
+    )
 
     # Warmup: drain 1 layer's worth of pages — this also primes the cached MeshWorkload
     # so the binary write happens here, not inside the trace.
@@ -254,7 +256,7 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
     ttnn.synchronize_device(device)
     elapsed = time.perf_counter() - t0
     ttnn.release_trace(device, bench_trace)
-    ttnn.stop_dram_core_prefetcher(device)
+    ttnn.experimental.stop_dram_core_prefetcher(device)
 
     if os.environ.get("TT_METAL_WATCHER", "0") == "1":
         time.sleep(3)  # let watcher dump DRISC ring buffers before device close

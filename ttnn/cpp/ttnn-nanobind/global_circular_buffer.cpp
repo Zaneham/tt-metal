@@ -70,74 +70,8 @@ void py_module(nb::module_& mod) {
                 buffer_type (BufferType): The type of buffer to use for the global circular buffer.
             )doc");
 
-    // DRAM-sender variant (senders are programmable DRAM cores identified by bank id).
-    // MeshDevice-only because the per-mesh DRISC L1 arena lives on MeshDeviceImpl.
-    mod.def(
-        "create_global_circular_buffer_with_dram_senders",
-        &ttnn::global_circular_buffer::create_global_circular_buffer_with_dram_senders,
-        nb::keep_alive<0, 1>(),
-        nb::arg("mesh_device"),
-        nb::arg("bank_to_receivers"),
-        nb::arg("size"),
-        nb::arg("buffer_type") = tt::tt_metal::BufferType::L1,
-        R"doc(
-            Create a GlobalCircularBuffer where senders are programmable DRAM cores (Blackhole DRISCs).
-            Each bank id is mapped to an unused DRAM subchannel; receiver sets across senders must
-            be disjoint and must not collide with the DRAM sender physical NOC coords.
-
-            Args:
-                mesh_device: The mesh device to create the buffer on.
-                bank_to_receivers: List of (bank_id, receivers) pairs.
-                size: Per-receiver fifo size in bytes.
-                buffer_type: Buffer type (L1 or L1_SMALL).
-            )doc");
-
-    mod.def(
-        "create_global_circular_buffer_for_matmul_1d",
-        &ttnn::global_circular_buffer::create_global_circular_buffer_for_matmul_1d,
-        nb::keep_alive<0, 1>(),
-        nb::arg("mesh_device"),
-        nb::arg("program_configs"),
-        nb::arg("weights"),
-        nb::arg("num_buffered_blocks") = 4,
-        nb::arg("buffer_type") = tt::tt_metal::BufferType::L1,
-        R"doc(
-            Build a DRAM-sender GlobalCircularBuffer sized to feed one or more 1D ring matmuls
-            (gather_in0=true) with their weight tensors. Size, page stride, and the
-            receiver-to-bank rectangle are derived from the matmul program configs so
-            host-side alignment checks fire as TT_FATAL at construction rather than as a
-            silent device hang during ttnn.linear.
-
-            One (program_config, weight) pair per matmul. The production pattern (e.g. llama 70B)
-            is to share a single GCB across XQKV/WO/FF1/FF2, where each consumer has a different
-            in1_block_size. The GCB size is picked as a multiple of LCM(in1_block_size for each
-            matmul) so the wrap-adjustment math stays consistent for every consumer.
-
-            Validates per matmul:
-              * weight K is tile-aligned AND divisible by ring_size (no activation padding past K),
-              * weight N shards evenly across DRAM banks and per-bank N splits evenly across
-                num_global_cb_receivers,
-              * matmul per_core_N == weight per-receiver N.
-            All configs must agree on compute_with_storage_grid_size and num_global_cb_receivers.
-
-            Picking num_buffered_blocks:
-              * 1: no overlap; DRISC and matmul are fully serialized.
-              * 2: double-buffer ping-pong (minimum useful value).
-              * 4 (default): comfortable slack against jitter; fits L1 for typical shapes.
-              * num_blocks of the largest matmul (max(weight_K_tiles / in0_block_w)): full-
-                layer decoupling. Above this, more buffering doesn't add throughput - the
-                DRISC just stalls on remote_cb_reserve_back. This matches the production
-                llama 70B pattern.
-            Larger values are clamped by an L1 budget so the GCB leaves room for the matmul's
-            in0/out/interm CBs.
-
-            Args:
-                mesh_device: The mesh device.
-                program_configs: List of 1D mcast matmul program configs (each gather_in0=True).
-                weights: List of DRAM-sharded in1 tensors, one per program_config.
-                num_buffered_blocks: How many of the largest in1 block fit per receiver in the GCB ring.
-                buffer_type: Buffer type (L1 or L1_SMALL).
-            )doc");
+    // DRAM-sender GCB factories live under ttnn.experimental.* — see
+    // ttnn/cpp/ttnn/operations/experimental/dram_core_prefetcher/dram_core_prefetcher_nanobind.cpp.
 }
 
 }  // namespace ttnn::global_circular_buffer

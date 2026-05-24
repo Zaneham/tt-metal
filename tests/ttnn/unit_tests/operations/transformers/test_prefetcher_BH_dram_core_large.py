@@ -11,7 +11,7 @@ recv_per_bank.
 
 Each parameterized case:
 - Builds a fresh DRAM-sender GlobalCircularBuffer via
-  ttnn.create_global_circular_buffer_with_dram_senders for one matmul.
+  ttnn.experimental.create_global_circular_buffer_with_dram_senders for one matmul.
 - Pushes the weight via ttnn.dram_prefetcher(global_cb=gcb); the op infers the DRAM-core
   program factory from gcb.sender_core_type() == "dram".
 - Runs ttnn.linear with the same gcb.
@@ -187,7 +187,7 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     bank_to_receivers = [
         (b, _bank_receivers_row_major(b, num_receivers_per_bank, ring_cols)) for b in range(num_dram_banks)
     ]
-    gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
     logger.info(
         f"[{name}] M={M} K={K} N={N} ring={ring_size} recv/bank={num_receivers_per_bank} dtype={dtype} "
         f"K_per_shard={K_per_shard} fifo_page={in1_block_size_bytes} gcb_size={gcb_size}"
@@ -231,7 +231,7 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     )
 
     # ---- Run: prefetcher (async) -> matmul (consumes via gcb) -> stop drains ----
-    ttnn.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=1, global_cb=gcb)
+    ttnn.experimental.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=1, global_cb=gcb)
     tt_out = ttnn.linear(
         tt_act,
         tt_weight,
@@ -241,7 +241,7 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
         dtype=ttnn.bfloat16,
         global_cb=gcb,
     )
-    ttnn.stop_dram_core_prefetcher(device)
+    ttnn.experimental.stop_dram_core_prefetcher(device)
 
     # ---- Verify ----
     out_torch = ttnn.to_torch(tt_out)

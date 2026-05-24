@@ -119,7 +119,7 @@ def test_dram_core_prefetcher_matmul(device):
         bank_to_receivers.append(
             (b, ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(start, 0), ttnn.CoreCoord(end, 0))}))
         )
-    gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     # ---- Matmul program config: 1D-mcast gather_in0, num_global_cb_receivers=1 ----
     in0_block_w = K // ring_size // ttnn.TILE_SIZE or 1
@@ -163,7 +163,7 @@ def test_dram_core_prefetcher_matmul(device):
     )
 
     # ---- Run: prefetcher (async) → matmul (consumes via gcb) → stop drains ----
-    ttnn.start_dram_core_prefetcher(
+    ttnn.experimental.start_dram_core_prefetcher(
         device,
         [tt_weight, addrs],
         num_layers=1,
@@ -179,7 +179,7 @@ def test_dram_core_prefetcher_matmul(device):
         dtype=ttnn.bfloat16,
         global_cb=gcb,
     )
-    ttnn.stop_dram_core_prefetcher(device)
+    ttnn.experimental.stop_dram_core_prefetcher(device)
 
     # ---- Verify ----
     out_torch = ttnn.to_torch(tt_out)

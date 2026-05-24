@@ -7,7 +7,7 @@
 Replaces the matmul consumer with a diagnostic kernel that DPRINTs progress
 and detects over/under-counts. Drives both the worker-core sender
 (`ttnn.dram_prefetcher`) and the DRAM-core sender
-(`ttnn.start_dram_core_prefetcher`) against the same validator so any
+(`ttnn.experimental.start_dram_core_prefetcher`) against the same validator so any
 divergence between the two paths surfaces immediately.
 
 See docs/prefetcher_matmul_design.md for the contract being validated.
@@ -101,7 +101,7 @@ def _setup_weight_and_gcb_dram_sender(device, K, N, dtype, recv_per_bank, num_la
         for b in range(num_dram_banks)
     ]
     gcb_size = _GCB_DEPTH_PAGES * push_page_size
-    gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     num_iters_total = num_layers * ring_size
     logger.info(
@@ -204,7 +204,7 @@ def test_validator_dram_sender(device, K, N, dtype, recv_per_bank, num_layers):
         device, K, N, dtype, recv_per_bank, num_layers
     )
 
-    ttnn.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=num_layers, global_cb=gcb)
+    ttnn.experimental.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=num_layers, global_cb=gcb)
     ttnn.experimental.test_dram_prefetcher_validator(
         device,
         num_iters=num_iters_total,
@@ -212,7 +212,7 @@ def test_validator_dram_sender(device, K, N, dtype, recv_per_bank, num_layers):
         print_stride=max(1, ring_size // 4),
         global_cb=gcb,
     )
-    ttnn.stop_dram_core_prefetcher(device)
+    ttnn.experimental.stop_dram_core_prefetcher(device)
     ttnn.synchronize_device(device)
     logger.info(f"[validator-dram] K={K} N={N} recv_per_bank={recv_per_bank} num_layers={num_layers} OK")
 
