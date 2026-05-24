@@ -148,7 +148,7 @@ Cycle counts (hex → decimal):
   `remote_cb_push_back_and_write_pages`. The push loop is now a custom
   helper `prefetcher_write_chunk`, and the per-block credit-update is
   its own `prefetcher_finalize_block<skip_ptr_update=true>` (see
-  `tt_metal/distributed/kernels/dram_core_prefetcher.cpp:49,99`).
+  `tt_metal/impl/buffers/kernels/dram_core_prefetcher.cpp:49,99`).
 - "Iter 0" no longer exists as a single entity — the kernel iterates
   `(layer × tensor × block × sub_band × M)` chunks. We accumulate over
   every chunk in every layer (no cold-start exclusion); the trace
@@ -277,7 +277,7 @@ symmetric-GCB fix in the bench is the right place to address it.
 ## Reproducing
 
 The instrumentation is checked in to
-`tt_metal/distributed/kernels/dram_core_prefetcher.cpp` behind a
+`tt_metal/impl/buffers/kernels/dram_core_prefetcher.cpp` behind a
 `WATCHER_ENABLED && !WATCHER_DISABLE_RING_BUFFER` macro guard, so it's
 zero-cost in production builds.
 

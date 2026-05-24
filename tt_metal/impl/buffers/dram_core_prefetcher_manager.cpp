@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "distributed/dram_core_prefetcher_manager.hpp"
+#include "impl/buffers/dram_core_prefetcher_manager.hpp"
 
 #include "distributed/mesh_device_impl.hpp"
 #include "impl/buffers/drisc_l1_arena.hpp"
@@ -38,7 +38,7 @@ constexpr uint32_t kNocMaxBurstSizeBytes = 16 * 1024;
 // ping-pong stage buffers (2 * chunk_size).
 constexpr uint32_t kKernelOverheadBytes = 2 * 1024;
 
-constexpr const char* kKernelPath = "tt_metal/distributed/kernels/dram_core_prefetcher.cpp";
+constexpr const char* kKernelPath = "tt_metal/impl/buffers/kernels/dram_core_prefetcher.cpp";
 
 inline uint32_t align_up(uint32_t a, uint32_t align) { return (a + align - 1) & ~(align - 1); }
 

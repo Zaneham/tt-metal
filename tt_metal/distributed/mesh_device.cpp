@@ -48,7 +48,7 @@
 #include <experimental/fabric/fabric_types.hpp>
 #include "distributed/fd_mesh_command_queue.hpp"
 #include "distributed/realtime_profiler_manager.hpp"
-#include "distributed/dram_core_prefetcher_manager.hpp"
+#include "impl/buffers/dram_core_prefetcher_manager.hpp"
 #include "impl/buffers/drisc_l1_arena.hpp"
 #include "distributed/sd_mesh_command_queue.hpp"
 #include "tracy/Tracy.hpp"

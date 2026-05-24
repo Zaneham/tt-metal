@@ -3,7 +3,7 @@
 This document describes the contract between the gather-in0 matmul receiver
 and the two DRAM prefetcher implementations that feed it: the worker-core
 prefetcher (`ttnn.dram_prefetcher`) and the DRAM-core prefetcher
-(`ttnn.start_dram_core_prefetcher`). It exists so that a future maintainer
+(`ttnn.experimental.start_dram_core_prefetcher`). It exists so that a future maintainer
 touching either side can read one file and learn what is invariant across the
 two paths, without having to reverse-engineer the kernels.
 
@@ -27,7 +27,7 @@ Two prefetcher variants exist:
   to each DRAM bank, with a triple-buffered local CB sitting in worker L1.
   Most flexible (handles heterogeneous shapes/dtypes per launch), and has
   ~1.5 MB of worker L1 to play with for the local CB.
-- **DRAM-core** (`ttnn.start_dram_core_prefetcher`, `tt_metal/distributed/`):
+- **DRAM-core** (`ttnn.experimental.start_dram_core_prefetcher`, `tt_metal/distributed/`):
   runs a single kernel on a DRISC core (i.e. on the DRAM core itself), doing
   GDDR DMA and NoC push from the same RISC. Closer to the GDDR controller and
   can run at higher throughput on production shapes, but its DRISC L1 working
@@ -477,8 +477,8 @@ Whoever changes prefetcher or receiver code must preserve these:
   `ttnn/cpp/ttnn/operations/prefetcher/prefetcher/device/dram_prefetcher_program_factory.cpp`,
   `kernels/reader_dram.cpp`, `kernels/writer_l1.cpp`.
 - DRAM-core prefetcher:
-  `tt_metal/distributed/dram_core_prefetcher_manager.cpp`,
-  `tt_metal/distributed/kernels/dram_core_prefetcher.cpp`.
+  `tt_metal/impl/buffers/dram_core_prefetcher_manager.cpp`,
+  `tt_metal/impl/buffers/kernels/dram_core_prefetcher.cpp`.
 - GCB / remote CB API:
   `tt_metal/hw/inc/api/remote_circular_buffer.h`,
   `tt_metal/impl/buffers/global_circular_buffer.cpp`.

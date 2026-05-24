@@ -133,7 +133,7 @@ protected:
         };
         KernelHandle sender_kernel_id = CreateKernel(
             program,
-            "tt_metal/distributed/kernels/dram_core_prefetcher.cpp",
+            "tt_metal/impl/buffers/kernels/dram_core_prefetcher.cpp",
             sender_logical,
             DramConfig{.noc = NOC::NOC_0, .compile_args = sender_compile_args});
 
