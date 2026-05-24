@@ -11,48 +11,29 @@ counts), tensor shapes are computed at the smallest device count where the worke
 prefetcher fits: 1B/3B at 1 device, 8B at 2 devices, 70B at 8 devices.
 
 Both paths share the same gather_in0 matmul kernels. Differences:
-- DRAM-core: trace captures N single-matmul launches (`num_kernel_repeats=1`); the
-  DRISC prefetcher kernel runs out-of-band via DramCorePrefetcherManager with
-  `num_layers = 1 + N` (1 warmup + N traced) and feeds one layer per matmul. The
-  receiver matmul runs on a contiguous receiver-grid sub-device.
-- Worker-core: trace captures one `(dram_prefetcher_op + matmul)` pair with device-side
-  `num_kernel_repeats=N` and `num_layers=N`. Both ops run under FD inside the trace.
-  Sender/receiver layout from `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml`
-  (production col-0/col-7 senders, scattered receivers); matmul pinned to receivers via
-  `sub_device_id`.
+- DRAM-core: trace captures N single-matmul launches; the DRISC prefetcher kernel
+  runs out-of-band via DramCorePrefetcherManager with `num_layers = 1 + N` (1 warmup
+  + N traced) and feeds one layer per matmul. The receiver matmul runs on a
+  contiguous receiver-grid sub-device.
+- Worker-core: trace captures one `dram_prefetcher` op (`num_layers=N`) followed by N
+  `ttnn.linear` launches. All ops run under FD inside the trace. Sender/receiver
+  layout from `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml`
+  (production col-0/col-7 senders, scattered receivers); matmul pinned to receivers
+  via `sub_device_id`.
 
 Shape envs `BENCH_K / BENCH_N / BENCH_DTYPE / BENCH_RECV_PER_BANK` override the
-parametrize values for ad-hoc runs. `BENCH_REPEATS` (default 1000) controls the
-worker-core's device-side loop count; `BENCH_TRACE_REPEATS` (default 100) controls
-the DRAM-core trace replay length. All shapes use ring=64 (8 banks × 8 receivers/bank)
-and bfloat8_b.
+parametrize values for ad-hoc runs. `BENCH_TRACE_REPEATS` (default 100) controls the
+trace replay length for both paths. All shapes use ring=64 (8 banks × 8
+receivers/bank) and bfloat8_b.
 
-Measured on P150 (8-bank unharvested Blackhole) with BENCH_REPEATS=1000 /
-BENCH_TRACE_REPEATS=100 (full sweep below; M=32 for decode):
-
-  Shape (model_op @ ndev)  K     N      DRAM-core               Worker-core            DRAM/Worker
-  1B_QKV   @ 1 dev          2048  3072    201us  2.01 TFLOP/s    68us  5.91 TFLOP/s    0.34x
-  1B_WO    @ 1 dev          2048  2048    220us  1.22 TFLOP/s    67us  3.98 TFLOP/s    0.31x
-  1B_FF1   @ 1 dev          2048  8192    206us  5.22 TFLOP/s    75us 14.37 TFLOP/s    0.36x
-  1B_FF2   @ 1 dev          8192  2048    189us  5.68 TFLOP/s   118us  9.09 TFLOP/s    0.62x
-  3B_QKV   @ 1 dev          3072  5120    244us  4.13 TFLOP/s    98us 10.30 TFLOP/s    0.40x
-  3B_WO    @ 1 dev          3072  3072    187us  3.23 TFLOP/s    91us  6.62 TFLOP/s    0.49x
-  3B_FF1   @ 1 dev          3072  8192    286us  5.63 TFLOP/s   116us 13.92 TFLOP/s    0.40x
-  3B_FF2   @ 1 dev          8192  3072    243us  6.63 TFLOP/s   132us 12.16 TFLOP/s    0.55x
-  8B_QKV   @ 2 dev          4096  3072    211us  3.82 TFLOP/s    91us  8.83 TFLOP/s    0.43x
-  8B_WO    @ 2 dev          2048  4096    178us  3.02 TFLOP/s    68us  7.88 TFLOP/s    0.38x
-  8B_FF1   @ 2 dev          4096  7168    288us  6.53 TFLOP/s   116us 16.25 TFLOP/s    0.40x
-  8B_FF2   @ 2 dev          7168  4096    270us  6.95 TFLOP/s   132us 14.20 TFLOP/s    0.49x
-  70B_QKV  @ 8 dev          8192  1280    274us  2.45 TFLOP/s   118us  5.68 TFLOP/s    0.43x
-  70B_WO   @ 8 dev          1024  8192    221us  2.43 TFLOP/s    75us  7.19 TFLOP/s    0.34x
-  70B_FF1  @ 8 dev          8192  3584    234us  8.05 TFLOP/s   132us 14.18 TFLOP/s    0.57x
-  70B_FF2  @ 8 dev          3584  8192    244us  7.70 TFLOP/s   116us 16.25 TFLOP/s    0.47x
+Per-shape results: see `docs/dram_core_prefetcher_bench_results.md`. The
+table there was measured with the previous worker-core trace shape and is
+pending re-measurement after the move to N discrete `ttnn.linear` launches.
 
 Caveats:
-- The two paths trace differently: DRAM-core captures N single matmuls (production-
-  faithful: each decoder layer is a separate dispatch); worker-core captures 1 op
-  with device-side N-iteration loop (zero dispatch overhead). Per-op overhead in the
-  DRAM-core column reflects host dispatch cost that worker-core's N-loop amortizes.
+- Both paths now trace N single matmul dispatches (production-faithful: each decoder
+  layer is a separate dispatch). The worker-core path additionally captures one
+  `dram_prefetcher` op (`num_layers=N`) at the head of the trace.
 - TFLOP/s uses unpadded (K, N) for both paths (the formula honors the actual matmul
   work; padding for ring divisibility doesn't count as useful flops).
 """
@@ -70,10 +51,6 @@ from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_
 
 def _dram_programmable_enabled() -> bool:
     return os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") == "1"
-
-
-def _bench_repeats() -> int:
-    return int(os.environ.get("BENCH_REPEATS", "1000"))
 
 
 def _round_up(n, m):
@@ -234,7 +211,6 @@ def _bank_receivers_row_major(bank_idx: int, recv_per_bank: int, ring_cols: int,
 
 
 def _build_program_config(
-    num_kernel_repeats: int,
     ring_size: int,
     ring_cols: int,
     ring_rows: int,
@@ -264,7 +240,6 @@ def _build_program_config(
         # (causing OOM or sender stall via mismatched cb sizes).
         num_global_cb_receivers=num_global_cb_receivers,
         untilize_out=False,
-        num_kernel_repeats=num_kernel_repeats,
     )
 
 
@@ -369,7 +344,6 @@ def test_bench_dram_core_repeats(device, op_name, shape):
     gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
     cc_program_config = _build_program_config(
-        num_kernel_repeats=1,
         ring_size=ring_size,
         ring_cols=ring_cols,
         ring_rows=ring_rows,
@@ -485,7 +459,7 @@ def test_bench_workercore_repeats(device, op_name, shape):
     if device.dram_grid_size().x != 8:
         pytest.skip("Worker-sender bench expects 8 unharvested DRAM banks")
 
-    num_kernel_repeats = _bench_repeats()
+    trace_repeats = int(os.environ.get("BENCH_TRACE_REPEATS", "100"))
     num_senders = _NUM_DRAM_BANKS
     ring_size = _RING_SIZE
     ring_cols = _RING_COLS
@@ -575,10 +549,10 @@ def test_bench_workercore_repeats(device, op_name, shape):
         )
 
     tt_addrs_cc = _build_tensor_addrs(1)
-    # One dram_prefetcher invocation with num_layers=N pushes N copies of the weight.
-    # One ttnn.linear with num_kernel_repeats=N loops N times and consumes them. addrs
-    # has one row per layer.
-    tt_addrs = _build_tensor_addrs(num_kernel_repeats)
+    # One dram_prefetcher invocation with num_layers=N pushes N copies of the weight;
+    # N consecutive ttnn.linear launches inside the trace each consume one layer.
+    # addrs has one row per layer.
+    tt_addrs = _build_tensor_addrs(trace_repeats)
 
     K_per_shard = _round_up(math.ceil(_K / ring_size), ttnn.TILE_SIZE)
     act_mem_config = ttnn.create_sharded_memory_config(
@@ -593,14 +567,6 @@ def test_bench_workercore_repeats(device, op_name, shape):
     )
 
     program_config = _build_program_config(
-        num_kernel_repeats=num_kernel_repeats,
-        ring_size=ring_size,
-        ring_cols=ring_cols,
-        ring_rows=ring_rows,
-        num_global_cb_receivers=_NUM_RECV_PER_BANK,
-    )
-    cc_program_config = _build_program_config(
-        num_kernel_repeats=1,
         ring_size=ring_size,
         ring_cols=ring_cols,
         ring_rows=ring_rows,
@@ -622,30 +588,10 @@ def test_bench_workercore_repeats(device, op_name, shape):
     )
 
     logger.info(
-        f"[workercore][{op_name}] K={_K} N={_N} ring={ring_size} gcb_size={gcb_size} "
-        f"num_kernel_repeats={num_kernel_repeats}"
+        f"[workercore][{op_name}] K={_K} N={_N} ring={ring_size} gcb_size={gcb_size} " f"trace_repeats={trace_repeats}"
     )
 
-    # Correctness: dram_prefetcher pushes 1 layer, one matmul (repeats=1) consumes it.
-    ttnn.dram_prefetcher([tt_weight, tt_addrs_cc], num_layers=1, global_cb=gcb)
-    cc_out = ttnn.linear(
-        tt_act,
-        tt_weight,
-        program_config=cc_program_config,
-        memory_config=output_mem_config,
-        compute_kernel_config=compute_kernel_config,
-        dtype=ttnn.bfloat16,
-        global_cb=gcb,
-        sub_device_id=receiver_sub_device_id,
-    )
-    cc_torch = ttnn.to_torch(cc_out)
-    expected = pt_act.float() @ pt_weight.float()
-    passing, output_str = comp_pcc(expected, cc_torch, 0.99)
-    logger.info(f"[workercore] PCC: {output_str}")
-    assert passing, f"[workercore] PCC failed: {output_str}"
-
-    def prefetcher_plus_linear():
-        ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=num_kernel_repeats, global_cb=gcb)
+    def single_linear():
         return ttnn.linear(
             tt_act,
             tt_weight,
@@ -657,16 +603,30 @@ def test_bench_workercore_repeats(device, op_name, shape):
             sub_device_id=receiver_sub_device_id,
         )
 
-    # Warmup outside the trace: prefetcher + matmul once. JIT/program-build lands here.
-    _ = prefetcher_plus_linear()
+    # Correctness: dram_prefetcher pushes 1 layer, one matmul consumes it.
+    ttnn.dram_prefetcher([tt_weight, tt_addrs_cc], num_layers=1, global_cb=gcb)
+    cc_out = single_linear()
+    cc_torch = ttnn.to_torch(cc_out)
+    expected = pt_act.float() @ pt_weight.float()
+    passing, output_str = comp_pcc(expected, cc_torch, 0.99)
+    logger.info(f"[workercore] PCC: {output_str}")
+    assert passing, f"[workercore] PCC failed: {output_str}"
+
+    # Warmup outside the trace: prefetcher (num_layers=trace_repeats) + N matmuls.
+    # JIT/program-build lands here. The warmup also drains the trace_repeats layers
+    # so the trace-capture pass starts with a clean prefetcher state.
+    ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=trace_repeats, global_cb=gcb)
+    for _ in range(trace_repeats):
+        _ = single_linear()
     ttnn.synchronize_device(device)
 
-    # Capture the bench trace: one prefetcher op (num_layers=N) + one matmul
-    # (num_kernel_repeats=N). Both ops run device-side N-iteration loops; the trace
-    # holds a single dispatch pair. Trace replay re-issues both ops; the prefetcher
-    # pushes another N layers and the matmul consumes them.
+    # Capture the bench trace: one dram_prefetcher (num_layers=N) feeds N matmul
+    # launches. Each matmul is a separate FD dispatch — host overhead per launch is
+    # what we're measuring against the DRAM-core path.
     bench_trace = ttnn.begin_trace_capture(device, cq_id=0)
-    _ = prefetcher_plus_linear()
+    ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=trace_repeats, global_cb=gcb)
+    for _ in range(trace_repeats):
+        bench_output = single_linear()  # Keep named so the output buffer stays alive.
     ttnn.end_trace_capture(device, bench_trace, cq_id=0)
 
     t0 = time.perf_counter()
@@ -675,9 +635,9 @@ def test_bench_workercore_repeats(device, op_name, shape):
     elapsed = time.perf_counter() - t0
     ttnn.release_trace(device, bench_trace)
 
-    per_matmul_us = elapsed / num_kernel_repeats * 1e6
-    tflops = _flops_per_matmul(_K) * num_kernel_repeats / elapsed / 1e12
+    per_matmul_us = elapsed / trace_repeats * 1e6
+    tflops = _flops_per_matmul(_K) * trace_repeats / elapsed / 1e12
     logger.info(
-        f"[workercore][{op_name}] trace_elapsed={elapsed * 1e3:.2f}ms repeats={num_kernel_repeats} "
+        f"[workercore][{op_name}] trace_elapsed={elapsed * 1e3:.2f}ms repeats={trace_repeats} "
         f"per_matmul={per_matmul_us:.2f}us -> {tflops:.4f} TFLOP/s"
     )

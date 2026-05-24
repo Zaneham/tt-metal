@@ -7,8 +7,7 @@
 - Ring: 64 cores (8 DRAM banks × 8 receivers per bank).
 - dtype: `bfloat8_b` (1088 B/tile).
 - M (batch / activation height): 32, decode-style.
-- `BENCH_TRACE_REPEATS=100` for the DRAM-core path; `BENCH_REPEATS=1000` for the
-  worker-core path (matches each path's traced-shape default).
+- `BENCH_TRACE_REPEATS=100` for both paths (matches the traced-shape default).
 - `dispatch_core_axis = DispatchCoreAxis.COL` (matches the canonical
   `test_prefetcher_BH.py` model test).
 
@@ -31,6 +30,14 @@ Per-op shape conventions: QKV / FF1 are N-sharded across devices; WO / FF2 are
 K-sharded. The K and N values below are per-device (after TP sharding).
 
 ## Results
+
+> **Note:** the numbers in the table below were measured when the worker-core path
+> used a device-side `num_kernel_repeats=N` loop on the matmul kernel. That knob
+> has since been removed; the worker-core trace now captures one
+> `dram_prefetcher(num_layers=N)` followed by N discrete `ttnn.linear` launches,
+> mirroring the DRAM-core path. The worker-core µs column is therefore stale and
+> will be higher when re-measured (it now includes the same per-launch host
+> dispatch cost as the DRAM-core path).
 
 | Shape (model_op @ ndev) | K     | N     | DRAM-core µs | DRAM-core TFLOP/s | Worker-core µs | Worker-core TFLOP/s | DRAM/Worker |
 |-------------------------|------:|------:|-------------:|------------------:|---------------:|--------------------:|------------:|
@@ -74,14 +81,12 @@ BENCH_K=4096 BENCH_N=14336 BENCH_DTYPE=bfloat8_b BENCH_RECV_PER_BANK=8 \
 
 ## Caveats / what these numbers do and don't say
 
-- **The two paths trace differently.** The DRAM-core test captures N single
-  matmul launches and replays once (production-faithful: each decoder layer is
-  a separate dispatch). The worker-core test captures one `(prefetcher_op + matmul)`
-  pair with a device-side `num_kernel_repeats=N` loop (zero per-iteration
-  dispatch cost). The DRAM-core µs column therefore includes host dispatch
-  overhead that the worker-core N-loop amortizes to ~zero — that's part of the
-  honest production comparison, but it does mean the per-op numbers are not
-  directly comparing the *same* work.
+- **Both paths now trace N discrete matmul launches.** The DRAM-core trace is
+  N single-matmul launches fed by an out-of-band DRISC prefetcher (1 warmup +
+  N traced layers). The worker-core trace is `dram_prefetcher(num_layers=N)`
+  followed by N `ttnn.linear` launches inside the same trace. Both paths now
+  carry the same per-launch host dispatch overhead — the comparison is
+  production-faithful (each decoder layer is a separate dispatch on both paths).
 - **TFLOP/s formula uses the unpadded (K, N)** on both paths. K and N are padded
   internally to a multiple of `ring_size * TILE_SIZE` for ring divisibility, but
   the padded zeros aren't counted as useful flops.
@@ -101,19 +106,15 @@ BENCH_K=4096 BENCH_N=14336 BENCH_DTYPE=bfloat8_b BENCH_RECV_PER_BANK=8 \
   would follow K-sharded matmuls (WO, FF2) in a real TP deployment is not part
   of this bench.
 
-## Why worker-core wins per-op on this hardware
-
-The worker-core path's trace shape (`num_kernel_repeats=N` on the matmul kernel
-combined with `num_layers=N` on the prefetcher op) amortizes dispatch overhead
-to ~zero. The DRAM-core path captures N discrete matmul launches, so each
-matmul carries ~150-200 µs of dispatch overhead that dominates on these small
-decode-shape (M=32) matmuls.
+## Why per-op cost matters here
 
 The DRAM-core path was originally designed to win on shapes where push
 bandwidth bottlenecks the matmul (large N with many ring positions); on those
 shapes the per-block DMA dominates and dispatch overhead amortizes. The bench
 numbers here are decode-style (M=32) matmuls where neither push BW nor compute
-dominates — the per-op dispatch is the bottleneck.
+dominates — the per-op dispatch is the bottleneck. With both paths now traced
+as N discrete matmul launches, the comparison isolates push-bandwidth and
+compute differences rather than dispatch-overhead differences.
 
 For an apples-to-apples comparison of just the push throughput, see the BW
 bench: `tests/ttnn/unit_tests/operations/transformers/test_prefetcher_BH_bw_bench.py`.

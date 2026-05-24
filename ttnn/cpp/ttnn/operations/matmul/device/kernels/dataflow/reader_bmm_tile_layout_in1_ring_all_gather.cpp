@@ -85,8 +85,6 @@ void kernel_main() {
 
     uint32_t rt_args_idx = 0;
     constexpr bool needs_signaler = get_compile_time_arg_val(11) == 1;
-    // Benchmark-only: loop the per-batch body N times in a single op invocation. Default 1 = no-op.
-    constexpr uint32_t num_kernel_repeats = get_compile_time_arg_val(12);
     uint32_t core_type = get_arg_val<uint32_t>(rt_args_idx++);
     if (core_type == (uint32_t)CORE_TYPE::IDLE_CORE || core_type == (uint32_t)CORE_TYPE::HOP_CORE) {
         if constexpr (needs_signaler) {
@@ -112,7 +110,7 @@ void kernel_main() {
     constexpr uint32_t sync_cb = get_named_compile_time_arg_val("cb_sync");
     constexpr uint32_t sync_cb2 = get_named_compile_time_arg_val("cb_sync2");
     constexpr uint32_t remote_cb_id = get_named_compile_time_arg_val("cb_remote");
-    constexpr auto in1_args = TensorAccessorArgs<13>();
+    constexpr auto in1_args = TensorAccessorArgs<12>();
 
     const uint32_t in1_block_num_tiles = in1_block_height_in_tiles * in1_block_width_in_tiles;
 
@@ -138,9 +136,8 @@ void kernel_main() {
         dram_read_offset_bytes = dram_read_offset * in1_block_width_in_tiles * in1_single_tile_size_bytes;
     }
 
-    for (uint32_t r = 0; r < num_kernel_repeats; ++r) {
-        for (uint32_t b = 0; b < batch; ++b) {
-            cb_sync2.reserve_back(1);
+    for (uint32_t b = 0; b < batch; ++b) {
+        cb_sync2.reserve_back(1);
 #ifdef ENABLE_GLOBAL_CB
         experimental::remote_cb_wait_front(remote_cb_id, num_blocks);
 #endif
@@ -206,12 +203,11 @@ void kernel_main() {
 #endif
         // Signal Here
         if constexpr (needs_signaler) {
-            if (r == 0 && b == 0) {
+            if (b == 0) {
                 do_signaling(noc, rt_args_idx);
             }
         }
-        }
-    }  // num_kernel_repeats
+    }
 
 #ifdef ENABLE_GLOBAL_CB
     experimental::update_remote_cb_config_in_l1(remote_cb_id);

@@ -3,8 +3,8 @@
 # Usage: scripts/run_llama_matmul_sweep.sh [reps]
 #
 # Each shape edits out/bench_env and runs the matmul bench. Per-matmul us +
-# TFLOP/s are extracted and tabulated. Use BENCH_REPEATS=1000 (default) for
-# asymptotic numbers.
+# TFLOP/s are extracted and tabulated. Use BENCH_TRACE_REPEATS=1000 (default) for
+# longer trace replays.
 #
 # Llama-3.1-8B production on single Blackhole (per
 # models/tt_transformers/tt/prefetcher.py): num_receiver_cores=8 -> ring=64
@@ -14,7 +14,7 @@ set -u
 REPS=${1:-1000}
 RESULTS_FILE="out/llama_matmul_sweep_results.txt"
 {
-    echo "# Llama-3.1-8B matmul A/B sweep on single Blackhole, BENCH_REPEATS=$REPS"
+    echo "# Llama-3.1-8B matmul A/B sweep on single Blackhole, BENCH_TRACE_REPEATS=$REPS"
     echo "# Production ring=64 (8 banks x 8 recv/bank) for all shapes."
     echo "# Shape : DRAM-core (us/op, TFLOP/s) | Worker-core (us/op, TFLOP/s)"
     echo
@@ -35,7 +35,7 @@ SHAPES=(
 for shape in "${SHAPES[@]}"; do
     read -r label K N DTYPE RECV <<<"$shape"
     cat > out/bench_env <<EOF
-export BENCH_REPEATS=$REPS
+export BENCH_TRACE_REPEATS=$REPS
 export BENCH_K=$K
 export BENCH_N=$N
 export BENCH_DTYPE=$DTYPE

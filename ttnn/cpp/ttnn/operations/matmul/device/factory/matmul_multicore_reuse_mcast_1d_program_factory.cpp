@@ -1999,7 +1999,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
     bool untilize_out,
     const std::optional<const tt::tt_metal::experimental::GlobalCircularBuffer>& global_cb,
     uint32_t num_global_cb_receivers,
-    uint32_t num_kernel_repeats,
     const std::optional<tt::tt_metal::SubDeviceId>& sub_device_id,
     std::optional<CoreRangeSet> restricted_cores,
     std::optional<ttnn::experimental::ccl::MatmulFusedOpSignaler>& fused_op_signaler) {
@@ -2270,7 +2269,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
         (std::uint32_t)batch,       // batch
         (std::uint32_t)ring_size,   // ring_size
         (std::uint32_t)in0_signal_semaphore_id,
-        (std::uint32_t)num_kernel_repeats,  // num_kernel_repeats (benchmark-only loop count)
     };
 
     std::vector<uint32_t> in1_sender_writer_compile_time_args = {
@@ -2286,7 +2284,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
         (std::uint32_t)in1_block_width_num_pages,
         (std::uint32_t)in1_shard_width_in_dram,
         (std::uint32_t)fused_op_signaler.has_value(),
-        (std::uint32_t)num_kernel_repeats,  // num_kernel_repeats (benchmark-only loop count)
     };
     tt::tt_metal::TensorAccessorArgs(*in1_buffer).append_to(in1_sender_writer_compile_time_args);
 
@@ -2318,7 +2315,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
         untilize_out,             // untilize_out
         in1_is_dram_interleaved,  // in1_is_dram_interleaved
         in1_is_dram_sharded,      // in1_is_dram_sharded
-        num_kernel_repeats,       // num_kernel_repeats (benchmark-only loop count)
     };
     std::unordered_map<std::string, uint32_t> compute_named_compile_args = {
         {"cb_in0", src0_cb_index},
@@ -4860,7 +4856,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t matmul_multi_core_
     std::optional<ttnn::experimental::ccl::MatmulFusedOpSignaler>& fused_op_signaler,
     const std::optional<const tt::tt_metal::experimental::GlobalCircularBuffer>& global_cb,
     uint32_t num_global_cb_receivers,
-    uint32_t num_kernel_repeats,
     const std::optional<tt::tt_metal::SubDeviceId>& sub_device_id,
     uint32_t start_cb_index,
     std::optional<CoreRangeSet> restricted_cores) {
@@ -5037,7 +5032,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t matmul_multi_core_
             untilize_out,
             global_cb,
             num_global_cb_receivers,
-            num_kernel_repeats,
             sub_device_id,
             std::move(restricted_cores),
             fused_op_signaler);
@@ -5416,7 +5410,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t matmul_multi_core_
         fused_op_signaler,
         global_cb,
         config.num_global_cb_receivers,
-        config.num_kernel_repeats,
         sub_device_id,
         start_cb_index,
         std::move(restricted_cores));
@@ -5468,7 +5461,6 @@ MatmulMeshWorkloadMultiCoreReuseMcast1DProgramFactory::create_mesh_workload(
                 empty_signaler,
                 attributes.global_cb,
                 pc.num_global_cb_receivers,
-                pc.num_kernel_repeats,
                 attributes.sub_device_id,
                 tt::CBIndex::c_0,
                 std::nullopt);

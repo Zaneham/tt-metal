@@ -328,8 +328,7 @@ void py_module(nb::module_& mod) {
                bool gather_in0,
                CoreRangeSet hop_cores,
                std::size_t num_global_cb_receivers,
-               bool untilize_out,
-               std::size_t num_kernel_repeats) {
+               bool untilize_out) {
                 // Set out_block_h and out_block_w to defaults if they are not provided
                 std::size_t actual_out_block_h = out_block_h.value_or(per_core_M);
                 std::size_t actual_out_block_w = out_block_w.value_or(per_core_N);
@@ -349,8 +348,7 @@ void py_module(nb::module_& mod) {
                     gather_in0,
                     std::move(hop_cores),
                     num_global_cb_receivers,
-                    untilize_out,
-                    num_kernel_repeats);
+                    untilize_out);
             },
             nb::kw_only(),
             nb::arg("compute_with_storage_grid_size"),
@@ -367,8 +365,7 @@ void py_module(nb::module_& mod) {
             nb::arg("gather_in0").noconvert() = false,
             nb::arg("hop_cores").noconvert() = nb::cast(CoreRangeSet()),
             nb::arg("num_global_cb_receivers").noconvert() = 1,
-            nb::arg("untilize_out").noconvert() = false,
-            nb::arg("num_kernel_repeats").noconvert() = 1)
+            nb::arg("untilize_out").noconvert() = false)
         .def_rw(
             "compute_with_storage_grid_size",
             &MatmulMultiCoreReuseMultiCast1DProgramConfig::compute_with_storage_grid_size,
@@ -475,21 +472,12 @@ void py_module(nb::module_& mod) {
             the operation. This can be useful when the subsequent operation expects row-major
             data and can eliminate a separate untilization pass. Defaults to false.
         )doc")
-        .def_rw(
-            "num_kernel_repeats",
-            &MatmulMultiCoreReuseMultiCast1DProgramConfig::num_kernel_repeats,
-            R"doc(
-            Benchmark-only knob: run the matmul work N times in a single op invocation. Used to
-            amortize op-launch overhead when trace isn't available (e.g., slow dispatch). The
-            prefetcher's num_layers must be set to the same value so it pushes N copies of the
-            weight. Defaults to 1 (no-op).
-        )doc")
         .def("__repr__", [](const MatmulMultiCoreReuseMultiCast1DProgramConfig& config) {
             return fmt::format(
                 "MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size={}, in0_block_w={}, "
                 "out_block_h={}, out_block_w={}, out_subblock_h={}, out_subblock_w={}, per_core_M={}, per_core_N={}, "
                 "fuse_batch={}, fused_activation={}, mcast_in0={}, gather_in0={}, hop_cores={}, "
-                "num_global_cb_receivers={}, untilize_out={}, num_kernel_repeats={})",
+                "num_global_cb_receivers={}, untilize_out={})",
                 config.compute_with_storage_grid_size,
                 config.in0_block_w,
                 config.out_block_h,
@@ -504,8 +492,7 @@ void py_module(nb::module_& mod) {
                 config.gather_in0,
                 config.hop_cores,
                 config.num_global_cb_receivers,
-                config.untilize_out,
-                config.num_kernel_repeats);
+                config.untilize_out);
         });
 
     auto matmul_multi_core_reuse_multicast_dram_sharded_program_config =

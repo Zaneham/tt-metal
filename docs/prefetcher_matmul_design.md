@@ -120,15 +120,12 @@ The receiver matmul reader is
 Its in1 input arrives via the GCB:
 
 ```c++
-constexpr uint32_t num_blocks         = get_compile_time_arg_val(5);   // = ring_size
-constexpr uint32_t num_kernel_repeats = get_compile_time_arg_val(12);
+constexpr uint32_t num_blocks = get_compile_time_arg_val(5);   // = ring_size
 
-for (uint32_t r = 0; r < num_kernel_repeats; ++r) {
-  for (uint32_t b = 0; b < batch; ++b) {
-    experimental::remote_cb_wait_front(remote_cb_id, num_blocks);   // wait for ring_size pages
-    /* iterate ring positions, multiply, accumulate */
-    experimental::remote_cb_pop_front(remote_cb_id, num_blocks);
-  }
+for (uint32_t b = 0; b < batch; ++b) {
+  experimental::remote_cb_wait_front(remote_cb_id, num_blocks);   // wait for ring_size pages
+  /* iterate ring positions, multiply, accumulate */
+  experimental::remote_cb_pop_front(remote_cb_id, num_blocks);
 }
 ```
 
