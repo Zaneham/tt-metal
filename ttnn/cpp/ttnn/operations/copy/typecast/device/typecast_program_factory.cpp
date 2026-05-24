@@ -9,6 +9,7 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <tt-metalium/tt_align.hpp>
+#include <iostream>
 
 namespace ttnn::prim {
 
@@ -91,7 +92,11 @@ TypecastProgramFactory::cached_program_t TypecastProgramFactory::create(
     std::vector<tt::tt_metal::UnpackToDestMode> unpack_to_dest_mode(NUM_CIRCULAR_BUFFERS, tt::tt_metal::UnpackToDestMode::Default);
     if (args.preserve_fp32_precision) {
         unpack_to_dest_mode[src0_cb_index] = tt::tt_metal::UnpackToDestMode::UnpackToDestFp32;
+        std::cout << "Unpack to dest check " << std::endl;
+    } else {
+        std::cout << "NO Unpack to dest in factory" << std::endl;
     }
+    std::cout << "Fp32-destaccen" << args.fp32_dest_acc_en << std::endl;
 
     constexpr bool math_approx_mode = false;
 

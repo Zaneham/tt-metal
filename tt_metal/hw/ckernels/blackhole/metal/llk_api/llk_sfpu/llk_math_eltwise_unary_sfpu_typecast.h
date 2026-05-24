@@ -7,6 +7,7 @@
 #include "llk_math_eltwise_unary_sfpu_init.h"
 #include "llk_math_eltwise_unary_sfpu_params.h"
 #include "ckernel_sfpu_typecast.h"
+#include "api/debug/dprint.h"
 
 namespace ckernel {
 
@@ -15,6 +16,9 @@ inline void llk_math_eltwise_unary_sfpu_typecast(uint dst_index, VectorMode vect
     constexpr DataFormat in_format = static_cast<DataFormat>(IN_DTYPE);
     constexpr DataFormat out_format = static_cast<DataFormat>(OUT_DTYPE);
 
+    for (int i = 0; i < 100; i++) {
+        DPRINT << "ENTERED TYPECAST" << ENDL();
+    }
     if constexpr (in_format == DataFormat::Float16_b && out_format == DataFormat::UInt16) {
         _llk_math_eltwise_unary_sfpu_params_(
             ckernel::sfpu::calculate_typecast_fp32_to_uint16<APPROXIMATE, 8>, dst_index, vector_mode);
