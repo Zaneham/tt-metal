@@ -136,7 +136,7 @@ def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
         global_cb=gcb,
     )
     # Receiver: discard all pushed data.
-    ttnn.dram_prefetcher_consumer(
+    ttnn.experimental.test_dram_prefetcher_consumer(
         device,
         num_iters=num_iters_total,
         page_size_bytes=push_page_size,

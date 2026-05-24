@@ -13,7 +13,7 @@
 #include <tt-metalium/program.hpp>
 #include <tt-metalium/tt_metal.hpp>
 
-namespace ttnn {
+namespace ttnn::operations::experimental::test {
 
 namespace {
 
@@ -21,7 +21,7 @@ constexpr uint32_t kValidatorRemoteCBId = 31;
 
 }  // namespace
 
-void dram_prefetcher_validator(
+void test_dram_prefetcher_validator(
     tt::tt_metal::distributed::MeshDevice* mesh_device,
     uint32_t num_iters,
     uint32_t page_size_bytes,
@@ -45,7 +45,7 @@ void dram_prefetcher_validator(
     cb_config.remote_index(kValidatorRemoteCBId)
         .set_page_size(page_size_bytes)
         .set_data_format(tt::DataFormat::Float16_b);
-    experimental::CreateCircularBuffer(program, receiver_cores, cb_config, global_cb);
+    tt::tt_metal::experimental::CreateCircularBuffer(program, receiver_cores, cb_config, global_cb);
 
     const std::vector<uint32_t> compile_args = {kValidatorRemoteCBId, num_iters, print_stride};
     CreateKernel(
@@ -61,4 +61,4 @@ void dram_prefetcher_validator(
     tt::tt_metal::distributed::EnqueueMeshWorkload(mesh_device->mesh_command_queue(), workload, /*blocking=*/false);
 }
 
-}  // namespace ttnn
+}  // namespace ttnn::operations::experimental::test

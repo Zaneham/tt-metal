@@ -5,7 +5,7 @@
 """Push-bandwidth bench: DRAM-core prefetcher vs worker-core prefetcher.
 
 Mirrors `test_prefetcher_BH_bench.py`'s shape parametrization, but swaps the
-matmul receiver for `ttnn.dram_prefetcher_consumer` — a discard receiver
+matmul receiver for `ttnn.experimental.test_dram_prefetcher_consumer` — a discard receiver
 that does `wait_front(1) + pop_front(1)` in a loop and throws the data
 away. This isolates the prefetcher's push bandwidth from receiver-side
 compute (no matmul, no L1 budget for matmul CBs).
@@ -236,13 +236,17 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
 
     # Warmup: drain 1 layer's worth of pages — this also primes the cached MeshWorkload
     # so the binary write happens here, not inside the trace.
-    ttnn.dram_prefetcher_consumer(device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb)
+    ttnn.experimental.test_dram_prefetcher_consumer(
+        device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb
+    )
     ttnn.synchronize_device(device)
 
     # Trace: trace_repeats consumer ops, each draining one layer (= pages_per_layer pages).
     bench_trace = ttnn.begin_trace_capture(device, cq_id=0)
     for _ in range(trace_repeats):
-        ttnn.dram_prefetcher_consumer(device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb)
+        ttnn.experimental.test_dram_prefetcher_consumer(
+            device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb
+        )
     ttnn.end_trace_capture(device, bench_trace, cq_id=0)
 
     t0 = time.perf_counter()
@@ -373,12 +377,16 @@ def test_bw_workercore_prefetcher(device, op_name, shape):
     )
 
     # Warmup: drain 1 layer's worth of pages (also primes the cached consumer workload).
-    ttnn.dram_prefetcher_consumer(device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb)
+    ttnn.experimental.test_dram_prefetcher_consumer(
+        device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb
+    )
     ttnn.synchronize_device(device)
 
     bench_trace = ttnn.begin_trace_capture(device, cq_id=0)
     for _ in range(trace_repeats):
-        ttnn.dram_prefetcher_consumer(device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb)
+        ttnn.experimental.test_dram_prefetcher_consumer(
+            device, num_iters=pages_per_layer, page_size_bytes=page_size, global_cb=gcb
+        )
     ttnn.end_trace_capture(device, bench_trace, cq_id=0)
 
     t0 = time.perf_counter()
