@@ -10,16 +10,18 @@ parallelism in production (`is_prefetcher_supported` returns False at lower devi
 counts), tensor shapes are computed at the smallest device count where the worker
 prefetcher fits: 1B/3B at 1 device, 8B at 2 devices, 70B at 8 devices.
 
-Both paths share the same gather_in0 matmul kernels. Differences:
-- DRAM-core: trace captures N single-matmul launches; the DRISC prefetcher kernel
-  runs out-of-band via DramCorePrefetcherManager with `num_layers = 1 + N` (1 warmup
-  + N traced) and feeds one layer per matmul. The receiver matmul runs on a
-  contiguous receiver-grid sub-device.
-- Worker-core: trace captures one `dram_prefetcher` op (`num_layers=N`) followed by N
-  `ttnn.linear` launches. All ops run under FD inside the trace. Sender/receiver
-  layout from `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml`
-  (production col-0/col-7 senders, scattered receivers); matmul pinned to receivers
-  via `sub_device_id`.
+Both paths share the same gather_in0 matmul kernels and the same production scattered
+receiver layout / receiver sub-device / stall group setup. The only difference is
+which prefetcher is used:
+- DRAM-core: DRISC kernel on DRAM cores, started once via
+  `start_dram_core_prefetcher(num_layers=N+1)` before the trace, stopped after.
+- Worker-core: BRISC+NCRISC kernels on worker cores, dispatched once via
+  `ttnn.dram_prefetcher(num_layers=N+1)` before the trace.
+
+Both push N+1 layers (1 warmup + N traced); both traces contain only N matmul
+launches. Sender/receiver layout from `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml`
+(production col-0/col-7 senders, scattered receivers); matmul pinned to receivers
+via `sub_device_id`.
 
 Shape envs `BENCH_K / BENCH_N / BENCH_DTYPE / BENCH_RECV_PER_BANK` override the
 parametrize values for ad-hoc runs. `BENCH_TRACE_REPEATS` (default 100) controls the
@@ -31,9 +33,9 @@ table there was measured with the previous worker-core trace shape and is
 pending re-measurement after the move to N discrete `ttnn.linear` launches.
 
 Caveats:
-- Both paths now trace N single matmul dispatches (production-faithful: each decoder
-  layer is a separate dispatch). The worker-core path additionally captures one
-  `dram_prefetcher` op (`num_layers=N`) at the head of the trace.
+- Both paths trace exactly N single matmul dispatches; the prefetcher runs once
+  out-of-band ahead of the trace and is consumed by the warmup matmul + the N
+  traced matmuls (production-faithful: each decoder layer is a separate dispatch).
 - TFLOP/s uses unpadded (K, N) for both paths (the formula honors the actual matmul
   work; padding for ring divisibility doesn't count as useful flops).
 """
@@ -501,6 +503,7 @@ def test_bench_workercore_repeats(device, op_name, shape):
         pytest.skip("Worker-sender bench expects 8 unharvested DRAM banks")
 
     trace_repeats = int(os.environ.get("BENCH_TRACE_REPEATS", "100"))
+    num_prefetch_layers = trace_repeats + 1  # 1 warmup + trace_repeats inside the trace
     num_senders = _NUM_DRAM_BANKS
     ring_size = _RING_SIZE
     ring_cols = _RING_COLS
@@ -589,11 +592,9 @@ def test_bench_workercore_repeats(device, op_name, shape):
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
 
-    tt_addrs_cc = _build_tensor_addrs(1)
-    # One dram_prefetcher invocation with num_layers=N pushes N copies of the weight;
-    # N consecutive ttnn.linear launches inside the trace each consume one layer.
-    # addrs has one row per layer.
-    tt_addrs = _build_tensor_addrs(trace_repeats)
+    # One dram_prefetcher invocation with num_layers=num_prefetch_layers pushes that many
+    # copies of the weight; 1 warmup matmul + N traced matmul launches each consume one.
+    tt_addrs = _build_tensor_addrs(num_prefetch_layers)
 
     K_per_shard = _round_up(math.ceil(_K / ring_size), ttnn.TILE_SIZE)
     act_mem_config = ttnn.create_sharded_memory_config(
@@ -629,7 +630,8 @@ def test_bench_workercore_repeats(device, op_name, shape):
     )
 
     logger.info(
-        f"[workercore][{op_name}] K={_K} N={_N} ring={ring_size} gcb_size={gcb_size} " f"trace_repeats={trace_repeats}"
+        f"[workercore][{op_name}] K={_K} N={_N} ring={ring_size} gcb_size={gcb_size} "
+        f"trace_repeats={trace_repeats} num_prefetch_layers={num_prefetch_layers}"
     )
 
     def single_linear():
@@ -644,8 +646,13 @@ def test_bench_workercore_repeats(device, op_name, shape):
             sub_device_id=receiver_sub_device_id,
         )
 
-    # Correctness: dram_prefetcher pushes 1 layer, one matmul consumes it.
-    ttnn.dram_prefetcher([tt_weight, tt_addrs_cc], num_layers=1, global_cb=gcb)
+    # One bulk dram_prefetcher dispatch before the trace, mirroring the DRAM-core path's
+    # start_dram_core_prefetcher call. The kernel runs async on device and pushes
+    # num_prefetch_layers worth of pages; the warmup matmul + N traced matmul launches
+    # drain them as they arrive (GCB credit gates the producer/consumer pipeline).
+    ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=num_prefetch_layers, global_cb=gcb)
+
+    # Correctness + program-cache warmup: one real one-matmul launch.
     cc_out = single_linear()
     cc_torch = ttnn.to_torch(cc_out)
     expected = pt_act.float() @ pt_weight.float()
@@ -653,19 +660,8 @@ def test_bench_workercore_repeats(device, op_name, shape):
     logger.info(f"[workercore] PCC: {output_str}")
     assert passing, f"[workercore] PCC failed: {output_str}"
 
-    # Warmup outside the trace: prefetcher (num_layers=trace_repeats) + N matmuls.
-    # JIT/program-build lands here. The warmup also drains the trace_repeats layers
-    # so the trace-capture pass starts with a clean prefetcher state.
-    ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=trace_repeats, global_cb=gcb)
-    for _ in range(trace_repeats):
-        _ = single_linear()
-    ttnn.synchronize_device(device)
-
-    # Capture the bench trace: one dram_prefetcher (num_layers=N) feeds N matmul
-    # launches. Each matmul is a separate FD dispatch — host overhead per launch is
-    # what we're measuring against the DRAM-core path.
+    # Capture a trace of `trace_repeats` cached single-matmul dispatches and replay it once.
     bench_trace = ttnn.begin_trace_capture(device, cq_id=0)
-    ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=trace_repeats, global_cb=gcb)
     for _ in range(trace_repeats):
         bench_output = single_linear()  # Keep named so the output buffer stays alive.
     ttnn.end_trace_capture(device, bench_trace, cq_id=0)
