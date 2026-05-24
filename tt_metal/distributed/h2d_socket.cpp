@@ -370,15 +370,24 @@ void H2DSocket::write(void* data, uint32_t num_pages) {
     TT_FATAL(page_size_ > 0, "Page size must be set before writing.");
     uint32_t num_bytes = num_pages * page_size_;
     TT_FATAL(num_bytes <= fifo_curr_size_, "Cannot write more pages than the socket FIFO size.");
-    auto data_addr = aligned_data_buf_start_ + write_ptr_;
     this->reserve_bytes(num_bytes);
 
+    uint32_t num_pre_wrap_bytes =
+        (write_ptr_ + num_bytes > fifo_curr_size_) ? (fifo_curr_size_ - write_ptr_) : num_bytes;
+    uint32_t num_post_wrap_bytes = num_bytes - num_pre_wrap_bytes;
+
     if (h2d_mode_ == H2DMode::HOST_PUSH) {
-        pcie_writer(data, num_bytes, data_addr);
+        pcie_writer(data, num_pre_wrap_bytes, aligned_data_buf_start_ + write_ptr_);
+        if (num_post_wrap_bytes > 0) {
+            pcie_writer(static_cast<char*>(data) + num_pre_wrap_bytes, num_post_wrap_bytes, aligned_data_buf_start_);
+        }
         tt_driver_atomics::sfence();
     } else {
-        uint32_t* data_ptr = host_buffer_.get() + (write_ptr_ / sizeof(uint32_t));
-        std::memcpy(data_ptr, data, num_bytes);
+        uint32_t* pre_wrap_dst = host_buffer_.get() + (write_ptr_ / sizeof(uint32_t));
+        std::memcpy(pre_wrap_dst, data, num_pre_wrap_bytes);
+        if (num_post_wrap_bytes > 0) {
+            std::memcpy(host_buffer_.get(), static_cast<char*>(data) + num_pre_wrap_bytes, num_post_wrap_bytes);
+        }
     }
     this->push_bytes(num_bytes);
     this->notify_receiver();
