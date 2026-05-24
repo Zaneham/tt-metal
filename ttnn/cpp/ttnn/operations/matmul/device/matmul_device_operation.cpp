@@ -550,21 +550,13 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
                             num_recv,
                             ring_size);
 
-                        // Set equality on the logical receiver cores: the GCB must target exactly
-                        // the matmul's worker grid, not a superset/subset/shifted variant.
+                        // Semantic check: bank b must push to exactly the receivers at ring
+                        // positions [b*recv_per_bank, (b+1)*recv_per_bank). If satisfied, the
+                        // bank-to-receivers union also equals the activation grid as a set, so
+                        // we don't need a separate set-equality assertion (CoreRangeSet::operator==
+                        // compares ranges literally, which is brittle when one side is merged
+                        // into rectangles and the other is a flat list of single-core ranges).
                         const auto& act_grid = input_tensor_a.shard_spec().value().grid;
-                        TT_FATAL(
-                            gcb.receiver_cores() == act_grid,
-                            "global_cb.receiver_cores() must equal in0.shard_spec().grid. The "
-                            "prefetcher's receivers and the matmul's workers must be exactly the "
-                            "same set of logical cores.");
-
-                        // Ordering check: concatenating sender_receiver_core_mapping in iteration
-                        // order (which the prefetcher walks bank 0 .. bank N-1) and row-major-
-                        // enumerating each sender's receivers must reproduce the matmul's ring
-                        // walk through the activation grid. If they disagree, the bank b weight
-                        // slice lands at the wrong ring position and the output is wrong (but
-                        // wouldn't necessarily hang).
                         const auto ring_walk =
                             tt::tt_metal::corerange_to_cores(act_grid, std::nullopt, /*row_wise=*/true);
                         const auto& mapping = gcb.sender_receiver_core_mapping();

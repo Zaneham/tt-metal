@@ -274,18 +274,51 @@ def test_bench_dram_core_repeats(device, op_name, shape):
 
     trace_repeats = int(os.environ.get("BENCH_TRACE_REPEATS", "100"))
     num_prefetch_layers = trace_repeats + 1  # 1 warmup + trace_repeats inside the trace
-    # Prefer all available banks; receivers/bank may be raised so each DRAM bank's
-    # N-width splits evenly across the matmul receivers.
+    if device.dram_grid_size().x != 8:
+        pytest.skip("Production receiver layout requires 8 unharvested DRAM banks")
     num_dram_banks = _select_num_dram_banks(device.dram_grid_size().x)
     num_receivers_per_bank = _select_num_receivers_per_bank(num_dram_banks)
     ring_size = num_dram_banks * num_receivers_per_bank
     ring_cols = max(c for c in range(min(_NUM_DRAM_BANKS, ring_size), 0, -1) if ring_size % c == 0)
     ring_rows = ring_size // ring_cols
     k_padded = _round_up(_K, ring_size * ttnn.TILE_SIZE)
+    if num_dram_banks != _NUM_DRAM_BANKS or num_receivers_per_bank != _NUM_RECV_PER_BANK:
+        pytest.skip(
+            f"Production receiver layout requires {_NUM_DRAM_BANKS} banks x {_NUM_RECV_PER_BANK} recv/bank, "
+            f"got {num_dram_banks} x {num_receivers_per_bank}"
+        )
 
+    # Production scattered receiver layout (matches test_bench_workercore_repeats) so the
+    # matmul receiver/in0-gather NoC paths are identical between the two paths.
+    from models.tt_transformers.tt.prefetcher import generate_sender_receiver_mapping, ARCH_CONFIG
+
+    bh_cfg = ARCH_CONFIG["blackhole"]
+    raw_mapping = generate_sender_receiver_mapping(num_receivers_per_sender=num_receivers_per_bank)
+    left_y = bh_cfg["bank_ordered_y_coords"]["left"]
+    right_y = bh_cfg["bank_ordered_y_coords"]["right"]
+    left_col = bh_cfg["sender_cols"]["left"]
+    right_col = bh_cfg["sender_cols"]["right"]
+    ordered_senders = [(left_col, y) for y in left_y] + [(right_col, y) for y in right_y]
+    # Group production receivers by y-row, then sort rows so each group of 8 receivers
+    # occupies contiguous ring positions in the matmul's row-major walk. Then pair DRAM
+    # bank i with the i-th sorted y-row: bank i's N-slice lands at ring positions
+    # [i*recv_per_bank, (i+1)*recv_per_bank) — matching the matmul's expected layout.
+    receivers_by_y: dict = {}
+    for sx, sy in ordered_senders:
+        receivers_by_y.setdefault(sy, []).extend(raw_mapping[(sx, sy)])
+    sorted_ys = sorted(receivers_by_y.keys())
+    assert len(sorted_ys) == num_dram_banks, f"want {num_dram_banks} y-rows, got {len(sorted_ys)}"
+    receivers_per_y = [sorted(receivers_by_y[y]) for y in sorted_ys]  # row-major-sortable
     receiver_core_range_set = ttnn.CoreRangeSet(
-        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(ring_cols - 1, ring_rows - 1))}
+        [ttnn.CoreRange(ttnn.CoreCoord(rx, ry), ttnn.CoreCoord(rx, ry)) for row in receivers_per_y for rx, ry in row]
     )
+
+    # Pin the matmul to the receiver sub-device + stall group (matches worker-core test).
+    receiver_sub_device = ttnn.SubDevice([receiver_core_range_set])
+    sub_device_manager = device.create_sub_device_manager([receiver_sub_device], 0)
+    device.load_sub_device_manager(sub_device_manager)
+    receiver_sub_device_id = ttnn.SubDeviceId(0)
+    device.set_sub_device_stall_group([receiver_sub_device_id])
 
     torch.manual_seed(0xBE7)
     pt_weight = torch.zeros(1, 1, k_padded, _N)
@@ -338,8 +371,15 @@ def test_bench_dram_core_repeats(device, op_name, shape):
     # max_buffered_blocks=1 keeps GCB ~= one fifo-page, leaving room for matmul receiver
     # CBs in worker L1 (1.4 MB). Larger shapes (70B FF1/FF2) overflow at deeper GCBs.
     gcb_size = _gcb_size_capped(block_size_bytes, k=k_padded, ring_size=ring_size, max_buffered_blocks=1)
+    # Pair DRAM bank i with the receivers of the i-th sorted y-row so bank i pushes to
+    # ring positions [i*recv_per_bank, (i+1)*recv_per_bank) — required by the gather_in0
+    # matmul's bank-to-receivers ordering assertion.
     bank_to_receivers = [
-        (b, _bank_receivers_row_major(b, num_receivers_per_bank, ring_cols=ring_cols)) for b in range(num_dram_banks)
+        (
+            bank_idx,
+            ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(rx, ry), ttnn.CoreCoord(rx, ry)) for rx, ry in row]),
+        )
+        for bank_idx, row in enumerate(receivers_per_y)
     ]
     gcb = ttnn.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
 
@@ -387,6 +427,7 @@ def test_bench_dram_core_repeats(device, op_name, shape):
             dtype=ttnn.bfloat16,
             global_cb=gcb,
             optional_output_tensor=optional_output_tensor,
+            sub_device_id=receiver_sub_device_id,
         )
 
     # One long-lived DRISC stream: 1 warmup/correctness layer + trace_repeats traced layers.
