@@ -21,7 +21,7 @@
 #include <tt-metalium/core_coord.hpp>
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/global_circular_buffer.hpp>
-#include "impl/buffers/dram_subchannel.hpp"
+#include "distributed/mesh_device_impl.hpp"
 #include <tt-metalium/experimental/global_circular_buffer.hpp>
 
 #include "impl/kernels/kernel.hpp"  // DramConfig
@@ -84,7 +84,7 @@ protected:
         std::vector<std::pair<uint32_t, CoreRangeSet>> bank_to_receivers = {{bank_id, receiver_cores}};
         auto gcb = experimental::CreateGlobalCircularBufferWithDramSenders(
             mesh_device_, bank_to_receivers, gcb_size, BufferType::L1);
-        const uint32_t unused_sub = experimental::pick_unused_dram_subchannel(device_, bank_id);
+        const uint32_t unused_sub = mesh_device_->impl().pick_unused_dram_subchannel(bank_id);
         CoreCoord sender_logical{bank_id, unused_sub};
 
         // DRISC L1 layout.
