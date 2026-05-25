@@ -1,0 +1,185 @@
+name: "LLK Collect Test Durations"
+
+# Collects per-test compile timings for the LLK pytest suite using
+# `pytest --compile-producer --store-durations` and uploads the resulting
+# `.test_durations` JSON as an artifact. Consumed by `pytest-split` via
+# `--durations-path` in `tests/pipeline_reorg/llk_*_tests.yaml` so the matrix
+# shards balance by duration instead of by test count.
+#
+# This replaces the legacy `collect-test-durations.yml` workflow that lived
+# in `tenstorrent/tt-llk` (now `tt_metal/tt-llk/` inside this repo). That
+# workflow has failed every scheduled run since 2026-01-25 due to a small
+# number of device-touching tests crashing on the CPU-only durations runner;
+# the rewrite here applies the corresponding fixes:
+#   * `--ignore=test_fused.py` deselects the tests that try to init a
+#     Tenstorrent device at import time (incompatible with `--compile-producer`
+#     on a CPU-only runner by contract);
+#   * the pytest step is soft-tolerant of non-zero exit as long as
+#     `.test_durations` was successfully produced. This keeps the workflow
+#     green when a small number of unrelated test failures slip past the
+#     `--ignore` filter, without hiding a hard regression (missing /
+#     empty durations file still fails the step).
+
+on:
+  schedule:
+    # Sunday 02:00 UTC — matches the cadence of the legacy workflow and gives
+    # downstream consumers (smoke / e2e / perf YAMLs) a fresh dataset every
+    # week without competing with weekday CI for the xlarge runner pool.
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      archs:
+        description: "Which arch(s) to collect durations for"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - both
+          - wormhole
+          - blackhole
+
+permissions:
+  checks: write
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_protected && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLK_PATH: tt_metal/tt-llk
+
+jobs:
+  build-images:
+    name: "Docker setup"
+    uses: ./.github/workflows/build-docker-artifact.yaml
+    secrets: inherit
+
+  pick-archs:
+    name: "Pick arch matrix"
+    needs: build-images
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          ARCHS: ${{ inputs.archs || 'both' }}
+        run: |
+          case "$ARCHS" in
+            wormhole)  echo 'matrix=["wormhole"]'              >> "$GITHUB_OUTPUT" ;;
+            blackhole) echo 'matrix=["blackhole"]'             >> "$GITHUB_OUTPUT" ;;
+            *)         echo 'matrix=["wormhole","blackhole"]'  >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  collect-durations:
+    needs: [build-images, pick-archs]
+    name: "Collect ${{ matrix.arch }} test durations"
+    runs-on: tt-ubuntu-2204-xlarge-stable
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.pick-archs.outputs.matrix) }}
+    container:
+      image: ${{ needs.build-images.outputs.llk-ci-tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Install SFPI
+        shell: bash
+        working-directory: ${{ env.LLK_PATH }}
+        run: |
+          cd tests
+          ./setup_testing_env.sh
+          cd ..
+
+      - name: Compile all tests and collect durations
+        shell: bash
+        working-directory: ${{ env.LLK_PATH }}
+        env:
+          CHIP_ARCH: ${{ matrix.arch }}
+        run: |
+          cd tests/python_tests
+
+          # ci-quiet log mode is hard-coded here too: dramatic console-log
+          # reduction matters for a workflow that compiles ~250k test variants.
+          PYTEST_EXTRA="-q --override-ini=log_cli=false"
+
+          # Soft-tolerance contract: the consumer of this workflow only cares
+          # that `.test_durations` is populated. A handful of pytest failures
+          # (e.g. an unrelated regression on the durations runner) shouldn't
+          # bury an otherwise-good dataset under a red workflow status.
+          set +e
+          pytest $PYTEST_EXTRA --compile-producer -n 40 \
+                 -m "not quasar" \
+                 --ignore=test_fused.py \
+                 --store-durations \
+                 --no-debug-symbols \
+                 --tb=short --timeout=60 \
+                 --junitxml=pytest-duration-${{ matrix.arch }}.xml .
+          PYTEST_EC=$?
+          set -e
+
+          if [[ ! -s .test_durations ]]; then
+            echo "::error::.test_durations was not produced or is empty (pytest exit=$PYTEST_EC)"
+            exit 1
+          fi
+
+          ENTRIES=$(python3 -c "import json; print(len(json.load(open('.test_durations'))))")
+          BYTES=$(wc -c < .test_durations)
+          echo "Collected $ENTRIES test durations ($BYTES bytes, pytest exit=$PYTEST_EC)"
+
+          if [[ "$PYTEST_EC" -ne 0 ]]; then
+            echo "::warning::pytest exited $PYTEST_EC but .test_durations was written ($ENTRIES entries); treating as soft success"
+          fi
+
+      - name: Upload duration data
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: llk-test-durations-${{ matrix.arch }}
+          path: ${{ env.LLK_PATH }}/tests/python_tests/.test_durations
+          retention-days: 90
+          include-hidden-files: true
+
+      - name: Upload JUnit report
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: llk-test-durations-junit-${{ matrix.arch }}
+          path: ${{ env.LLK_PATH }}/tests/python_tests/pytest-duration-${{ matrix.arch }}.xml
+
+  collect-summary:
+    name: "Collection summary"
+    if: always()
+    needs:
+      - collect-durations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check collection results
+        uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}
+
+  report-status:
+    name: "Report status"
+    runs-on: ubuntu-latest
+    if: always()
+    needs: collect-summary
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+      - name: Report status
+        uses: ./.github/actions/report-failure
+        with:
+          test_name: "LLK collect test durations"
+          slack_bot_token: ${{ secrets.LLK_SLACK_REPORTING_BOT_TOKEN }}
+          slack_channel_id: ${{ secrets.LLK_CI_STATUS_CHANNEL_ID }}
+          status: ${{ needs.collect-summary.result }}
