@@ -523,7 +523,9 @@ def test_multimodal_demo_text(
             )
 
         if not resolved_targets:
-            logger.warning(f"No centralized CI vision perf targets for {perf_key}; skipping benchmark save and verify_perf.")
+            logger.warning(
+                f"No centralized CI vision perf targets for {perf_key}; skipping benchmark save and verify_perf."
+            )
         else:
             targets = {}
             if resolved_targets.get("prefill_t/s") is not None:
