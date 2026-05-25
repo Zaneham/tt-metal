@@ -135,7 +135,6 @@ jobs:
         timeout-minutes: ${{ matrix.test-group.timeout }}
         run: |
           mkdir -p generated/test_reports generated/test_logs
-          
           # "Validate perf and accuracy targets" step is used to validate performance,
           # otherwise use STRICT_PERF_TARGET_CHECKS=1 to raise exceptions from test itself 
           export STRICT_PERF_TARGET_CHECKS=0
