@@ -196,6 +196,66 @@ targets:
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
             note: "TODO gap tracked from active models_e2e_tests.yaml combo"
+      bh_p150:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_deskbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_llmbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_p300:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_quietbox_2:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
 
   mistral-7b:
     aliases: ["Mistral-7B", "mistralai/Mistral-7B-Instruct-v0.3"]
@@ -388,6 +448,36 @@ targets:
               top5: 97.0
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
+      bh_llmbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_quietbox_2:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
   llama3.1-70b:
     aliases: ["Llama-3.1-70B", "meta-llama/Llama-3.1-70B-Instruct"]
     skus:
@@ -592,6 +682,16 @@ targets:
             perf: {}
             accuracy: {}
             note: "TODO gap tracked from active models_e2e_tests.yaml combo"
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            note: "TODO gap tracked from active BH tier migration"
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
       bh_galaxy_perf:
@@ -876,6 +976,36 @@ targets:
               top5: 100.0
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
+      bh_llmbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
+      bh_quietbox_2:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
   llama3.3-70b-galaxy:
     aliases: ["llama3.3-70b-galaxy"]
     skus:
@@ -957,6 +1087,16 @@ targets:
               top5: 99.0
             owner_id: U03PUAKE719 # Miguel Tairum Cruz
             team: models
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U03PUAKE719 # Miguel Tairum Cruz
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
   qwen2.5-72b-vl:
     aliases: ["Qwen2.5-VL-72B", "Qwen/Qwen2.5-VL-72B-Instruct"]
     skus:
@@ -969,6 +1109,16 @@ targets:
             accuracy: {}
             owner_id: U07RY6B5FLJ # Gongyu Wang
             team: models
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
   qwen2.5-vl-32b:
     aliases: ["Qwen2.5-VL-32B", "Qwen/Qwen2.5-VL-32B-Instruct"]
     skus:
@@ -981,6 +1131,16 @@ targets:
             accuracy: {}
             owner_id: U07RY6B5FLJ # Gongyu Wang
             team: models
+      bh_loudbox:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U07RY6B5FLJ # Gongyu Wang
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
   qwq-32b:
     aliases: ["QwQ-32B", "Qwen/QwQ-32B"]
     skus:
@@ -1169,6 +1329,16 @@ targets:
             accuracy: {}
             owner_id: U0491KT8MNY # Mohamed Bahnas
             team: models
+      bh_p150:
+        entries:
+          - batch_size: null
+            seq_len: null
+            status: TODO
+            perf: {}
+            accuracy: {}
+            owner_id: U0491KT8MNY # Mohamed Bahnas
+            team: models
+            note: "TODO gap tracked from active BH tier migration"
   phi-3-mini:
     aliases: ["Phi-3-mini", "Phi-3-mini-128k-instruct", "microsoft/Phi-3-mini-128k-instruct"]
     skus:
