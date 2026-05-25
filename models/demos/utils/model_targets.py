@@ -48,9 +48,7 @@ def normalize_sku(sku: Any) -> str:
 
 def is_tolerance_key(metric_name: Any) -> bool:
     """Return True when a key denotes tolerance config, not a target metric."""
-    return isinstance(metric_name, str) and (
-        metric_name == "tolerance" or metric_name.endswith("_tolerance")
-    )
+    return isinstance(metric_name, str) and (metric_name == "tolerance" or metric_name.endswith("_tolerance"))
 
 
 def metric_tolerance_key_candidates(metric_name: str) -> list[str]:
