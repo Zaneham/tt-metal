@@ -603,6 +603,7 @@ def test_extract_metric_value_fails_for_ambiguous_unqualified_metric_name():
     except ValueError as exc:
         assert "ambiguous" in str(exc)
 
+
 def test_validate_perf_targets_stays_strict_even_when_test_soft_mode_env_is_set(tmp_path):
     (tmp_path / "generated/benchmark_data").mkdir(parents=True)
     (tmp_path / "models").mkdir(parents=True)
