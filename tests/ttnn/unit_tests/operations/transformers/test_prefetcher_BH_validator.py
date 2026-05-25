@@ -242,13 +242,29 @@ def test_validator_worker_sender(device, K, N, dtype, recv_per_bank, num_layers)
         device, K, N, dtype, recv_per_bank, num_layers
     )
 
-    ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=num_layers, global_cb=gcb)
-    ttnn.experimental.test_dram_prefetcher_validator(
-        device,
-        tt_weight,
-        num_layers=num_layers,
-        print_stride=max(1, ring_size // 4),
-        global_cb=gcb,
-    )
-    ttnn.synchronize_device(device)
+    # Sub-device isolation: ttnn.dram_prefetcher's writer_l1 ends in remote_cb_sender_barrier
+    # waiting for receiver acks, so the prefetcher program never completes until receivers run.
+    # Without sub-devices, fast dispatch serializes on the prefetcher and the validator never
+    # launches (deadlock). Stall-group set to the worker sub-device after enqueueing the
+    # prefetcher lets the validator dispatch concurrently. Mirrors prefetcher_common.run_op.
+    prefetcher_sub_device = ttnn.SubDevice([gcb.sender_cores()])
+    worker_sub_device = ttnn.SubDevice([gcb.receiver_cores()])
+    sub_device_manager = device.create_sub_device_manager([prefetcher_sub_device, worker_sub_device], 0)
+    device.load_sub_device_manager(sub_device_manager)
+    worker_sub_device_id = ttnn.SubDeviceId(1)
+    try:
+        ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=num_layers, global_cb=gcb)
+        device.set_sub_device_stall_group([worker_sub_device_id])
+        ttnn.experimental.test_dram_prefetcher_validator(
+            device,
+            tt_weight,
+            num_layers=num_layers,
+            print_stride=max(1, ring_size // 4),
+            global_cb=gcb,
+        )
+        ttnn.synchronize_device(device)
+        device.reset_sub_device_stall_group()
+    finally:
+        device.clear_loaded_sub_device_manager()
+        device.remove_sub_device_manager(sub_device_manager)
     logger.info(f"[validator-worker] K={K} N={N} recv_per_bank={recv_per_bank} num_layers={num_layers} OK")
