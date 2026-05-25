@@ -180,10 +180,7 @@ def _check_metric(
 
     upper_bound = expected_value * (1 + tolerance)
     if measured_value < expected_value:
-        return (
-            f"{metric_name}: measured={measured_value} < expected={expected_value} "
-            f"(tolerance={tolerance})"
-        )
+        return f"{metric_name}: measured={measured_value} < expected={expected_value} " f"(tolerance={tolerance})"
     if measured_value > upper_bound:
         return (
             f"{metric_name}: measured={measured_value} > upper_bound={upper_bound} "
