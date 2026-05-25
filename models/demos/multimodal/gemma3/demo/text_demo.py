@@ -1403,9 +1403,10 @@ def test_demo_text(
 
             expected_measurements = {}
             if resolved_ci_targets:
-                if resolved_ci_targets.get("prefill_time_to_token") is not None or resolved_ci_targets.get(
-                    "prefill_time_to_first_token"
-                ) is not None:
+                if (
+                    resolved_ci_targets.get("prefill_time_to_token") is not None
+                    or resolved_ci_targets.get("prefill_time_to_first_token") is not None
+                ):
                     expected_measurements["prefill_time_to_token"] = True
                 if resolved_ci_targets.get("decode_t/s") is not None:
                     expected_measurements["decode_t/s"] = True
