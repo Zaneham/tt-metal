@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
+#include "llk_sync.h"
 #include "llk_unpack_unary_operand.h"
 #include "llk_unpack_common_api.h"
 #include "api/dataflow/dataflow_buffer.h"
@@ -26,7 +27,17 @@ template <bool TRANSPOSE_EN, bool IS_32b_DEST_EN>
 inline void llk_unpack_A_init(const std::uint32_t operand) {
     const std::uint32_t operand_id = get_operand_id(operand);
 
-    _llk_unpack_unary_operand_init_<p_unpacr::UNP_A, TRANSPOSE_EN, IS_32b_DEST_EN>(operand_id);
+    // Unpacking 32-bit datums uses UNP_DEST, others use UNP_A.
+    const std::uint32_t dst_format = unpack_dst_format[operand_id];
+    if (dst_format == (std::uint32_t)DataFormat::Float32 || dst_format == (std::uint32_t)DataFormat::Int32) {
+        _llk_unpack_unary_operand_init_<p_unpacr::UNP_DEST, false /*TRANSPOSE_EN*/, IS_32b_DEST_EN>(operand_id);
+        // EXPERIMENT 2026-05-25: removed per-call SEC0/dest_register_offset reset.
+        // The reset is harmful for per-iter callers (copy_tile_init inside multi-tile
+        // SyncHalf transpose). Initial state is dest_register_offset=0 anyway. If a
+        // first-time reset is needed, it should be in a one-shot init helper.
+    } else {
+        _llk_unpack_unary_operand_init_<p_unpacr::UNP_A, TRANSPOSE_EN, IS_32b_DEST_EN>(operand_id);
+    }
 }
 
 /**
@@ -46,9 +57,14 @@ inline void llk_unpack_A_init(
     const std::uint32_t operand = 0) {
     const std::uint32_t operand_id = get_operand_id(operand);
 
-    static_assert(unpack_to_dest == false, "unpack_to_dest is not yet supported on Quasar");
     static_assert(acc_to_dest == false, "acc_to_dest is not yet supported on Quasar");
     static_assert(BType == BroadcastType::NONE, "Only BroadcastType::NONE is supported on Quasar right now");
+    // Unpack-to-dest on Quasar is reached via the simple llk_unpack_A_init<TRANSPOSE_EN, IS_32b_DEST_EN>
+    // overload above, which runtime-branches on unpack_dst_format. This BH/WH-signature overload exists
+    // for API compatibility and does not honor unpack_to_dest; assert against silent misuse.
+    static_assert(
+        unpack_to_dest == false,
+        "unpack_to_dest=true is not supported on this overload on Quasar; use the simple overload");
 
     // TODO (tt-metal #42916): Once runtime asserts are added, add asserts for unsupported features above and for valid
     // transpose_of_faces and within_face_16x16_transpose values
@@ -77,9 +93,30 @@ inline void llk_unpack_A(const std::uint32_t operand, const std::uint32_t tile_i
     const std::uint32_t l1_tile_index =
         local_dfb_interface.tc_slots[local_dfb_interface.tc_idx].rd_entry_idx + tile_index;
 
-    WAYPOINT("UPAW");
-    _llk_unpack_unary_operand_<p_unpacr::UNP_A>(l1_tile_index);
-    WAYPOINT("UPAD");
+    const std::uint32_t dst_format = unpack_dst_format[operand_id];
+    if (dst_format == (std::uint32_t)DataFormat::Float32 || dst_format == (std::uint32_t)DataFormat::Int32) {
+        // Producer of UNPACK_MATH. The math thread as middleman chain has two single counting
+        // sems with max=N each without an extra wait on MATH_PACK, unpack could race
+        // 2N iterations ahead of pack and overwrite a bank that pack has not read yet.
+        // Wait on both: math has drained (UNPACK_MATH < max) AND pack has drained
+        // (MATH_PACK < max). Combined this keeps unpack within N iterations of pack.
+        _llk_sync_wait_<p_stall::STALL_UNPACK>(semaphore::MATH_PACK, p_stall::STALL_ON_MAX);
+        _llk_sync_wait_<p_stall::STALL_UNPACK>(semaphore::UNPACK_MATH, p_stall::STALL_ON_MAX);
+
+        // WH/BH-style address coupling: snoop math's SEC1 (math owns the bank pointer).
+        // Unpack no longer maintains its own dest_register_offset — eliminates the
+        // 3-state-machine drift bug seen in multi-tile SyncHalf transpose.
+        ckernel::trisc::cfg[DEST_TARGET_REG_CFG_MATH_SEC0_Offset_ADDR32] =
+            ckernel::trisc::cfg[DEST_TARGET_REG_CFG_MATH_SEC1_Offset_ADDR32];
+
+        // Drain UNPACK0 before posting "filled" so the post does not race the writes math reads.
+        _llk_unpack_unary_operand_<p_unpacr::UNP_DEST>(l1_tile_index);
+        _llk_sync_post_<p_stall::UNPACK0>(semaphore::UNPACK_MATH);
+    } else {
+        WAYPOINT("UPAW");
+        _llk_unpack_unary_operand_<p_unpacr::UNP_A>(l1_tile_index);
+        WAYPOINT("UPAD");
+    }
 }
 
 /**
@@ -98,9 +135,14 @@ inline void llk_unpack_A(const std::uint32_t operand, const std::uint32_t tile_i
     const std::uint32_t l1_tile_index =
         g_dfb_interface[operand_id].tc_slots[g_dfb_interface[operand_id].tc_idx].rd_entry_idx + tile_index;
 
-    static_assert(unpack_to_dest == false, "unpack_to_dest is not yet supported on Quasar");
     static_assert(acc_to_dest == false, "acc_to_dest is not yet supported on Quasar");
     static_assert(BType == BroadcastType::NONE, "Only BroadcastType::NONE is supported on Quasar right now");
+    // Unpack-to-dest on Quasar is reached via the simple llk_unpack_A(operand, tile_index) overload
+    // above, which runtime-branches on unpack_dst_format. This BH/WH-signature overload exists for
+    // API compatibility and does not honor unpack_to_dest; assert against silent misuse.
+    static_assert(
+        unpack_to_dest == false,
+        "unpack_to_dest=true is not supported on this overload on Quasar; use the simple overload");
 
     WAYPOINT("UPAW");
     // For Quasar, the unp_sel field is ignored if binary_reuse_dest != EltwiseBinaryReuseDestType::NONE

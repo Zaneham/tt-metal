@@ -141,6 +141,32 @@ std::vector<uint16_t> gold_transpose_wh(const std::vector<uint16_t>& src_vec, co
     return transposed;
 };
 
+// 32-bit (Float32 bit-pattern or Int32) variant of gold_transpose_wh.
+// src_vec and result are untilized; shape is the input shape; output shape
+// is {shape[0], shape[1], shape[3], shape[2]}.
+std::vector<uint32_t> gold_transpose_wh(
+    const std::vector<uint32_t>& src_vec, const std::vector<uint32_t>& shape) {
+    vector<uint32_t> shapeT{shape[0], shape[1], shape[3], shape[2]};
+    TensAddr addr(shape);
+    TensAddr addrt(shapeT);
+
+    vector<uint32_t> transposed(src_vec.size());
+    for (int n = 0; n < shape[0]; n++) {
+        for (int c = 0; c < shape[1]; c++) {
+            for (int h = 0; h < shape[2]; h++) {
+                for (int w = 0; w < shape[3]; w++) {
+                    auto toffs = addrt.offs(n, c, w, h);
+                    auto offs = addr.offs(n, c, h, w);
+                    TT_FATAL(toffs < transposed.size() && offs < src_vec.size(), "Error");
+                    transposed[toffs] = src_vec[offs];
+                }
+            }
+        }
+    }
+
+    return transposed;
+}
+
 // input shape.x is assumed to have the full number of elements in bfloat16
 // src_vec is expected to be untilized
 // result is also untilized

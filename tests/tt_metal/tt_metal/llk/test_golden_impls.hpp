@@ -32,6 +32,8 @@ std::vector<uint32_t> gold_standard_tilize(const std::vector<uint32_t>& src_vec,
 // src_vec is expected to be untilized
 // result is also untilized
 std::vector<uint16_t> gold_transpose_wh(const std::vector<uint16_t>& src_vec, const std::vector<uint32_t>& shape);
+std::vector<uint32_t> gold_transpose_wh(
+    const std::vector<uint32_t>& src_vec, const std::vector<uint32_t>& shape);
 
 // input shape.x is assumed to have the full number of elements in bfloat16
 // src_vec is expected to be untilized
