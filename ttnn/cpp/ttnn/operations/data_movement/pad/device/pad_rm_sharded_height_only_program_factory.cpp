@@ -135,7 +135,10 @@ inline std::vector<std::pair<std::vector<uint32_t>, std::vector<uint32_t>>> get_
                 uint32_t worker_x_logical =
                     unpadded_grid_start.x + (row_major ? shard_grid_inner_dim_id : shard_grid_outer_dim_id);
 
-                if (worker_x_logical < num_cores_x_unpadded and worker_y_logical < num_cores_y_unpadded) {
+                // worker_*_logical are absolute logical coordinates. Compare against absolute unpadded-grid bounds.
+                uint32_t unpadded_grid_end_x = unpadded_grid_start.x + num_cores_x_unpadded;
+                uint32_t unpadded_grid_end_y = unpadded_grid_start.y + num_cores_y_unpadded;
+                if (worker_x_logical < unpadded_grid_end_x and worker_y_logical < unpadded_grid_end_y) {
                     auto core_physical =
                         device->worker_core_from_logical_core(CoreCoord{worker_x_logical, worker_y_logical});
                     // save stick id in a shard, and core coord into a map
