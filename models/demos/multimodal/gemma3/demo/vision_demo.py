@@ -557,7 +557,9 @@ def test_multimodal_demo_text(
                 "gemma-3-27b",  # Gemma-3 functional only - perf tests are not reliable yet
             ]
             if base_model_name not in skip_perf_verification:
-                expected_measurements = {key: True for key in ("prefill_t/s", "decode_t/s", "decode_t/s/u") if key in targets}
+                expected_measurements = {
+                    key: True for key in ("prefill_t/s", "decode_t/s", "decode_t/s/u") if key in targets
+                }
                 if expected_measurements:
                     verify_perf(
                         measurements,
