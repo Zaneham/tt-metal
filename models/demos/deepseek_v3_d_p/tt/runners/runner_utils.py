@@ -1,19 +1,103 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
-"""Debug/diagnostic utilities for the prefill runner.
+"""Shared utilities for the prefill runners.
 
-Only the metal-native helpers live here — pure ttnn, no upward dependencies
-on blaze (`_migration`, `_mpi_test_helpers`). Migration-coupled diagnostics
-live in blaze at `disaggregation/migration/python/prefill_runner_util.py`.
+Two categories of helpers live here:
 
-Import selectively — all helpers are gated on `PREFILL_DEBUG=1` at the
-caller; importing this module is cheap and safe in any context.
+1. Setup helpers — host/mesh/cache init shared between `prefill_runner.py`
+   (single-rank) and `pipeline_prefill_runner.py` (4-rank PP).
+2. Debug/diagnostic helpers — pure ttnn, no upward dependencies on blaze
+   (`_migration`, `_mpi_test_helpers`). Gated on `PREFILL_DEBUG=1` at the
+   caller. Migration-coupled diagnostics live in blaze at
+   `disaggregation/migration/python/prefill_runner_util.py`.
 """
 
+import os
+from pathlib import Path
+from typing import Optional
+
 from loguru import logger
+from transformers import AutoConfig
 
 import ttnn
+from models.common.utility_functions import is_blackhole
+from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
+from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_router_config
+
+# ---------------------------------------------------------------------------
+# Setup helpers (shared by prefill_runner.py and pipeline_prefill_runner.py)
+# ---------------------------------------------------------------------------
+
+DEFAULT_TTNN_CACHE = "/mnt/models/DeepSeek-R1-0528-Cache/DeepSeek-R1-0528-Cache-prefill_secure"
+DEFAULT_HOST_REF_CACHE = "/tmp/prefill_ref_cache"
+
+
+def setdefault_cache_env() -> None:
+    """Set TT_DS_PREFILL_TTNN_CACHE / TT_DS_PREFILL_HOST_REF_CACHE if unset.
+
+    TtPrefillTransformer reads these directly and aborts if unset. The
+    runners call this at import time so callers don't have to plumb them.
+    """
+    os.environ.setdefault("TT_DS_PREFILL_TTNN_CACHE", DEFAULT_TTNN_CACHE)
+    os.environ.setdefault("TT_DS_PREFILL_HOST_REF_CACHE", DEFAULT_HOST_REF_CACHE)
+
+
+def load_hf_config():
+    """Load the HuggingFace config pointed at by DEEPSEEK_V3_HF_MODEL."""
+    model_path = os.environ.get("DEEPSEEK_V3_HF_MODEL")
+    if not model_path:
+        raise RuntimeError("DEEPSEEK_V3_HF_MODEL must be set")
+    logger.info(f"Loading HF config from {model_path}")
+    return AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+
+def open_mesh_device(mesh_shape: tuple[int, int]) -> ttnn.MeshDevice:
+    """Configure fabric + open a mesh device of the requested shape.
+
+    Picks FABRIC_1D for sp<=8, FABRIC_2D otherwise — same heuristic the
+    standalone prefill runner used before this was factored out.
+    """
+    sp = mesh_shape[0]
+    fabric_config = ttnn.FabricConfig.FABRIC_1D if sp <= 8 else ttnn.FabricConfig.FABRIC_2D
+
+    fabric_router_config = create_fabric_router_config(
+        max_payload_size=DeepSeekV3Config.FABRIC_PAYLOAD_SIZE,
+    )
+
+    ttnn.set_fabric_config(
+        fabric_config,
+        ttnn.FabricReliabilityMode.RELAXED_INIT,
+        None,
+        ttnn.FabricTensixConfig.DISABLED,
+        ttnn.FabricUDMMode.DISABLED,
+        ttnn.FabricManagerMode.DEFAULT,
+        fabric_router_config,
+    )
+    return ttnn.open_mesh_device(mesh_shape=ttnn.MeshShape(*mesh_shape))
+
+
+def resolve_weight_cache_path(mesh_shape: tuple[int, int]) -> Optional[Path]:
+    """Resolve $TT_DS_PREFILL_TTNN_CACHE to the per-arch / per-shape subdir.
+
+    Mirrors the pytest weight_cache_path fixture so cache-populate runs and
+    inference runs see the same files. Returns None only if the env var is
+    explicitly set to empty.
+    """
+    env_cache = os.environ.get("TT_DS_PREFILL_TTNN_CACHE", DEFAULT_TTNN_CACHE)
+    if not env_cache:
+        return None
+    arch = "bh" if is_blackhole() else "wh"
+    num_devices = ttnn.get_num_devices()
+    sp, tp = mesh_shape
+    path = Path(env_cache) / f"deepseek_v3_d_p_{arch}_{num_devices}dev" / f"{sp}x{tp}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Debug/diagnostic helpers
+# ---------------------------------------------------------------------------
 
 
 def probe_dram_allocatable_base(mesh_device, label: str = "") -> None:

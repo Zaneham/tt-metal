@@ -145,6 +145,7 @@ class TtDistributedRmsNorm(LightweightModule):
         stats_memcfg: ttnn.MemoryConfig = None,
         weight_cache_path: Optional[Path] = None,
         cache_name_prefix: Optional[str] = None,
+        upstream_d2d_socket=None,
     ):
         """
         Initialize TtDistributedRmsNorm module.

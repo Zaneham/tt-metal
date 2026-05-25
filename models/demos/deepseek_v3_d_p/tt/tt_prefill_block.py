@@ -183,6 +183,8 @@ class TtPrefillBlock(LightweightModule):
         shared_expert_activations_dtype=ttnn.bfloat16,
         shared_expert_weights_dtype=ttnn.bfloat8_b,
         weight_cache_path: Optional[Path] = None,
+        upstream_d2d_socket=None,
+        downstream_d2d_socket=None,
     ):
         super().__init__()
         self.mesh_device = mesh_device
@@ -204,6 +206,7 @@ class TtPrefillBlock(LightweightModule):
             topology=topology,
             weight_cache_path=weight_cache_path,
             cache_name_prefix=f"layer_{layer_idx}.attn_norm",
+            upstream_d2d_socket=upstream_d2d_socket,
         )
 
         # --- MLA ---

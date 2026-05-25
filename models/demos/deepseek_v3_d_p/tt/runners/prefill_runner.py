@@ -7,14 +7,17 @@ import signal
 from pathlib import Path
 
 from loguru import logger
-from transformers import AutoConfig
 
 import ttnn
-from models.common.utility_functions import is_blackhole
-from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
-from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_router_config
 from models.demos.deepseek_v3_d_p.tt.moe.tt_moe_gate_prefill import GateComputeMode
 from models.demos.deepseek_v3_d_p.tt.runners.migration_setup import INVALID_SLOT_ID
+from models.demos.deepseek_v3_d_p.tt.runners.runner_utils import (
+    DEFAULT_TTNN_CACHE,
+    load_hf_config,
+    open_mesh_device,
+    resolve_weight_cache_path,
+    setdefault_cache_env,
+)
 from models.demos.deepseek_v3_d_p.tt.tt_deepseek_prefill_pipeline import (
     TtDeepSeekPrefillPipeline,
     TtPrefillPipelineConfig,
@@ -126,57 +129,7 @@ def _is_shutdown() -> bool:
     return _shutdown
 
 
-def _load_hf_config():
-    model_path = os.environ.get("DEEPSEEK_V3_HF_MODEL")
-    if not model_path:
-        raise RuntimeError("DEEPSEEK_V3_HF_MODEL must be set")
-    logger.info(f"Loading HF config from {model_path}")
-    return AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-
-
-def _open_mesh_device():
-    sp = GLOBAL_MESH_SHAPE[0]
-    fabric_config = ttnn.FabricConfig.FABRIC_1D if sp <= 8 else ttnn.FabricConfig.FABRIC_2D
-
-    fabric_router_config = create_fabric_router_config(
-        max_payload_size=DeepSeekV3Config.FABRIC_PAYLOAD_SIZE,
-    )
-
-    ttnn.set_fabric_config(
-        fabric_config,
-        ttnn.FabricReliabilityMode.RELAXED_INIT,
-        None,
-        ttnn.FabricTensixConfig.DISABLED,
-        ttnn.FabricUDMMode.DISABLED,
-        ttnn.FabricManagerMode.DEFAULT,
-        fabric_router_config,
-    )
-    return ttnn.open_mesh_device(mesh_shape=ttnn.MeshShape(*GLOBAL_MESH_SHAPE))
-
-
-DEFAULT_TTNN_CACHE = "/mnt/models/DeepSeek-R1-0528-Cache/DeepSeek-R1-0528-Cache-prefill_secure"
-DEFAULT_HOST_REF_CACHE = "/tmp/prefill_ref_cache"
-
-# TtPrefillTransformer reads these env vars directly and aborts if unset.
-# Export defaults here so the runner works without the caller having to set them.
-os.environ.setdefault("TT_DS_PREFILL_TTNN_CACHE", DEFAULT_TTNN_CACHE)
-os.environ.setdefault("TT_DS_PREFILL_HOST_REF_CACHE", DEFAULT_HOST_REF_CACHE)
-
-
-def _resolve_weight_cache_path() -> Path | None:
-    """Mirror the layout produced by the pytest weight_cache_path fixture so
-    we read the same files the cache-populate run wrote:
-      $TT_DS_PREFILL_TTNN_CACHE / deepseek_v3_d_p_{arch}_{N}dev / {sp}x{tp}
-    Defaults to DEFAULT_TTNN_CACHE; returns None only if explicitly set empty."""
-    env_cache = os.environ.get("TT_DS_PREFILL_TTNN_CACHE", DEFAULT_TTNN_CACHE)
-    if not env_cache:
-        return None
-    arch = "bh" if is_blackhole() else "wh"
-    num_devices = ttnn.get_num_devices()
-    sp, tp = GLOBAL_MESH_SHAPE
-    path = Path(env_cache) / f"deepseek_v3_d_p_{arch}_{num_devices}dev" / f"{sp}x{tp}"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+setdefault_cache_env()
 
 
 def run_standalone_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
@@ -417,16 +370,16 @@ def main() -> None:
             verify_kvpe_cache_layout,
         )
 
-    mesh_device = _open_mesh_device()
+    mesh_device = open_mesh_device(GLOBAL_MESH_SHAPE)
     if PREFILL_DEBUG:
         probe_dram_allocatable_base(mesh_device, "after-mesh-open")
 
-    hf_config = _load_hf_config()
+    hf_config = load_hf_config()
     hf_config.max_seq_len = MAX_SEQ_LEN
     if PREFILL_DEBUG:
         probe_dram_allocatable_base(mesh_device, "after-hf-config")
 
-    cache_path = _resolve_weight_cache_path()
+    cache_path = resolve_weight_cache_path(GLOBAL_MESH_SHAPE)
     pipeline_config = TtPrefillPipelineConfig(
         num_layers=NUM_LAYERS,
         max_seq_len=MAX_SEQ_LEN,
