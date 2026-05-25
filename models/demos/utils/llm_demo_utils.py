@@ -213,7 +213,9 @@ def verify_perf(
     expected_measurements = expected_measurements_default if expected_measurements is None else expected_measurements
     expected_measurements = dict(expected_measurements)
 
-    if expected_measurements.get(PREFILL_TIME_TO_FIRST_TOKEN_KEY) and expected_measurements.get(PREFILL_TIME_TO_TOKEN_KEY):
+    if expected_measurements.get(PREFILL_TIME_TO_FIRST_TOKEN_KEY) and expected_measurements.get(
+        PREFILL_TIME_TO_TOKEN_KEY
+    ):
         logger.warning(
             f"Both {PREFILL_TIME_TO_FIRST_TOKEN_KEY} and {PREFILL_TIME_TO_TOKEN_KEY} are enabled in expected_measurements; "
             f"using {PREFILL_TIME_TO_FIRST_TOKEN_KEY} and ignoring {PREFILL_TIME_TO_TOKEN_KEY}."
