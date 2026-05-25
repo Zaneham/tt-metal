@@ -113,6 +113,27 @@ Definitions:
 The on-receiver layout of one block is `block_height_in_tiles` contiguous
 K-rows, each `coalesced_num_pages * coalesced_page_size` bytes wide.
 
+### Per-block source tiles
+
+For block index `blk` (in `[0, num_blocks)`) pushed by sender bank `b` to its
+receiver with local index `r` (in `[0, num_receivers_per_sender)`), the page
+bytes correspond to the global-tensor tile range
+
+- K-rows: `[blk * k_block_w_tiles, (blk + 1) * k_block_w_tiles)`
+- N-cols: `[b * n_per_bank_tiles + r * n_per_recv_tiles, b * n_per_bank_tiles + (r + 1) * n_per_recv_tiles)`
+
+laid out K-row-major: row `h` of the receiver page contains tiles
+`(blk * k_block_w_tiles + h, b * n_per_bank_tiles + r * n_per_recv_tiles + n)`
+for `n` in `[0, n_per_recv_tiles)`, contiguous in K-row order.
+
+This holds verbatim for both prefetcher variants and across the fit-ladder
+sub-band/M-chunk paths — the receiver's per-block byte layout is
+sub-band/chunk-order invariant (see §6 for the DRAM-core proof). The
+DRAM-prefetcher validator
+(`tests/tt_metal/tt_metal/test_kernels/misc/gcb_validator_receiver.cpp`)
+relies on this mapping to derive expected bytes from the source tensor via
+`TensorAccessor`.
+
 ## 4. The receiver matmul contract
 
 The receiver matmul reader is

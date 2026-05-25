@@ -40,23 +40,30 @@ void bind_test_dram_prefetcher_consumer(nb::module_& mod) {
     ttnn::bind_function<"test_dram_prefetcher_validator", "ttnn.experimental.">(
         mod,
         R"doc(
-            Diagnostic receiver: wait_front(1) + DPRINT(first 16 bytes) + pop_front(1) for
-            num_iters iterations, then polls briefly for any extra pages (sender overshoot)
-            and DPRINTs success or DPRINTs + hangs on overflow. Used to debug prefetcher
-            push behavior without involving the matmul kernels.
-            Used for debugging purposes, please avoid to use in any production code.
+            Byte-for-byte validator receiver: for each pushed page, reads the expected
+            tile range from source_tensor via TensorAccessor and memcmps against the
+            received bytes. On any mismatch DPRINTs (layer, block, word) + the diverging
+            bytes and hangs the core; otherwise DPRINTs progress and a final OK. After
+            the expected num_layers * ring_size iterations, polls briefly for extra
+            pages (sender overshoot) and hangs on overflow.
+
+            The kernel derives its expected bytes from the (bank, receiver, block) ->
+            tile-range mapping documented in
+            docs/prefetcher_matmul_design.md §3 ("Per-block source tiles"). Used for
+            debugging purposes; please avoid in any production code.
 
             Args:
                 mesh_device: the MeshDevice to enqueue on.
-                num_iters (int): expected total pages each receiver should see.
-                page_size_bytes (int): receiver-side page size (must match the sender push size).
+                source_tensor (ttnn.Tensor): the same width-sharded DRAM tensor the
+                    prefetcher is being driven with.
+                num_layers (int): number of layers the prefetcher will push.
                 print_stride (int): DPRINT every Nth iter; first/last always logged. 0 = first/last only.
                 global_cb (GlobalCircularBuffer): worker-sender or DRAM-sender GCB.
         )doc",
         &test_dram_prefetcher_validator,
         nb::arg("mesh_device"),
-        nb::arg("num_iters"),
-        nb::arg("page_size_bytes"),
+        nb::arg("source_tensor"),
+        nb::arg("num_layers"),
         nb::arg("print_stride"),
         nb::kw_only(),
         nb::arg("global_cb"));

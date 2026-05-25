@@ -207,8 +207,8 @@ def test_validator_dram_sender(device, K, N, dtype, recv_per_bank, num_layers):
     ttnn.experimental.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=num_layers, global_cb=gcb)
     ttnn.experimental.test_dram_prefetcher_validator(
         device,
-        num_iters=num_iters_total,
-        page_size_bytes=push_page_size,
+        tt_weight,
+        num_layers=num_layers,
         print_stride=max(1, ring_size // 4),
         global_cb=gcb,
     )
@@ -245,8 +245,8 @@ def test_validator_worker_sender(device, K, N, dtype, recv_per_bank, num_layers)
     ttnn.dram_prefetcher([tt_weight, tt_addrs], num_layers=num_layers, global_cb=gcb)
     ttnn.experimental.test_dram_prefetcher_validator(
         device,
-        num_iters=num_iters_total,
-        page_size_bytes=push_page_size,
+        tt_weight,
+        num_layers=num_layers,
         print_stride=max(1, ring_size // 4),
         global_cb=gcb,
     )
