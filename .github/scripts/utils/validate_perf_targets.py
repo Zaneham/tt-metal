@@ -170,10 +170,7 @@ def _check_metric(
     if metric_name in LOWER_IS_BETTER_METRICS:
         lower_bound = expected_value * (1 - tolerance)
         if measured_value > expected_value:
-            return (
-                f"{metric_name}: measured={measured_value} > expected={expected_value} "
-                f"(tolerance={tolerance})"
-            )
+            return f"{metric_name}: measured={measured_value} > expected={expected_value} " f"(tolerance={tolerance})"
         if measured_value < lower_bound:
             return (
                 f"{metric_name}: measured={measured_value} < lower_bound={lower_bound} "
