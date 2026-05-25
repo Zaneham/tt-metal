@@ -383,11 +383,7 @@ def run_mamba_demo(
     )
     targets = {}
     if resolved_targets:
-        targets = {
-            key: float(value)
-            for key, value in resolved_targets.items()
-            if not is_tolerance_key(key)
-        }
+        targets = {key: float(value) for key, value in resolved_targets.items() if not is_tolerance_key(key)}
     else:
         logger.warning(
             "No centralized perf targets found for "
