@@ -10,6 +10,9 @@
 // All threads cooperate on dfb::buf_0 first (each handling its own strided
 // slice), then on dfb::buf_1, then buf_2, then buf_3. dfb.finish() at the end
 // of each DFB acts as the cross-thread barrier.
+//
+// DataflowBuffer / TensorAccessor objects are constructed at function scope
+// (matches the pattern in alias_dfb_producer.cpp).
 
 #include "api/dataflow/dataflow_buffer.h"
 #include "api/dataflow/noc.h"
@@ -24,24 +27,34 @@ static inline void produce_one_dfb(
     Noc& noc,
     uint32_t num_entries_per_producer,
     uint32_t num_producers,
-    uint32_t producer_idx,
-    bool implicit_sync) {
+    uint32_t producer_idx) {
     const uint32_t entry_size = dfb.get_entry_size();
     for (uint32_t tile_id = 0; tile_id < num_entries_per_producer; ++tile_id) {
         const uint32_t page_id = tile_id * num_producers + producer_idx;
-        if (implicit_sync) {
-#ifdef ARCH_QUASAR
-            noc.template async_read<Noc::TxnIdMode::ENABLED>(tensor_accessor, dfb, {.page_id = page_id}, {});
-#endif
-        } else {
-            dfb.reserve_back(1);
-            noc.async_read(tensor_accessor, dfb, entry_size, {.page_id = page_id}, {});
-            noc.async_read_barrier();
-            dfb.push_back(1);
-        }
+        dfb.reserve_back(1);
+        noc.async_read(tensor_accessor, dfb, entry_size, {.page_id = page_id}, {});
+        noc.async_read_barrier();
+        dfb.push_back(1);
     }
     dfb.finish();
 }
+
+#ifdef ARCH_QUASAR
+template <typename Dfb, typename Acc>
+static inline void produce_one_dfb_impl_sync(
+    Dfb& dfb,
+    const Acc& tensor_accessor,
+    Noc& noc,
+    uint32_t num_entries_per_producer,
+    uint32_t num_producers,
+    uint32_t producer_idx) {
+    for (uint32_t tile_id = 0; tile_id < num_entries_per_producer; ++tile_id) {
+        const uint32_t page_id = tile_id * num_producers + producer_idx;
+        noc.template async_read<Noc::TxnIdMode::ENABLED>(tensor_accessor, dfb, {.page_id = page_id}, {});
+    }
+    dfb.finish();
+}
+#endif
 
 void kernel_main() {
     constexpr uint32_t num_entries_per_producer = get_arg(args::num_entries_per_producer);
@@ -51,24 +64,26 @@ void kernel_main() {
     const uint32_t num_producers = get_num_threads();
     Noc noc;
 
-    {
-        DataflowBuffer dfb(dfb::buf_0);
-        const auto src = TensorAccessor(ta::src_0);
-        produce_one_dfb(dfb, src, noc, num_entries_per_producer, num_producers, producer_idx, implicit_sync);
-    }
-    {
-        DataflowBuffer dfb(dfb::buf_1);
-        const auto src = TensorAccessor(ta::src_1);
-        produce_one_dfb(dfb, src, noc, num_entries_per_producer, num_producers, producer_idx, implicit_sync);
-    }
-    {
-        DataflowBuffer dfb(dfb::buf_2);
-        const auto src = TensorAccessor(ta::src_2);
-        produce_one_dfb(dfb, src, noc, num_entries_per_producer, num_producers, producer_idx, implicit_sync);
-    }
-    {
-        DataflowBuffer dfb(dfb::buf_3);
-        const auto src = TensorAccessor(ta::src_3);
-        produce_one_dfb(dfb, src, noc, num_entries_per_producer, num_producers, producer_idx, implicit_sync);
+    DataflowBuffer dfb_0(dfb::buf_0);
+    DataflowBuffer dfb_1(dfb::buf_1);
+    DataflowBuffer dfb_2(dfb::buf_2);
+    DataflowBuffer dfb_3(dfb::buf_3);
+    const auto src_0 = TensorAccessor(ta::src_0);
+    const auto src_1 = TensorAccessor(ta::src_1);
+    const auto src_2 = TensorAccessor(ta::src_2);
+    const auto src_3 = TensorAccessor(ta::src_3);
+
+    if constexpr (implicit_sync) {
+#ifdef ARCH_QUASAR
+        produce_one_dfb_impl_sync(dfb_0, src_0, noc, num_entries_per_producer, num_producers, producer_idx);
+        produce_one_dfb_impl_sync(dfb_1, src_1, noc, num_entries_per_producer, num_producers, producer_idx);
+        produce_one_dfb_impl_sync(dfb_2, src_2, noc, num_entries_per_producer, num_producers, producer_idx);
+        produce_one_dfb_impl_sync(dfb_3, src_3, noc, num_entries_per_producer, num_producers, producer_idx);
+#endif
+    } else {
+        produce_one_dfb(dfb_0, src_0, noc, num_entries_per_producer, num_producers, producer_idx);
+        produce_one_dfb(dfb_1, src_1, noc, num_entries_per_producer, num_producers, producer_idx);
+        produce_one_dfb(dfb_2, src_2, noc, num_entries_per_producer, num_producers, producer_idx);
+        produce_one_dfb(dfb_3, src_3, noc, num_entries_per_producer, num_producers, producer_idx);
     }
 }

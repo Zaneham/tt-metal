@@ -3,14 +3,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Metal 2.0 (declarative API) intra-tensix self-loop compute kernel.
-// Parallel to ../dfb_t6_intra.cpp — uses named CTAs and dfb::self binding.
+// Parallel to ../dfb_t6_intra.cpp — uses named CTAs.
 //
-// One DFB on a Tensix cluster, binding the same DFB as PRODUCER + CONSUMER on
-// this kernel: M2 infers tensix_scope=INTRA from that binding. PACK TRISC
+// One DFB on a Tensix cluster, binding the same DFB as PRODUCER ("out") and
+// CONSUMER ("in") on this kernel: M2 infers tensix_scope=INTRA. PACK TRISC
 // increments each word by 1 before push_back; UNPACK TRISC increments by 1
 // before pop_front. Net per-word delta = +2.
+//
+// Both bindings must use DISTINCT local_accessor_names ("out" / "in"), even
+// though they resolve to the same DFB — M2 maps duplicate names oddly for INTRA
+// (only one Neo's slice gets touched). Reference dfb::out only.
 
-#include "api/compute/common.h"
 #include "api/dataflow/dataflow_buffer.h"
 #include "experimental/kernel_args.h"
 
@@ -18,7 +21,8 @@ void kernel_main() {
     constexpr uint32_t entries_per_neo = get_arg(args::entries_per_neo);
     constexpr uint32_t words_per_entry = get_arg(args::words_per_entry);
 
-    DataflowBuffer dfb(dfb::self);
+    // Both PRODUCER (out) and CONSUMER (in) bindings resolve to the same DFB.
+    DataflowBuffer dfb(dfb::out);
 
 #ifdef UCK_CHLKC_UNPACK
     uint32_t trisc_id = ckernel::csr_read<ckernel::CSR::TRISC_ID>();
