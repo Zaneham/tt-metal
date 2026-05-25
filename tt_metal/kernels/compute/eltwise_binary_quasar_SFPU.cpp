@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: © 2023 Tenstorrent USA, Inc.
+// SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,35 +21,29 @@ void kernel_main() {
     DataflowBuffer dfb_in1(dfb::in1);
     DataflowBuffer dfb_out(dfb::out);
 
-    // One-time HW init: dest dvalid chain (unpack -> SFPU -> pack) and unpack/pack config.
-    sfpu_unpack_to_dest_hw_init(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
+    binary_op_init_common(dfb_in0.get_id(), dfb_in1.get_id(), dfb_out.get_id());
 #ifdef SFPU_OP_INIT_0
     SFPU_OP_INIT_0
 #endif
 
     for (uint32_t block = 0; block < per_core_block_cnt; ++block) {
-        // Wait for reader to produce both operands; reserve output slots for compute.
         dfb_in0.wait_front(per_core_block_size);
         dfb_in1.wait_front(per_core_block_size);
         dfb_out.reserve_back(per_core_block_size);
 
-        // Per-tile: unpack LHS/RHS to DST[0]/DST[1], run SFPU op, pack DST[0].
-        // Re-init before each unpack so the unpacker points at the right input DFB.
         for (uint32_t i = 0; i < per_core_block_size; ++i) {
-            copy_tile_to_dst_unp_dest_init_short(dfb_in0.get_id());
-            unpack_tile_to_dest(dfb_in0.get_id(), i, 0);
-            copy_tile_to_dst_unp_dest_init_short(dfb_in1.get_id());
-            unpack_tile_to_dest(dfb_in1.get_id(), i, 1);
-            unpack_tile_to_dest_section_done();
+            acquire_dst();
+            copy_tile_to_dst_init_short(dfb_in0.get_id());
+            copy_tile(dfb_in0.get_id(), i, 0);
+            copy_tile_to_dst_init_short(dfb_in1.get_id());
+            copy_tile(dfb_in1.get_id(), i, 1);
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif
-            sfpu_op_dest_section_done();
-            pack_tile<true>(0, dfb_out.get_id(), i);
-            pack_tile_dest_dvalid_section_done();
+            pack_tile(0, dfb_out.get_id());
+            release_dst();
         }
 
-        // Release consumed inputs and publish completed output tiles.
         dfb_in0.pop_front(per_core_block_size);
         dfb_in1.pop_front(per_core_block_size);
         dfb_out.push_back(per_core_block_size);
