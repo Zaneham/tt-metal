@@ -91,21 +91,6 @@ static inline TensorSpec make_flat_dram_tensor_spec(uint32_t page_size_bytes, ui
     return TensorSpec(Shape{num_pages, elements_per_page}, tensor_layout);
 }
 
-// Build a single-page L1 INTERLEAVED TensorSpec for use as a borrowed-memory DFB
-// backing tensor. Single page is mandatory: AttachBorrowedDFBBuffers's per-bank
-// size check compares the DFB total (entry_size * num_entries) against the
-// tensor's aligned_size_per_bank(). Multi-page interleaved L1 splits the storage
-// across banks, making each bank's slice smaller than the DFB total → attach
-// fails. Single page = single bank = aligned_size_per_bank equals the whole
-// allocation.
-static inline TensorSpec make_flat_l1_tensor_spec_for_borrow(uint32_t total_bytes) {
-    const uint32_t total_words = total_bytes / sizeof(uint32_t);
-    auto page_config = PageConfig(Layout::ROW_MAJOR);
-    auto memory_config = MemoryConfig{TensorMemoryLayout::INTERLEAVED, BufferType::L1};
-    auto tensor_layout = TensorLayout(DataType::UINT32, page_config, memory_config);
-    return TensorSpec(Shape{1, total_words}, tensor_layout);
-}
-
 // Build a Gen2 DM KernelSpec.
 static inline m2::KernelSpec make_dm_kernel(
     const std::string& unique_id, const std::string& source_path, uint8_t num_threads = 1) {
@@ -129,10 +114,6 @@ static inline m2::KernelSpec make_compute_kernel(
         .config_spec = m2::ComputeConfiguration{},
     };
 }
-
-// Sleep before allocating a second program in the same fixture — gives emu time
-// to release prior state. Pattern reused from legacy D3 test.
-static inline void emu_cooldown() { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
 
 // =====================================================================================
 // A1: DM → DFB → Tensix(eltwise_copy / relu) → DFB → DM identity / relu
@@ -1794,7 +1775,7 @@ TEST_P(DFBImplicitSyncParamFixture_2_0, DMTest4xDFB_3Sx3S_2_0) {
         M2SeqDFBSpec{m2::DFBAccessPattern::STRIDED},
         M2SeqDFBSpec{m2::DFBAccessPattern::STRIDED},
         M2SeqDFBSpec{m2::DFBAccessPattern::STRIDED}};
-    run_sequential_4_dfbs_2_0(this->devices_.at(0), dfbs, /*num_p=*/3, /*num_c=*/3, GetParam());
+    run_sequential_4_dfbs_2_0(this->devices_.at(0), dfbs, /*num_producers=*/3, /*num_consumers=*/3, GetParam());
 }
 
 TEST_P(DFBImplicitSyncParamFixture_2_0, DMTest4xDFB_Mixed_2_0) {
@@ -1808,7 +1789,7 @@ TEST_P(DFBImplicitSyncParamFixture_2_0, DMTest4xDFB_Mixed_2_0) {
         M2SeqDFBSpec{m2::DFBAccessPattern::STRIDED},
         M2SeqDFBSpec{m2::DFBAccessPattern::ALL},
         M2SeqDFBSpec{m2::DFBAccessPattern::ALL}};
-    run_sequential_4_dfbs_2_0(this->devices_.at(0), dfbs, /*num_p=*/3, /*num_c=*/3, GetParam());
+    run_sequential_4_dfbs_2_0(this->devices_.at(0), dfbs, /*num_producers=*/3, /*num_consumers=*/3, GetParam());
 }
 
 // =====================================================================================
