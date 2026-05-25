@@ -6,6 +6,7 @@
 
 #include <cstdint>
 
+#include "api/debug/dprint.h"
 #include "ckernel.h"
 #include "ckernel_defs.h"
 #include "ckernel_globals.h"
@@ -77,6 +78,7 @@ inline void _llk_unpack_A_mop_config_(
         }
         else
         {
+            DPRINT << "Inside mop config, unpack to dest and 32 bit input , srca to dest " << ENDL();
             const std::uint32_t outerloop     = num_faces;
             constexpr std::uint32_t innerloop = 1;
             ckernel_template tmp(outerloop, innerloop, unpack_srca_to_dest);
@@ -164,6 +166,7 @@ inline void _llk_unpack_A_mop_config_(
         {
             if constexpr (acc_to_dest)
             {
+                DPRINT << "Unpack mop acc to dest " << ENDL();
                 static constexpr std::uint32_t unpack_srca_reuse =
                     (binary_reuse_dest == EltwiseBinaryReuseDestType::DEST_TO_SRCA) ? unpack_srca_set_dvalid : unpack_srca;
 
@@ -177,6 +180,7 @@ inline void _llk_unpack_A_mop_config_(
             }
             else
             {
+                DPRINT << "Unpack mop no acc to dest " << ENDL();
                 const std::uint32_t outerloop     = num_faces;
                 constexpr std::uint32_t innerloop = 1;
                 ckernel_template tmp(outerloop, innerloop, unpack_srcb_set_dvalid);
@@ -228,7 +232,12 @@ inline void _llk_unpack_A_init_(
     // TODO NC: Move to TRISC1 tt-metal#36411
     if constexpr (BType != BroadcastType::NONE && unpack_to_dest)
     {
+        DPRINT << "Debug bit 11 disabling from unpack " << ENDL();
         _llk_unpack_dbg_feature_disable_();
+    }
+    else
+    {
+        DPRINT << "Did not to8uch debug bit 11 from unpack but unpack_to_dest " << unpack_to_dest << ENDL();
     }
     _llk_unpack_A_mop_config_<BType, acc_to_dest, binary_reuse_dest, unpack_to_dest>(transpose_of_faces > 0, num_faces, unpack_src_format, unpack_dst_format);
 }
@@ -249,6 +258,7 @@ template <
     bool unpack_to_dest                          = false>
 inline void _llk_unpack_A_(const std::uint32_t address, const std::uint32_t unpack_src_format = 0, const std::uint32_t unpack_dst_format = 0)
 {
+    DPRINT << "UNPACK to dest in llk_unpack_A" << unpack_to_dest << ENDL();
     LLK_ASSERT(is_valid_L1_address(address), "L1 address must be in valid L1 memory region");
 
     // Clear z/w start counters
@@ -279,6 +289,7 @@ inline void _llk_unpack_A_(const std::uint32_t address, const std::uint32_t unpa
     {
         if (is_32bit_input(unpack_src_format, unpack_dst_format))
         {
+            DPRINT << "In unpack a , in 32 bit input " << ENDL();
             set_dst_write_addr(unp_cfg_context, unpack_dst_format);
             wait_for_dest_available();
         }
@@ -297,6 +308,7 @@ inline void _llk_unpack_A_(const std::uint32_t address, const std::uint32_t unpa
     {
         if (is_32bit_input(unpack_src_format, unpack_dst_format))
         {
+            DPRINT << "In unpack a , in 32 bit input work done " << ENDL();
             unpack_to_dest_tile_done(unp_cfg_context);
         }
     }
