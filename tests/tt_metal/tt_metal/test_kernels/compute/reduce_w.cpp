@@ -50,7 +50,7 @@ void kernel_main() {
             // tiles are expected to be coming in in NCHW order (W-contiguous)
             // reducing in W means out[h][0] = sum(w=0..W-1, in[h][w])
             // in this case we just sequentially add to accumulator all the W-tiles in a row
-            acquire_dst();
+            tile_regs_acquire();
             for (uint32_t wt = 0; wt < Wt; ++wt) {
 #ifdef ARCH_QUASAR
                 dfb_in.wait_front(onetile);
@@ -76,6 +76,8 @@ void kernel_main() {
                 cb0.pop_front(onetile);
 #endif
             }
+            tile_regs_commit();
+            tile_regs_wait();
 #ifdef ARCH_QUASAR
             dfb_out.reserve_back(onetile);
             pack_tile(reduce_dst_idx, dfb_out.get_id());
@@ -85,7 +87,7 @@ void kernel_main() {
             pack_tile(reduce_dst_idx, tt::CBIndex::c_16);
             cb16.push_back(onetile);
 #endif
-            release_dst();
+            tile_regs_release();
         }
     }
     reduce_uninit();

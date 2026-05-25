@@ -49,32 +49,40 @@ void kernel_main() {
         DataflowBuffer dfb_out(1);
 #endif
         for (uint32_t b = 0; b < per_core_tile_cnt; ++b) {
-            acquire_dst();
+            tile_regs_acquire();
 
             dfb_in.wait_front(1);
             dfb_out.reserve_back(1);
             copy_tile(dfb_in.get_id(), 0, 0);
+
+            tile_regs_commit();
+            tile_regs_wait();
+
             pack_tile(0, dfb_out.get_id());
             dfb_in.pop_front(1);
             dfb_out.push_back(1);
 
-            release_dst();
+            tile_regs_release();
         }
     } else {
 #ifndef ARCH_QUASAR
         CircularBuffer cb0(tt::CBIndex::c_0);
         CircularBuffer cb16(tt::CBIndex::c_16);
         for (uint32_t b = 0; b < per_core_tile_cnt; ++b) {
-            acquire_dst();
+            tile_regs_acquire();
 
             cb0.wait_front(1);
             cb16.reserve_back(1);
             copy_tile(tt::CBIndex::c_0, 0, 0);
+
+            tile_regs_commit();
+            tile_regs_wait();
+
             pack_tile(0, tt::CBIndex::c_16);
             cb0.pop_front(1);
             cb16.push_back(1);
 
-            release_dst();
+            tile_regs_release();
         }
 #endif
     }
