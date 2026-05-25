@@ -23,7 +23,6 @@ void kernel_main() {
 
     // All Gather specific
     constexpr uint32_t ring_size = get_compile_time_arg_val(3);
-    // Compile arg index 4 is the in0 signal semaphore id (read below as a Semaphore<>).
 
     // Runtime args
     uint32_t rt_args_idx = 0;
@@ -99,9 +98,7 @@ void kernel_main() {
     }
 
     if (!is_hop_core) {
-        // in0 ring-gather happens once; pre-push (ring_size-1) shards for every remaining
-        // (batch - 1) consumer iteration of compute / in1.
-        for (uint32_t b = 0; b < batch - 1; ++b) {
+        for (uint32_t b = 0; b < batch - 1; ++b) {  // for rest batches, not need to gather in0 anymore
             cb_in2.reserve_back((ring_size - 1) * shard_size_in_tiles);
             cb_in2.push_back((ring_size - 1) * shard_size_in_tiles);
         }

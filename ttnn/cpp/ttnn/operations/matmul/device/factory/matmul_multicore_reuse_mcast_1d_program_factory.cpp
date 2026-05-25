@@ -2006,9 +2006,8 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
     const auto num_output_cb = out_buffers.size();
     const auto batch = b_tensors.size();
     const bool in1_is_dram_interleaved = in1_buffer->is_dram() && !b.is_sharded();
-    // When a (DRAM-sender) GCB is in use, b lives in DRAM but the matmul reads it from c_31 via
-    // the receiver-side CB attachment — not via direct DRAM reads.
-    const bool in1_is_dram_sharded = in1_buffer->is_dram() && b.is_sharded() && !global_cb.has_value();
+    const bool in1_is_dram_sharded =
+        in1_buffer->is_dram() && b.is_sharded() && !global_cb.has_value();  // read from DRAM directly
 
     /* Core setup */
     constexpr bool row_major = true;
@@ -2058,7 +2057,6 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
     bool packer_l1_acc_en = packer_l1_acc && num_blocks > 1;
 
     bool use_global_cb = global_cb.has_value();
-    const uint32_t effective_global_cb_size = use_global_cb ? global_cb->size() : 0;
 
     // if fp32 enabled then we pack fp32 in l1, if not, then we pack fp16 in l1
     tt::DataFormat interm0_data_format = packer_l1_acc_en
@@ -2151,7 +2149,7 @@ MatmulMultiCoreReuseMcast1DProgramFactory::shared_variables_t process_gather_in0
     if (use_global_cb) {
         uint32_t in1_block_size_bytes = in1_single_tile_size * in1_block_num_tiles;
         tt_metal::CircularBufferConfig remote_cb_config =
-            tt_metal::CircularBufferConfig((effective_global_cb_size / in1_block_size_bytes) * in1_block_size_bytes);
+            tt_metal::CircularBufferConfig((global_cb->size() / in1_block_size_bytes) * in1_block_size_bytes);
         remote_cb_config.remote_index(remote_cb_index)
             .set_page_size(in1_block_size_bytes)
             .set_data_format(in1_data_format);

@@ -9,7 +9,7 @@
 - `BENCH_TRACE_REPEATS=100`.
 - `dispatch_core_axis = DispatchCoreAxis.COL` (matches the canonical
   `test_prefetcher_BH.py` model test).
-- Receiver: `ttnn.dram_prefetcher_consumer` — a discard kernel that runs
+- Receiver: `ttnn.experimental.test_dram_prefetcher_consumer` — a discard kernel that runs
   `wait_front(1) / pop_front(1)` for `num_iters` iterations. No matmul,
   no L1 budget for matmul CBs. This isolates the prefetcher's push
   bandwidth from any receiver-side compute.

@@ -11,11 +11,6 @@
 
 namespace ttnn::prim {
 
-DramPrefetcherOperation::program_factory_t DramPrefetcherOperation::select_program_factory(
-    const operation_attributes_t& /*args*/, const tensor_args_t& /*tensor_args*/) {
-    return DramPrefetcherProgramFactory{};
-}
-
 void DramPrefetcherOperation::validate_on_program_cache_miss(
     const operation_attributes_t& args, const tensor_args_t& tensor_args) {
     auto input_tensors = tensor_args.input_tensors;
@@ -27,7 +22,7 @@ void DramPrefetcherOperation::validate_on_program_cache_miss(
         tt::tt_metal::experimental::sender_core_type(*args.global_cb) !=
             tt::tt_metal::experimental::SenderCoreType::Dram,
         "ttnn.dram_prefetcher does not support DRAM-sender GlobalCircularBuffers. Use "
-        "ttnn.start_dram_core_prefetcher / ttnn.stop_dram_core_prefetcher instead.");
+        "ttnn.experimental.start_dram_core_prefetcher / ttnn.experimental.stop_dram_core_prefetcher instead.");
 
     const ttnn::Tensor& tensor_addrs = input_tensors.back();  // Last tensor is tensor_addrs
 
@@ -105,13 +100,11 @@ ttnn::Tensor dram_prefetcher(
     std::vector<ttnn::Tensor>& tensors,
     const uint32_t num_layers,
     const std::optional<const tt::tt_metal::experimental::GlobalCircularBuffer>& global_cb,
-    const bool enable_performance_mode,
-    const uint32_t dram_core_k_block_w_tiles) {
+    const bool enable_performance_mode) {
     auto operation_attributes = DramPrefetcherParams{
         .num_layers = num_layers,
         .enable_performance_mode = enable_performance_mode,
         .global_cb = global_cb,
-        .dram_core_k_block_w_tiles = dram_core_k_block_w_tiles,
     };
     auto tensor_args = DramPrefetcherInputs{.input_tensors = tensors};
 

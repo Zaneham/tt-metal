@@ -12,10 +12,8 @@ Tensor dram_prefetcher(
     std::vector<ttnn::Tensor>& tensors,
     const uint32_t num_layers,
     const std::optional<const GlobalCircularBuffer>& global_cb,
-    const bool enable_performance_mode,
-    const uint32_t dram_core_k_block_w_tiles) {
-    return ttnn::prim::dram_prefetcher(
-        tensors, num_layers, global_cb, enable_performance_mode, dram_core_k_block_w_tiles);
+    const bool enable_performance_mode) {
+    return ttnn::prim::dram_prefetcher(tensors, num_layers, global_cb, enable_performance_mode);
 }
 
 }  // namespace ttnn
