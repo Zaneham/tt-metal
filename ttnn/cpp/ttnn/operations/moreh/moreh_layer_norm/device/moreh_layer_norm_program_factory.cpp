@@ -93,6 +93,10 @@ tt::tt_metal::ProgramDescriptor MorehLayerNormOperation::ProgramFactory::create_
         const auto mean_rstd_shape_without_padding = mean->logical_shape();
         mean_rstd_height = mean_rstd_shape_without_padding[-2];
         mean_rstd_width = mean_rstd_shape_without_padding[-1];
+    } else if (rstd_has_value) {
+        const auto mean_rstd_shape_without_padding = rstd->logical_shape();
+        mean_rstd_height = mean_rstd_shape_without_padding[-2];
+        mean_rstd_width = mean_rstd_shape_without_padding[-1];
     }
 
     const bool do_mask_h = (origin_H % TILE_HEIGHT) != 0 && !is_lastdim_layer_norm;
