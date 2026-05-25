@@ -27,6 +27,11 @@ on:
         required: false
         default: ""
         type: string
+      skip-rtl-check:
+        description: "Bypass RTL Sim CI gate (Emergency-only)."
+        required: false
+        default: false
+        type: boolean
 
   schedule:
     # Create dev every day at EOD of PST Mon-Fri + night of Sunday to kick off
@@ -38,6 +43,7 @@ permissions:
   packages: write
   actions: write
   id-token: write
+  checks: read
 
 # =============================================================================
 # Default commit SHAs to ignore when analyzing version bumps.
@@ -145,9 +151,57 @@ jobs:
       ignore-commits: ${{ inputs.ignore-commits || needs.release-precheck.outputs.default-ignore-commits }}
       dry-run: ${{ inputs.dry-run || false }}
 
+  # Pre-publish RTL Sim CI gate. Polls the "RTL Sim CI test" check on stable
+  # HEAD (posted by the tt-umd-simulators polling agent -- GitLab issue #71)
+  # and blocks the release if it isn't green. 60-min budget covers the sim
+  # pipeline's typical 30-60 min runtime.
+  #
+  # Only runs when github.ref == refs/heads/stable. Other paths (cron-on-main
+  # dev release, manual dispatches on main) tag artifacts from github.sha per
+  # release-verify-or-create-tag.yaml line 73, so a stable-HEAD check would
+  # give a false-green for them. Follow-up: extend the polling agent to cover
+  # main HEAD merge commits, then gate uniformly.
+  check-rtl-sim-status:
+    needs: [create-tag]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/stable' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify RTL Sim CI test check is green on stable HEAD
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SKIP_CHECK: ${{ inputs.skip-rtl-check }}
+        run: |
+          set -uo pipefail
+
+          if [ "$SKIP_CHECK" = "true" ]; then
+            echo "::warning::Bypassing RTL Sim CI gate (skip-rtl-check=true)."
+            exit 0
+          fi
+
+          SHA=$(gh api repos/tenstorrent/tt-metal/branches/stable --jq .commit.sha)
+          echo "Gating release on 'RTL Sim CI test' check for stable HEAD $SHA"
+
+          for i in $(seq 1 120); do  # 120 * 30s = 60 min
+            read -r STATUS CONCLUSION URL < <(
+              gh api "repos/tenstorrent/tt-metal/commits/$SHA/check-runs?check_name=RTL+Sim+CI+test&filter=latest" \
+                --jq '(.check_runs[0] // {}) | "\(.status // "missing") \(.conclusion // "-") \(.html_url // "-")"'
+            )
+            case "$STATUS:$CONCLUSION" in
+              completed:success) echo "::notice::Check passed on $SHA. $URL"; exit 0 ;;
+              completed:*)       echo "::error::Check on $SHA: conclusion=$CONCLUSION. $URL"; exit 1 ;;
+            esac
+            echo "  [$i/120] status=$STATUS — re-polling in 30s ($URL)"
+            sleep 30
+          done
+
+          echo "::error::Timed out after 60 min on $SHA (last status=$STATUS, last URL=$URL)."
+          exit 1
 
   build-test-publish:
-    needs: [create-tag, release-precheck]
+    needs: [create-tag, release-precheck, check-rtl-sim-status]
+    # Treat a skipped RTL Sim gate (non-stable refs) as a non-blocker so dev
+    # releases still ship; only a failed gate halts this matrix.
+    if: ${{ !cancelled() && needs.create-tag.result == 'success' && needs.release-precheck.result == 'success' && needs.check-rtl-sim-status.result != 'failure' }}
     uses: ./.github/workflows/release-build-test-publish.yaml
     secrets: inherit
     strategy:
