@@ -25,4 +25,15 @@ std::tuple<autograd::TensorPtr, autograd::TensorPtr, autograd::TensorPtr> mla_qk
     uint32_t qk_rope_dim,
     uint32_t v_dim);
 
+// Autograd-aware fused MLA QKV assembly. Forward and backward each dispatch to
+// a dedicated Metal op.
+std::tuple<autograd::TensorPtr, autograd::TensorPtr, autograd::TensorPtr> mla_qkv_assemble(
+    const autograd::TensorPtr& q_pre,
+    const autograd::TensorPtr& kv_up,
+    const autograd::TensorPtr& k_pe,
+    uint32_t n_heads,
+    uint32_t qk_nope_dim,
+    uint32_t qk_rope_dim,
+    uint32_t v_dim);
+
 }  // namespace ttml::ops

@@ -178,6 +178,63 @@ class SplitHeads(ttml.autograd.Function):
         return reshaped
 
 
+class RoPETrailing(ttml.autograd.Function):
+    """RoPE the last ``rope_dim`` columns of a 4-D tensor; pass the prefix through."""
+
+    @staticmethod
+    def forward(ctx, input, rope_params):
+        x = input.get_value()
+        B, H, S, head_dim = list(x.shape)
+        rope_dim = rope_params.head_dim
+        nope_dim = head_dim - rope_dim
+
+        suffix = ttnn.slice(x, [0, 0, 0, nope_dim], [B, H, S, head_dim])
+        suffix_squished = ttnn.reshape(suffix, [1, B * H, S, rope_dim])
+        suffix_rotated_squished = ttnn.experimental.rotary_embedding_llama(
+            suffix_squished,
+            rope_params.cos_cache,
+            rope_params.sin_cache,
+            rope_params.trans_mat,
+            is_decode_mode=False,
+        )
+        suffix_rotated = ttnn.reshape(suffix_rotated_squished, [B, H, S, rope_dim])
+
+        prefix = ttnn.slice(x, [0, 0, 0, 0], [B, H, S, nope_dim])
+        out = ttnn.concat([prefix, suffix_rotated], dim=3)
+
+        ctx.B = B
+        ctx.H = H
+        ctx.S = S
+        ctx.head_dim = head_dim
+        ctx.rope_dim = rope_dim
+        ctx.nope_dim = nope_dim
+        ctx.rope_params = rope_params
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        B, H, S = ctx.B, ctx.H, ctx.S
+        head_dim = ctx.head_dim
+        rope_dim = ctx.rope_dim
+        nope_dim = ctx.nope_dim
+        rope_params = ctx.rope_params
+
+        grad_suffix = ttnn.slice(grad_output, [0, 0, 0, nope_dim], [B, H, S, head_dim])
+        grad_suffix_squished = ttnn.reshape(grad_suffix, [1, B * H, S, rope_dim])
+        grad_suffix_unrotated_squished = ttnn.experimental.rotary_embedding_llama(
+            grad_suffix_squished,
+            rope_params.neg_cos_cache,
+            rope_params.neg_sin_cache,
+            rope_params.trans_mat,
+            is_decode_mode=False,
+        )
+        grad_suffix_unrotated = ttnn.reshape(grad_suffix_unrotated_squished, [B, H, S, rope_dim])
+
+        grad_prefix = ttnn.slice(grad_output, [0, 0, 0, 0], [B, H, S, nope_dim])
+        grad_input = ttnn.concat([grad_prefix, grad_suffix_unrotated], dim=3)
+        return grad_input
+
+
 class MoERoutingNormalize(ttml.autograd.Function):
     """Autograd-aware routing weight normalization for sigmoid-gated MoE.
 
@@ -270,6 +327,11 @@ def autograd_softmax(tensor):
 def split_heads(tensor, num_heads):
     """(B, 1, S, H*D) -> (B, H, S, D) with proper transpose."""
     return SplitHeads.apply(tensor, num_heads)
+
+
+def rope_trailing(tensor, rope_params):
+    """RoPE the last ``rope_params.head_dim`` columns; prefix is identity."""
+    return RoPETrailing.apply(tensor, rope_params)
 
 
 def moe_routing_normalize(scores, mask, route_scale, eps=1e-20):

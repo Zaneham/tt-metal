@@ -271,6 +271,16 @@ void py_module(nb::module_& m) {
             nb::arg("qk_nope_dim"),
             nb::arg("qk_rope_dim"),
             nb::arg("v_dim"));
+        py_mla.def(
+            "qkv_assemble",
+            &ttml::ops::mla_qkv_assemble,
+            nb::arg("q_pre"),
+            nb::arg("kv_up"),
+            nb::arg("k_pe"),
+            nb::arg("n_heads"),
+            nb::arg("qk_nope_dim"),
+            nb::arg("qk_rope_dim"),
+            nb::arg("v_dim"));
     }
 
     {

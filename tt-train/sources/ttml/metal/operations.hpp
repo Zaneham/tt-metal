@@ -9,6 +9,7 @@
 #include "ops/frobenius_normalize/frobenius_normalize.hpp"
 #include "ops/layernorm_bw/layernorm_bw.hpp"
 #include "ops/layernorm_fw/layernorm_fw.hpp"
+#include "ops/mla_qkv_assemble_bw/mla_qkv_assemble_bw.hpp"
 #include "ops/mla_qkv_assemble_fw/mla_qkv_assemble_fw.hpp"
 #include "ops/polynorm_fw/polynorm_fw.hpp"
 #include "ops/profiler_no_op/profiler_no_op.hpp"

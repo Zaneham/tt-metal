@@ -19,7 +19,7 @@ import ttml
 from ttml.modules import AbstractModuleBase, LinearLayer
 
 from .transformer import RMSNormLayer
-from .autograd_ops import autograd_slice, autograd_concat, split_heads
+from .autograd_ops import autograd_slice, rope_trailing
 
 
 class MultiHeadLatentAttention(AbstractModuleBase):
@@ -75,19 +75,13 @@ class MultiHeadLatentAttention(AbstractModuleBase):
         n_heads = self.n_heads
         qk_nope = self.qk_nope_head_dim
         qk_rope = self.qk_rope_head_dim
-        qk_head = self.qk_head_dim
         v_dim = self.v_head_dim
 
         # ── Q path ──
         if self.q_lora_rank == 0:
-            q = self.wq(x)  # [B, 1, S, n_heads * qk_head]
+            q_pre = self.wq(x)  # [B, 1, S, n_heads * qk_head]
         else:
-            q = self.wq_b(self.q_norm(self.wq_a(x)))  # [B, 1, S, n_heads * qk_head]
-        q = split_heads(q, n_heads)  # [B, n_heads, S, qk_head]
-
-        q_nope = autograd_slice(q, [0, 0, 0, 0], [B, n_heads, S, qk_nope])
-        q_pe = autograd_slice(q, [0, 0, 0, qk_nope], [B, n_heads, S, qk_head])
-        q_pe = ttml.ops.rope.rope(q_pe, self.rope_params)
+            q_pre = self.wq_b(self.q_norm(self.wq_a(x)))  # [B, 1, S, n_heads * qk_head]
 
         # ── KV path ──
         kv_full = self.wkv_a(x)  # [B, 1, S, kv_lora_rank + qk_rope]
@@ -99,19 +93,12 @@ class MultiHeadLatentAttention(AbstractModuleBase):
         # RoPE on k_pe (shared across heads, shape [B, 1, S, qk_rope])
         k_pe = ttml.ops.rope.rope(k_pe, self.rope_params)
 
-        # Expand k_pe to all heads: [B, 1, S, qk_rope] -> [B, n_heads, S, qk_rope]
-        k_pe = autograd_concat([k_pe] * n_heads, dim=1)
-
-        # Up-project KV latent and split into per-head k_nope and v
+        # Up-project KV latent. QKV assemble splits heads, broadcasts k_pe, and extracts V.
         kv_up = self.wkv_b(self.kv_norm(kv))  # [B, 1, S, n_heads * (qk_nope + v_dim)]
-        kv_up = split_heads(kv_up, n_heads)  # [B, n_heads, S, qk_nope + v_dim]
 
-        k_nope = autograd_slice(kv_up, [0, 0, 0, 0], [B, n_heads, S, qk_nope])
-        v = autograd_slice(kv_up, [0, 0, 0, qk_nope], [B, n_heads, S, qk_nope + v_dim])
-
-        # Assemble full Q and K
-        q_full = autograd_concat([q_nope, q_pe], dim=3)  # [B, H, S, qk_head]
-        k_full = autograd_concat([k_nope, k_pe], dim=3)  # [B, H, S, qk_head]
+        # Assemble full Q/K/V. Q is head-split but not yet RoPE'd.
+        q_full, k_full, v = ttml.ops.mla.qkv_assemble(q_pre, kv_up, k_pe, n_heads, qk_nope, qk_rope, v_dim)
+        q_full = rope_trailing(q_full, self.rope_params)
 
         # ── Attention (composite path supports v_dim != qk_head) ──
         attn = ttml.ops.attention.scaled_dot_product_attention_composite(q_full, k_full, v, mask)
