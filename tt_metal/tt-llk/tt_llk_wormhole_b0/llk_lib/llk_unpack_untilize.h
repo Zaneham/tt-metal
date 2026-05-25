@@ -54,16 +54,14 @@ inline void _llk_unpack_untilize_init_(const std::uint32_t unpack_dst_format, co
     // Disable transpose when unused
     cfg_reg_rmw_tensix<THCON_SEC0_REG2_Haloize_mode_RMW>(0);
 
-    // Save state of unpacker config for quick restore
-    TTI_RDCFG(p_gpr_unpack::SR_UNPACK_UNTILIZER_STATE_0,
-              UNP0_ADDR_CTRL_XY_REG_1_Ystride_ADDR32); // Save unpack stride config
-    TTI_RDCFG(p_gpr_unpack::SR_UNPACK_UNTILIZER_STATE_1,
-              THCON_SEC0_REG5_Tile_x_dim_cntx0_ADDR32);                                              // Save tile x dim per context
-    TTI_RDCFG(p_gpr_unpack::SR_UNPACK_UNTILIZER_STATE_2, THCON_SEC0_REG0_TileDescriptor_ADDR32 + 1); // Save descriptor 1
+    // Note: prior to tt-llk#1015 this init snapshotted Ystride / Tile_x_dim_cntx0 / Descriptor1
+    // into SR_UNPACK_UNTILIZER_STATE_{0,1,2} so the uninit could restore them. That snapshot
+    // pattern was order-dependent and coupled per-op state to a private GPR convention.
+    // The canonical baseline for all three registers is now owned by configure_unpack_AB
+    // (and the srca data-format reconfig), so the uninit can deterministically recompute
+    // them without saving anything here.
 
-    const std::uint32_t unpA_ch1_x_stride = (unpack_dst_format & 0x3) == to_underlying(DataFormat::Float32)   ? 4
-                                            : (unpack_dst_format & 0x3) == to_underlying(DataFormat::Float16) ? 2
-                                                                                                              : 1;
+    const std::uint32_t unpA_ch1_x_stride = canonical_unpA_x_stride(unpack_dst_format);
     const std::uint32_t unpA_ch1_y_stride = FACE_R_DIM * unpA_ch1_x_stride;
 
     TT_SETADCXX(p_setadc::UNP_A, face_r_dim * FACE_C_DIM - 1, 0x0);
@@ -195,7 +193,7 @@ inline void _llk_unpack_untilize_pass_(const std::uint32_t base_address, const s
     switch_config_context(unp_cfg_context);
 }
 
-inline void _llk_unpack_untilize_uninit_()
+inline void _llk_unpack_untilize_uninit_(const std::uint32_t unpack_dst_format, const std::uint32_t face_r_dim = FACE_R_DIM)
 {
     // Check that unpacker is done (all contexts freed up) before starting hw configuration
     wait_for_idle();
@@ -206,10 +204,16 @@ inline void _llk_unpack_untilize_uninit_()
     // Wait for cfg to be free to edit
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::UNPACK);
 
-    // Restore from saved GPRs
-    TTI_WRCFG(p_gpr_unpack::SR_UNPACK_UNTILIZER_STATE_0, p_cfg::WRCFG_32b, UNP0_ADDR_CTRL_XY_REG_1_Ystride_ADDR32);
-    TTI_WRCFG(p_gpr_unpack::SR_UNPACK_UNTILIZER_STATE_1, p_cfg::WRCFG_32b, THCON_SEC0_REG5_Tile_x_dim_cntx0_ADDR32);
-    TTI_WRCFG(p_gpr_unpack::SR_UNPACK_UNTILIZER_STATE_2, p_cfg::WRCFG_32b, THCON_SEC0_REG0_TileDescriptor_ADDR32 + 1);
+    // Restore the canonical baseline programmed by configure_unpack_AB. Replaces the snapshot
+    // pattern used prior to tt-llk#1015, which copied register values into SR_UNPACK_UNTILIZER_STATE_*
+    // GPRs in the matching init. The canonical values are derivable from format + face_r_dim, so
+    // the restore is order-independent and the GPR slots are no longer needed by this op.
+    const std::uint32_t face_dim = face_r_dim * FACE_C_DIM;
+    cfg_reg_rmw_tensix<UNP0_ADDR_CTRL_XY_REG_1_Ystride_ADDR32, UNP0_ADDR_CTRL_XY_REG_0_Ystride_SHAMT, UNP0_ADDR_CTRL_XY_REG_1_Ystride_MASK>(
+        canonical_unpA_y_stride(unpack_dst_format, face_r_dim));
+    cfg_reg_rmw_tensix<THCON_SEC0_REG5_Tile_x_dim_cntx0_ADDR32, 0, 0xffffffff>(face_dim | (face_dim << 16));
+    // Descriptor word 1 lower 16 bits = y_dim; configure_unpack_AB sets this to 1 for unpA.
+    cfg_reg_rmw_tensix<THCON_SEC0_REG0_TileDescriptor_ADDR32 + 1, 0, 0xFFFF>(1);
 
     TTI_NOP;
 }

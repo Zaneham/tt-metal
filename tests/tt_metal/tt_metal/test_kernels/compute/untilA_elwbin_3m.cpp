@@ -81,11 +81,7 @@ void core_agnostic_main() {
             llk_unpack_untilize_init(cb0);
             cb_wait_front(cb0, per_core_block_c_tiles);
             llk_unpack_untilize(cb0, per_core_block_c_tiles);
-#ifdef ARCH_BLACKHOLE
             llk_unpack_untilize_uninit(cb0);
-#else
-            llk_unpack_untilize_uninit();
-#endif
             cb_pop_front(cb0, per_core_block_c_tiles);
             cb_pop_front(cb1, per_core_block_c_tiles);
 
