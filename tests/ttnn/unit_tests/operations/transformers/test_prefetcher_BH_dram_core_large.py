@@ -2,40 +2,47 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-"""Parameterized end-to-end matmul tests for the DRAM-core prefetcher path on single Blackhole.
+"""End-to-end tests for the DRAM-core prefetcher path on single Blackhole.
 
-Topology: 8 DRAM banks * `recv_per_bank` receivers/bank -> ring of 8 * recv_per_bank.
-Production Llama-3.1-8B on single BH uses recv_per_bank=8 (ring=64) for the prefetcher
-matmuls; smaller rings are exercised here too for the QKV/FF cases that fit at lower
-recv_per_bank.
+Two scopes:
 
-Each parameterized case:
-- Builds a fresh DRAM-sender GlobalCircularBuffer via
-  ttnn.experimental.create_global_circular_buffer_with_dram_senders for one matmul.
-- Pushes the weight via ttnn.dram_prefetcher(global_cb=gcb); the op infers the DRAM-core
-  program factory from gcb.sender_core_type() == "dram".
-- Runs ttnn.linear with the same gcb.
-- PCC against torch.matmul.
+1. ``test_dram_core_prefetcher_BH_param`` — parameterized shape coverage with
+   PCC vs ``torch.matmul``. Topology: 8 DRAM banks × ``recv_per_bank``
+   receivers/bank → ring of 8 × recv_per_bank. Production Llama-3.1-8B on
+   single BH uses recv_per_bank=8 (ring=64); smaller rings are exercised for
+   QKV/FF cases that fit at lower recv_per_bank.
 
-Receiver layout: each bank's receivers are laid out at row-major-adjacent ring positions
-[b*recv_per_bank, (b+1)*recv_per_bank) on a (RING_COLS x RING_ROWS) rectangle. This is the
-layout gather_in0 expects (it walks worker_cores_vec row-major).
+   Each case builds a fresh DRAM-sender GlobalCircularBuffer, pushes the
+   weight via ``ttnn.dram_prefetcher(global_cb=gcb)`` (the op infers the
+   DRAM-core program factory from ``gcb.sender_core_type() == "dram"``),
+   runs ``ttnn.linear`` with the same gcb, and PCC-checks against
+   ``torch.matmul``.
 
-DRISC L1 budget: 2 ping-pong stage buffers must fit in ~80 KB. The factory automatically
-splits each per-K-block DMA into M chunks (M divides num_receivers) when 2 * dma_block > 80 KB
--- the kernel does M subset-pushes per K-block with fifo_wr_ptr rewinds so all receivers
-end up with their full contiguous slice at the same fifo offset. M=1 keeps the original
-single-push-per-K-block path; M=2 unlocks FF1 (K=4096 N=14336) at ring=64.
+   Receiver layout: each bank's receivers sit at row-major-adjacent ring
+   positions ``[b*recv_per_bank, (b+1)*recv_per_bank)`` on a
+   ``(RING_COLS × RING_ROWS)`` rectangle — the layout ``gather_in0`` expects.
 
-Known prototype limits (each is a follow-up):
-- in0_block_w_tiles can be overridden via `dram_core_k_block_w_tiles` op param, but values
-  >=4 hang on a fifo-wrap edge case (gather_in0 already uses kbw=1 so this is non-blocking).
-- Fast dispatch on the DRAM-core path is not implemented yet (slow dispatch only).
+   DRISC L1 budget: 2 ping-pong stage buffers must fit in ~80 KB. The
+   factory automatically splits each per-K-block DMA into M chunks
+   (M divides num_receivers) when ``2 * dma_block > 80 KB``; the kernel does
+   M subset-pushes per K-block with fifo_wr_ptr rewinds so all receivers end
+   up with their full contiguous slice at the same fifo offset. M=1 keeps
+   the original single-push-per-K-block path; M=2 unlocks FF1
+   (K=4096 N=14336) at ring=64.
 
-Multi-tensor in a single dram_prefetcher call (the "DRISC in reset" issue from earlier
-versions) is verified working post-fix in test_prefetcher_BH_multi_tensor.py. Tests below
-still run one (prefetcher, matmul) pair per case to keep the parametrize cases focused
-on shape correctness.
+   Known prototype limits:
+   - ``dram_core_k_block_w_tiles`` is auto-derived; manual overrides ≥4 hang
+     on a fifo-wrap edge case (gather_in0 uses kbw=1 so this is non-blocking).
+   - Fast dispatch on the DRAM-core path is not implemented (slow dispatch only).
+
+2. ``test_dram_core_prefetcher_multi_tensor`` — multi-tensor smoke. The
+   DRAM-core kernel's main loop iterates
+   ``for layer in num_layers: for t in num_tensors:`` and prior versions
+   were documented as leaving the DRISC cores in reset state when
+   num_tensors > 1. After the chunked-DMA + receiver-layout fixes this case
+   re-verifies the multi-tensor path end-to-end against a discard receiver
+   (no matmul; the goal is to confirm both ops complete without
+   hang/OOM/PCC failure across multiple ``(num_tensors, num_layers)`` combos).
 """
 
 import math
@@ -79,6 +86,9 @@ def _bank_receivers_row_major(bank_idx: int, recv_per_bank: int, ring_cols: int)
     return ttnn.CoreRangeSet(cores)
 
 
+# ---------------------------------------------------------------------------
+# Parameterized shape coverage (PCC vs torch.matmul)
+# ---------------------------------------------------------------------------
 # Parameterize over (K, N) and (recv_per_bank, dtype). K and N are in tiles of
 # (ring_size, n_tiles_per_recv) units so the shapes work out cleanly across rings:
 #   K = k_tiles_per_shard * ring_size * TILE_SIZE
@@ -251,3 +261,112 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     passing, output_str = comp_pcc(expected, out_torch, pcc_threshold)
     logger.info(f"[{name}] {output_str}")
     assert passing, f"[{name}] PCC check failed: {output_str}"
+
+
+# ---------------------------------------------------------------------------
+# Multi-tensor smoke (discard receiver)
+# ---------------------------------------------------------------------------
+_MT_NUM_RECV_PER_BANK = 2
+_MT_K = 2048
+# N must be divisible by `num_dram_banks * _MT_NUM_RECV_PER_BANK * TILE_SIZE` for any
+# supported BH bank count. lcm(7, 8) * 2 * 32 = 56 * 64 = 3584, so 3584 works on both
+# P100 (7 banks) and P150/P300 (8 banks). The DRAM-core prefetcher auto-derives K-sub
+# blocking from the DRISC L1 budget; K=2048 lands on the K-sub-with-M=1 path here.
+_MT_N = 3584
+_MT_TILE_BYTES = 1088  # bf8_b
+
+
+def _make_mt_weight(device, seed: int, num_dram_banks: int) -> ttnn.Tensor:
+    torch.manual_seed(seed)
+    pt_weight = torch.randn(1, 1, _MT_K, _MT_N)
+    dram_core_range_set = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_dram_banks - 1, 0))}
+    )
+    weight_mem_config = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+        ttnn.BufferType.DRAM,
+        ttnn.ShardSpec(dram_core_range_set, [_MT_K, _MT_N // num_dram_banks], ttnn.ShardOrientation.ROW_MAJOR),
+    )
+    return ttnn.as_tensor(
+        pt_weight, device=device, dtype=ttnn.bfloat8_b, memory_config=weight_mem_config, layout=ttnn.TILE_LAYOUT
+    )
+
+
+@pytest.mark.skipif(
+    not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
+)
+@pytest.mark.parametrize("num_tensors,num_layers", [(1, 1), (2, 1), (3, 1), (2, 5), (3, 10)])
+def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
+    arch = getattr(device, "arch", lambda: None)()
+    if arch is not None and "BLACKHOLE" not in str(arch).upper():
+        pytest.skip("DRAM-core prefetcher requires Blackhole")
+
+    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
+        ttnn.device.enable_asynchronous_slow_dispatch(device)
+
+    # Query the chip's actual DRAM bank count so the test adapts to harvested BHs
+    # (P100 has 7, P150/P300 have 8). The receiver grid is laid out as
+    # `num_dram_banks` columns × `_MT_NUM_RECV_PER_BANK` rows.
+    num_dram_banks = device.dram_grid_size().x
+    num_receivers = num_dram_banks * _MT_NUM_RECV_PER_BANK
+
+    # Build `num_tensors` weight tensors, all same shape (so num_blocks matches).
+    weights = [_make_mt_weight(device, seed=0xB100 + i, num_dram_banks=num_dram_banks) for i in range(num_tensors)]
+    # The op contract requires an addrs tensor as the last input (unused on DRAM-core path).
+    addrs = ttnn.from_torch(
+        torch.zeros(1, 1),
+        device=device,
+        dtype=ttnn.uint32,
+        memory_config=ttnn.MemoryConfig(
+            ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            ttnn.BufferType.L1,
+            ttnn.ShardSpec(
+                ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))}),
+                [1, 1],
+                ttnn.ShardOrientation.ROW_MAJOR,
+            ),
+        ),
+    )
+
+    # The DRAM-core prefetcher auto-derives k_block_w_tiles = ceil(k_tiles / ring_size)
+    # and pushes ring_size blocks per (layer, tensor) regardless of k_tiles. GCB and
+    # consumer counts must follow ring_size, not k_tiles.
+    k_tiles = _MT_K // ttnn.TILE_SIZE
+    ring_size = num_receivers
+    k_block_w_tiles = (k_tiles + ring_size - 1) // ring_size
+    n_tiles_per_recv = (_MT_N // num_dram_banks // _MT_NUM_RECV_PER_BANK) // ttnn.TILE_SIZE
+    push_page_size = k_block_w_tiles * n_tiles_per_recv * _MT_TILE_BYTES
+    per_recv_bytes_per_tensor = ring_size * push_page_size
+    gcb_size = _round_up(per_recv_bytes_per_tensor, push_page_size)
+
+    bank_to_receivers = [
+        (b, _bank_receivers_row_major(b, _MT_NUM_RECV_PER_BANK, ring_cols=num_dram_banks))
+        for b in range(num_dram_banks)
+    ]
+    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
+
+    # Per receiver per (layer, tensor): ring_size pushes.
+    num_iters_total = num_layers * num_tensors * ring_size
+    logger.info(
+        f"[multi_tensor] num_tensors={num_tensors} num_layers={num_layers} K={_MT_K} N={_MT_N} "
+        f"banks={num_dram_banks} ring={num_receivers} push_page={push_page_size} gcb_size={gcb_size} "
+        f"num_iters_total={num_iters_total}"
+    )
+
+    # Sender: push all `num_tensors` weights through the prefetcher, num_layers times.
+    ttnn.experimental.start_dram_core_prefetcher(
+        device,
+        weights + [addrs],
+        num_layers=num_layers,
+        global_cb=gcb,
+    )
+    # Receiver: discard all pushed data.
+    ttnn.experimental.test_dram_prefetcher_consumer(
+        device,
+        num_iters=num_iters_total,
+        page_size_bytes=push_page_size,
+        global_cb=gcb,
+    )
+    ttnn.experimental.stop_dram_core_prefetcher(device)
+    ttnn.synchronize_device(device)
+    logger.info(f"[multi_tensor] num_tensors={num_tensors} num_layers={num_layers} completed cleanly")
