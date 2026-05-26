@@ -1423,4 +1423,109 @@ TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastLinkedDirect
         true);
 }
 
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllUnicastDirectedIdeal_2_0) {
+    uint32_t test_case_id = unit_tests::dm::core_to_all::START_ID_2_0 + 11;
+
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: sub_grid_size {2, 1} requires >= 2 columns, but grid has "
+                         << device->compute_with_storage_grid_size().x << " column(s). Use emu-quasar-2x3 or larger.";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+            .test_id = test_case_id,
+            .mst_core_coord = {0, 0},
+            .sub_start_core_coord = {0, 0},
+            .sub_grid_size = {2, 1},
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .loopback = true,
+            .is_multicast = false,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    bool loopback = true;
+    NOC noc_id = NOC::NOC_0;
+    bool is_multicast = false;
+    bool is_linked = false;
+    CoreCoord mst_core_coord = {0, 0};
+    CoreCoord sub_start_core_coord = {0, 0};
+    CoreCoord sub_grid_size = {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
+
+    unit_tests::dm::core_to_all::directed_ideal_test(
+        mesh_device,
+        test_case_id,
+        is_multicast,
+        is_linked,
+        mst_core_coord,
+        sub_start_core_coord,
+        sub_grid_size,
+        loopback,
+        noc_id,
+        0,
+        true);
+}
+
+TEST_F(GenericMeshDeviceFixture, TensixDataMovementOneToAllMulticastDirectedIdeal_2_0) {
+    uint32_t test_case_id = unit_tests::dm::core_to_all::START_ID_2_0 + 12;
+
+    auto mesh_device = get_mesh_device();
+    auto* device = mesh_device->impl().get_device(0);
+
+    if (device->arch() == ARCH::QUASAR) {
+        if (device->compute_with_storage_grid_size().x < 2) {
+            GTEST_SKIP() << "Skipping: emulator grid too small for multicast directed ideal _2_0";
+        }
+        auto [bytes_per_page, max_transmittable_bytes, max_transmittable_pages] =
+            unit_tests::dm::compute_physical_constraints(mesh_device);
+        unit_tests::dm::core_to_all::OneToAllConfig test_config = {
+            .test_id = test_case_id,
+            .mst_core_coord = {0, 0},
+            .sub_start_core_coord = {0, 0},
+            .sub_grid_size = {2, 1},
+            .num_of_transactions = 4,
+            .pages_per_transaction = 1,
+            .bytes_per_page = bytes_per_page,
+            .l1_data_format = DataFormat::Float16_b,
+            .noc_id = NOC::NOC_0,
+            .loopback = true,
+            .is_multicast = true,
+            .is_linked = false,
+            .use_2_0_api = true,
+        };
+        EXPECT_TRUE(unit_tests::dm::core_to_all::run_dm(mesh_device, test_config));
+        return;
+    }
+
+    bool loopback = true;
+    NOC noc_id = NOC::NOC_0;
+    bool is_multicast = true;
+    bool is_linked = false;
+    CoreCoord mst_core_coord = {0, 0};
+    CoreCoord sub_start_core_coord = {0, 0};
+    CoreCoord sub_grid_size = {device->compute_with_storage_grid_size().x, device->compute_with_storage_grid_size().y};
+
+    unit_tests::dm::core_to_all::directed_ideal_test(
+        mesh_device,
+        test_case_id,
+        is_multicast,
+        is_linked,
+        mst_core_coord,
+        sub_start_core_coord,
+        sub_grid_size,
+        loopback,
+        noc_id,
+        0,
+        true);
+}
+
 }  // namespace tt::tt_metal
