@@ -13,39 +13,28 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/kernel_types.hpp>
+#include <tt-metalium/mesh_coord.hpp>
 #include <tt-metalium/program.hpp>
-#include <tt-metalium/program_cache.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <tt-metalium/tt_metal.hpp>
 
 namespace ttnn::operations::experimental::test {
 
 namespace {
-
 constexpr uint32_t kValidatorRemoteCBId = 31;
 constexpr uint32_t kValidatorScratchCBId = 0;
-
-// Empty shared-variables struct: this op has no runtime args to override on cache hit.
-struct ValidatorSharedVars {};
-using ValidatorCachedWorkload = tt::tt_metal::program_cache::detail::CachedMeshWorkload<ValidatorSharedVars>;
-
 }  // namespace
 
-void test_dram_prefetcher_validator(
-    tt::tt_metal::distributed::MeshDevice* mesh_device,
-    const ttnn::Tensor& source_tensor,
-    uint32_t num_layers,
-    uint32_t print_stride,
-    const tt::tt_metal::experimental::GlobalCircularBuffer& global_cb) {
-    using namespace tt::tt_metal;
+void DramPrefetcherValidatorDeviceOperation::validate_on_program_cache_miss(
+    const operation_attributes_t& attrs, const tensor_args_t& tensor_args) {
+    TT_FATAL(attrs.num_layers > 0, "num_layers must be > 0");
+    const auto* tensor_buffer = tensor_args.source_tensor.buffer();
+    TT_FATAL(tensor_buffer != nullptr, "source_tensor must be on device");
+    TT_FATAL(tensor_buffer->is_dram(), "source_tensor must be a DRAM buffer");
+    TT_FATAL(attrs.global_cb.receiver_cores().num_cores() > 0, "GCB has no receiver cores");
 
-    TT_FATAL(mesh_device != nullptr, "mesh_device required");
-    TT_FATAL(num_layers > 0, "num_layers must be > 0");
-
-    // Derive ring topology from the GCB (matches both worker-sender and DRAM-sender paths).
-    const auto& sr_mapping = global_cb.sender_receiver_core_mapping();
-    const uint32_t num_senders = static_cast<uint32_t>(sr_mapping.size());
-    TT_FATAL(num_senders > 0, "GCB has no senders");
+    const auto& sr_mapping = attrs.global_cb.sender_receiver_core_mapping();
+    TT_FATAL(!sr_mapping.empty(), "GCB has no senders");
     const uint32_t num_receivers_per_sender = sr_mapping.front().second.num_cores();
     for (const auto& [_, recv] : sr_mapping) {
         TT_FATAL(
@@ -54,13 +43,56 @@ void test_dram_prefetcher_validator(
             recv.num_cores(),
             num_receivers_per_sender);
     }
+}
+
+void DramPrefetcherValidatorDeviceOperation::validate_on_program_cache_hit(
+    const operation_attributes_t& /*attrs*/, const tensor_args_t& /*tensor_args*/) {}
+
+DramPrefetcherValidatorDeviceOperation::spec_return_value_t
+DramPrefetcherValidatorDeviceOperation::compute_output_specs(const operation_attributes_t&, const tensor_args_t&) {
+    return std::vector<ttnn::TensorSpec>{};
+}
+
+DramPrefetcherValidatorDeviceOperation::tensor_return_value_t
+DramPrefetcherValidatorDeviceOperation::create_output_tensors(const operation_attributes_t&, const tensor_args_t&) {
+    return std::vector<ttnn::Tensor>{};
+}
+
+tt::stl::hash::hash_t DramPrefetcherValidatorDeviceOperation::compute_program_hash(
+    const operation_attributes_t& attrs, const tensor_args_t& tensor_args) {
+    // GlobalCircularBuffer / Tensor aren't reflection-hashable here; pick the bits that
+    // determine Program shape: scalar attrs, GCB identity, the source tensor's DRAM
+    // address (compile-time arg via TensorAccessorArgs), and its dataformat.
+    const auto* tensor_buffer = tensor_args.source_tensor.buffer();
+    const tt::DataFormat dataformat = tt::tt_metal::datatype_to_dataformat_converter(tensor_args.source_tensor.dtype());
+    return ttsl::hash::hash_objects_with_default_seed(
+        ttsl::hash::type_hash<DramPrefetcherValidatorDeviceOperation>,
+        attrs.num_layers,
+        attrs.print_stride,
+        static_cast<uint64_t>(attrs.global_cb.config_address()),
+        static_cast<uint64_t>(tensor_buffer != nullptr ? tensor_buffer->address() : 0),
+        static_cast<uint32_t>(dataformat));
+}
+
+ttnn::device_operation::CachedProgram<DramPrefetcherValidatorDeviceOperation::ProgramFactory::shared_variables_t>
+DramPrefetcherValidatorDeviceOperation::ProgramFactory::create_at(
+    const operation_attributes_t& attrs,
+    const ttnn::MeshCoordinate& /*mesh_coordinate*/,
+    const tensor_args_t& tensor_args,
+    tensor_return_value_t& /*tensor_return_value*/) {
+    using namespace tt::tt_metal;
+
+    const auto& source_tensor = tensor_args.source_tensor;
+    const auto& global_cb = attrs.global_cb;
+
+    // Derive ring topology from the GCB (matches both worker-sender and DRAM-sender paths).
+    const auto& sr_mapping = global_cb.sender_receiver_core_mapping();
+    const uint32_t num_senders = static_cast<uint32_t>(sr_mapping.size());
+    const uint32_t num_receivers_per_sender = sr_mapping.front().second.num_cores();
     const uint32_t num_blocks = num_senders * num_receivers_per_sender;
 
-    // Derive per-tensor geometry from the source tensor (single-tensor path; matches
-    // tt_metal/impl/buffers/prefetcher_matmul_design.md §3). All sizes are in tiles, layout assumed TILE.
+    // Per-tensor geometry (single-tensor path; see prefetcher_matmul_design.md §3).
     Buffer* tensor_buffer = source_tensor.buffer();
-    TT_FATAL(tensor_buffer != nullptr, "source_tensor must be on device");
-    TT_FATAL(tensor_buffer->is_dram(), "source_tensor must be a DRAM buffer");
     const auto shard_shape = tensor_buffer->shard_spec().shape();
     const auto& tile_spec = source_tensor.tensor_spec().tile();
     const auto tile_shape = tile_spec.get_tile_shape();
@@ -92,31 +124,6 @@ void test_dram_prefetcher_validator(
     const uint32_t page_bytes_per_recv = k_block_w_tiles * n_per_recv_tiles * tile_bytes;
 
     const CoreRangeSet receiver_cores = global_cb.receiver_cores();
-    TT_FATAL(receiver_cores.num_cores() > 0, "GCB has no receiver cores");
-
-    // Hash key: includes everything the Program shape depends on. Buffer address is part of
-    // compile-time args (via TensorAccessorArgs), so include it to avoid stale-program reuse
-    // if the source tensor is reallocated at a different DRAM address.
-    const uint64_t program_hash = ttsl::hash::hash_objects_with_default_seed(
-        num_layers,
-        print_stride,
-        page_bytes_per_recv,
-        num_blocks,
-        num_senders,
-        num_receivers_per_sender,
-        static_cast<uint64_t>(tensor_buffer->address()),
-        static_cast<uint64_t>(global_cb.config_address()),
-        static_cast<uint32_t>(tensor_dataformat));
-
-    auto& program_cache = mesh_device->get_program_cache();
-    const bool cache_enabled = program_cache.is_enabled();
-    if (cache_enabled && program_cache.contains(program_hash)) {
-        auto& cached = program_cache.get(program_hash);
-        auto& cached_workload = cached.cached_program.template get<ValidatorCachedWorkload>();
-        tt::tt_metal::distributed::EnqueueMeshWorkload(
-            mesh_device->mesh_command_queue(), cached_workload.workload, /*blocking=*/false);
-        return;
-    }
 
     Program program = CreateProgram();
 
@@ -134,10 +141,10 @@ void test_dram_prefetcher_validator(
     std::vector<uint32_t> compile_args = {
         kValidatorRemoteCBId,
         kValidatorScratchCBId,
-        num_layers,
+        attrs.num_layers,
         num_blocks,
         num_senders,
-        print_stride,
+        attrs.print_stride,
     };
     TensorAccessorArgs(*tensor_buffer).append_to(compile_args);
 
@@ -175,23 +182,31 @@ void test_dram_prefetcher_validator(
         }
     }
 
-    tt::tt_metal::distributed::MeshCoordinateRange device_range(tt::tt_metal::distributed::MeshCoordinate(0, 0));
-    tt::tt_metal::distributed::MeshWorkload workload;
-    workload.add_program(device_range, std::move(program));
+    return {std::move(program), shared_variables_t{}};
+}
 
-    if (cache_enabled) {
-        ValidatorCachedWorkload cached_workload{std::move(workload), ValidatorSharedVars{}};
-        program_cache.insert(
-            program_hash,
-            tt::tt_metal::program_cache::detail::CachedProgramFactory{std::move(cached_workload), 0});
-        auto& stored = program_cache.get(program_hash);
-        auto& cached_ref = stored.cached_program.template get<ValidatorCachedWorkload>();
-        tt::tt_metal::distributed::EnqueueMeshWorkload(
-            mesh_device->mesh_command_queue(), cached_ref.workload, /*blocking=*/false);
-    } else {
-        tt::tt_metal::distributed::EnqueueMeshWorkload(
-            mesh_device->mesh_command_queue(), workload, /*blocking=*/false);
-    }
+void DramPrefetcherValidatorDeviceOperation::ProgramFactory::override_runtime_arguments(
+    cached_mesh_workload_t& /*cached_workload*/,
+    const operation_attributes_t& /*attrs*/,
+    const tensor_args_t& /*tensor_args*/,
+    tensor_return_value_t& /*tensor_return_value*/) {
+    // Nothing to override — buffer address is part of the cache key via compute_program_hash.
+}
+
+void test_dram_prefetcher_validator(
+    tt::tt_metal::distributed::MeshDevice* /*mesh_device*/,
+    const ttnn::Tensor& source_tensor,
+    uint32_t num_layers,
+    uint32_t print_stride,
+    const tt::tt_metal::experimental::GlobalCircularBuffer& global_cb) {
+    using OperationType = DramPrefetcherValidatorDeviceOperation;
+    OperationType::operation_attributes_t attrs{
+        .num_layers = num_layers,
+        .print_stride = print_stride,
+        .global_cb = global_cb,
+    };
+    OperationType::tensor_args_t tensor_args{.source_tensor = source_tensor};
+    ttnn::device_operation::launch<OperationType>(attrs, tensor_args);
 }
 
 }  // namespace ttnn::operations::experimental::test
