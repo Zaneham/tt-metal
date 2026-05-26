@@ -24,6 +24,7 @@
 #include <tt-metalium/experimental/tensor/mesh_tensor.hpp>
 #include <tt_stl/assert.hpp>
 
+#include "impl/context/metal_context.hpp"
 #include "impl/kernels/kernel.hpp"  // DramConfig + CreateKernel(DramConfig)
 
 namespace tt::tt_metal::distributed {
@@ -31,7 +32,6 @@ namespace tt::tt_metal::distributed {
 namespace {
 
 constexpr uint32_t kRemoteCBId = 31;
-constexpr uint32_t kNocMaxBurstSizeBytes = 16 * 1024;
 
 // Bytes reserved above the arena's kernel_working_region_base for noc_xy + config and
 // alignment slack. The remainder of the kernel region is the budget for the two
@@ -41,13 +41,6 @@ constexpr uint32_t kKernelOverheadBytes = 2 * 1024;
 constexpr const char* kKernelPath = "tt_metal/impl/buffers/kernels/dram_core_prefetcher.cpp";
 
 inline uint32_t align_up(uint32_t a, uint32_t align) { return (a + align - 1) & ~(align - 1); }
-
-// Cap for DMA-side page selection. Matches Blackhole's `NOC_MAX_BURST_SIZE`
-// (NOC_MAX_BURST_WORDS=256 × NOC_WORD_BYTES=64 = 16 KB; see
-// `tt_metal/hw/inc/internal/tt-1xx/blackhole/noc/noc_parameters.h:287-290`).
-// File-local duplicate by design — the two prefetcher paths share the algorithm but
-// not a header (see tt_metal/impl/buffers/prefetcher_matmul_design.md cross-component invariants).
-constexpr uint32_t kMaxStagePageSize = 16 * 1024;
 
 // Largest `page` (multiple of tile_size, <= max_page_size) such that num_tiles*tile_size
 // is divisible by page. Returns (page_size, num_pages). Identical algorithm to
@@ -112,13 +105,14 @@ TensorGeom compute_tensor_geom(
     const uint32_t n_per_recv = n_per_bank / num_receivers;
     const uint32_t row_bytes = n_per_bank * tile_bytes;
     const uint32_t block_bytes = k_block_w_tiles * row_bytes;
-    const auto [coalesced_page_size, coalesced_num_pages] = pick_page_size(kMaxStagePageSize, n_per_recv, tile_bytes);
+    const uint32_t noc_max_burst = MetalContext::instance().hal().get_noc_max_burst_size_bytes();
+    const auto [coalesced_page_size, coalesced_num_pages] = pick_page_size(noc_max_burst, n_per_recv, tile_bytes);
     TT_FATAL(
-        coalesced_page_size <= kNocMaxBurstSizeBytes,
+        coalesced_page_size <= noc_max_burst,
         "DRAM-core prefetcher coalesced page size ({} B) exceeds the one-packet NoC write "
         "limit ({} B). Reduce N_per_bank or increase num_global_cb_receivers.",
         coalesced_page_size,
-        kNocMaxBurstSizeBytes);
+        noc_max_burst);
 
     // Fit ladder (tt_metal/impl/buffers/prefetcher_matmul_design.md §6).
     uint32_t rows_per_sub = 0;

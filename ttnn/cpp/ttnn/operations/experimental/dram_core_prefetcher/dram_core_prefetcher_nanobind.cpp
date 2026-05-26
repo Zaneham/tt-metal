@@ -94,8 +94,7 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
 
             One (program_config, weight) pair per matmul. The production pattern (e.g. llama 70B)
             is to share a single GCB across XQKV/WO/FF1/FF2, where each consumer has a different
-            in1_block_size. The GCB size is picked as a multiple of LCM(in1_block_size for each
-            matmul) so the wrap-adjustment math stays consistent for every consumer.
+            in1_block_size.
 
             Validates per matmul:
               * weight K is tile-aligned AND divisible by ring_size (no activation padding past K),

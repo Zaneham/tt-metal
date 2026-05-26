@@ -98,22 +98,31 @@ def _bank_receivers_row_major(bank_idx: int, recv_per_bank: int, ring_cols: int)
 # Constraint: K_tiles_total = k_tiles_per_shard * ring_size must be a multiple of ring_size
 # (trivially true by construction) so gather_in0 doesn't pad K.
 @pytest.mark.parametrize(
-    "name,k_tiles_per_shard,n_tiles_per_receiver,recv_per_bank,dtype",
+    "name,k_tiles_per_shard,n_tiles_per_receiver,recv_per_bank,dtype,gcb_size_misalign_bytes",
     [
         # --- Legacy ring=8 cases (recv_per_bank=1, bf16) ---
-        ("qkv_small", 8, 1, 1, ttnn.bfloat16),  # K=256, N=8*32
-        ("qkv_med", 16, 1, 1, ttnn.bfloat16),  # K=512, N=8*32
-        ("qkv_large", 32, 1, 1, ttnn.bfloat16),  # K=1024, N=8*32
-        ("ff_wide", 8, 2, 1, ttnn.bfloat16),  # K=256, N=8*2*32
-        ("ff_widest", 16, 4, 1, ttnn.bfloat16),  # K=512, N=8*4*32
+        ("qkv_small", 8, 1, 1, ttnn.bfloat16, 0),  # K=256, N=8*32
+        ("qkv_med", 16, 1, 1, ttnn.bfloat16, 0),  # K=512, N=8*32
+        ("qkv_large", 32, 1, 1, ttnn.bfloat16, 0),  # K=1024, N=8*32
+        ("ff_wide", 8, 2, 1, ttnn.bfloat16, 0),  # K=256, N=8*2*32
+        ("ff_widest", 16, 4, 1, ttnn.bfloat16, 0),  # K=512, N=8*4*32
         # --- Llama-3.1-8B production shapes at ring=64 (recv_per_bank=8, bf8_b) ---
         # K=4096, all use k_tiles_per_shard=2 (= 4096/64/32).
-        ("o_proj_r64", 2, 2, 8, ttnn.bfloat8_b),  # K=4096, N=4096
-        ("qkv_bf8_r64", 2, 6, 8, ttnn.bfloat8_b),  # K=4096, N=12288 (combined Q+K+V at bf8_b)
-        ("ff1_r64", 2, 7, 8, ttnn.bfloat8_b),  # K=4096, N=14336 (FF1 gate/up)
+        ("o_proj_r64", 2, 2, 8, ttnn.bfloat8_b, 0),  # K=4096, N=4096
+        ("qkv_bf8_r64", 2, 6, 8, ttnn.bfloat8_b, 0),  # K=4096, N=12288 (combined Q+K+V at bf8_b)
+        ("ff1_r64", 2, 7, 8, ttnn.bfloat8_b, 0),  # K=4096, N=14336 (FF1 gate/up)
+        # --- Misaligned-gcb_size cases: gcb_size is NOT a multiple of in1_block_size.
+        # Exercises the wrap-adjustment path the previous factory always avoided by
+        # snapping gcb_size to LCM(in1_block_size). Misalignment is one L1_ALIGNMENT
+        # (=16 B on BH) so the underlying CB invariant `page_size % L1_ALIGNMENT == 0`
+        # still holds. ---
+        ("qkv_small_misaligned", 8, 1, 1, ttnn.bfloat16, 16),
+        ("ff_wide_misaligned", 8, 2, 1, ttnn.bfloat16, 16),
     ],
 )
-def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_per_receiver, recv_per_bank, dtype):
+def test_dram_core_prefetcher_BH_param(
+    device, name, k_tiles_per_shard, n_tiles_per_receiver, recv_per_bank, dtype, gcb_size_misalign_bytes
+):
     # ---- Topology (queries DRAM bank count so the test adapts to harvested BHs) ----
     num_dram_banks = device.dram_grid_size().x
     num_receivers_per_bank = recv_per_bank
@@ -177,14 +186,18 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     )
 
     # ---- DRAM-sender GlobalCircularBuffer ----
-    # gcb_size must be a multiple of matmul's receiver fifo_page_size to avoid remote_cb_wait_front
-    # wrap-math overshoot. fifo_page_size = in0_block_w * per_core_N * tile_bytes (matmul-computed
-    # in0_block_w = K_per_shard_tiles).
+    # in1_block_size is the matmul's receiver fifo_page_size = in0_block_w * per_core_N * tile_bytes
+    # (matmul-computed in0_block_w = K_per_shard_tiles).
     tile_bytes = _bytes_per_tile(dtype)
     in1_block_size_bytes = k_tiles_per_shard * n_tiles_per_receiver * tile_bytes
     # Per-receiver weight footprint = K_tiles_total * n_tiles_per_receiver * tile_bytes
     max_tensor_bytes = (k_tiles_per_shard * ring_size) * n_tiles_per_receiver * tile_bytes
     gcb_size = max(in1_block_size_bytes, (max_tensor_bytes // in1_block_size_bytes) * in1_block_size_bytes)
+    if gcb_size_misalign_bytes != 0:
+        gcb_size += gcb_size_misalign_bytes
+        assert gcb_size % in1_block_size_bytes != 0, (
+            "misalignment test requires gcb_size to NOT be a multiple of in1_block_size"
+        )
 
     bank_to_receivers = [
         (b, _bank_receivers_row_major(b, num_receivers_per_bank, ring_cols)) for b in range(num_dram_banks)

@@ -5,9 +5,7 @@
 #include "ttnn/global_circular_buffer.hpp"
 
 #include <algorithm>
-#include <limits>
 #include <memory>
-#include <numeric>
 #include <tt_stl/assert.hpp>
 #include <tt-metalium/experimental/global_circular_buffer.hpp>
 #include <tt-metalium/global_circular_buffer.hpp>
@@ -86,8 +84,7 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         num_recv_per_bank);
 
     // Validate every (config, weight) pair against the matmul invariants, and collect
-    // in1_block_size for each pair. The GCB size must be a multiple of the LCM of these.
-    uint64_t lcm_in1_block_size = 1;
+    // the largest in1_block_size to size the buffer.
     uint32_t max_in1_block_size = 0;
     for (size_t i = 0; i < program_configs.size(); ++i) {
         const auto& cfg = program_configs[i];
@@ -192,34 +189,27 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         const uint32_t bytes_per_tile = tt::tile_size(tt::tt_metal::datatype_to_dataformat_converter(w.dtype()));
         const uint32_t in1_block_size = static_cast<uint32_t>(cfg.in0_block_w * cfg.per_core_N) * bytes_per_tile;
         TT_FATAL(in1_block_size > 0, "config[{}] in1_block_size computed as 0", i);
-        lcm_in1_block_size = std::lcm<uint64_t, uint64_t>(lcm_in1_block_size, in1_block_size);
         max_in1_block_size = std::max(max_in1_block_size, in1_block_size);
     }
 
-    // ---- GCB size: an exact multiple of LCM(in1_block_size for every config), large
-    // enough to buffer num_buffered_blocks of the biggest in1 block. Avoids the wrap-
-    // adjustment edge case for every consumer matmul (the production llama-70B pattern).
+    // ---- GCB size: large enough to buffer num_buffered_blocks of the biggest in1 block,
+    // capped at the L1 and CB-page budgets.
     constexpr uint32_t kL1Cap = 1'400'000;
     constexpr uint32_t kMaxCbPagesBytes = 65000u * 16u;
-    TT_FATAL(
-        lcm_in1_block_size <= std::numeric_limits<uint32_t>::max(),
-        "LCM of in1_block_sizes ({}) overflows uint32; check program_configs",
-        lcm_in1_block_size);
-    const uint32_t lcm = static_cast<uint32_t>(lcm_in1_block_size);
     const uint32_t l1_budget = kL1Cap > max_in1_block_size ? kL1Cap - max_in1_block_size : 0;
     const uint32_t upper = std::min(l1_budget, kMaxCbPagesBytes);
     TT_FATAL(
-        upper >= lcm,
-        "GCB upper bound ({} B = min(L1 budget {}, max CB pages {})) is smaller than LCM of in1 "
-        "block sizes ({} B); cannot pick a gcb_size that is both within budget and a multiple of "
-        "every consumer's in1_block_size. Reduce num_buffered_blocks, per_core_N, or in0_block_w.",
+        upper >= max_in1_block_size,
+        "GCB upper bound ({} B = min(L1 budget {}, max CB pages {})) cannot fit a single in1 block "
+        "({} B). Reduce per_core_N or in0_block_w.",
         upper,
         l1_budget,
         kMaxCbPagesBytes,
-        lcm);
+        max_in1_block_size);
     const uint32_t desired = max_in1_block_size * num_buffered_blocks;
-    const uint32_t gcb_size = (std::min(desired, upper) / lcm) * lcm;
-    TT_FATAL(gcb_size > 0, "Internal: gcb_size computed as 0 (lcm={}, upper={}, desired={})", lcm, upper, desired);
+    const uint32_t gcb_size = std::min(desired, upper);
+    TT_FATAL(
+        gcb_size > 0, "Internal: gcb_size computed as 0 (upper={}, desired={})", upper, desired);
 
     // ---- Build bank_to_receivers (row-major through the ring rectangle) ----
     std::vector<std::pair<uint32_t, CoreRangeSet>> bank_to_receivers;

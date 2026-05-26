@@ -5,6 +5,7 @@
 #include "dram_prefetcher_validator.hpp"
 
 #include <tt_stl/assert.hpp>
+#include <tt_stl/reflection.hpp>
 #include <tt-metalium/buffer.hpp>
 #include <tt-metalium/circular_buffer_config.hpp>
 #include <tt-metalium/constants.hpp>
@@ -13,6 +14,7 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/kernel_types.hpp>
 #include <tt-metalium/program.hpp>
+#include <tt-metalium/program_cache.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <tt-metalium/tt_metal.hpp>
 
@@ -22,6 +24,10 @@ namespace {
 
 constexpr uint32_t kValidatorRemoteCBId = 31;
 constexpr uint32_t kValidatorScratchCBId = 0;
+
+// Empty shared-variables struct: this op has no runtime args to override on cache hit.
+struct ValidatorSharedVars {};
+using ValidatorCachedWorkload = tt::tt_metal::program_cache::detail::CachedMeshWorkload<ValidatorSharedVars>;
 
 }  // namespace
 
@@ -88,6 +94,30 @@ void test_dram_prefetcher_validator(
     const CoreRangeSet receiver_cores = global_cb.receiver_cores();
     TT_FATAL(receiver_cores.num_cores() > 0, "GCB has no receiver cores");
 
+    // Hash key: includes everything the Program shape depends on. Buffer address is part of
+    // compile-time args (via TensorAccessorArgs), so include it to avoid stale-program reuse
+    // if the source tensor is reallocated at a different DRAM address.
+    const uint64_t program_hash = ttsl::hash::hash_objects_with_default_seed(
+        num_layers,
+        print_stride,
+        page_bytes_per_recv,
+        num_blocks,
+        num_senders,
+        num_receivers_per_sender,
+        static_cast<uint64_t>(tensor_buffer->address()),
+        static_cast<uint64_t>(global_cb.config_address()),
+        static_cast<uint32_t>(tensor_dataformat));
+
+    auto& program_cache = mesh_device->get_program_cache();
+    const bool cache_enabled = program_cache.is_enabled();
+    if (cache_enabled && program_cache.contains(program_hash)) {
+        auto& cached = program_cache.get(program_hash);
+        auto& cached_workload = cached.cached_program.template get<ValidatorCachedWorkload>();
+        tt::tt_metal::distributed::EnqueueMeshWorkload(
+            mesh_device->mesh_command_queue(), cached_workload.workload, /*blocking=*/false);
+        return;
+    }
+
     Program program = CreateProgram();
 
     // Receiver-side remote CB: wait_front/pop_front units are one full per-receiver block.
@@ -148,7 +178,20 @@ void test_dram_prefetcher_validator(
     tt::tt_metal::distributed::MeshCoordinateRange device_range(tt::tt_metal::distributed::MeshCoordinate(0, 0));
     tt::tt_metal::distributed::MeshWorkload workload;
     workload.add_program(device_range, std::move(program));
-    tt::tt_metal::distributed::EnqueueMeshWorkload(mesh_device->mesh_command_queue(), workload, /*blocking=*/false);
+
+    if (cache_enabled) {
+        ValidatorCachedWorkload cached_workload{std::move(workload), ValidatorSharedVars{}};
+        program_cache.insert(
+            program_hash,
+            tt::tt_metal::program_cache::detail::CachedProgramFactory{std::move(cached_workload), 0});
+        auto& stored = program_cache.get(program_hash);
+        auto& cached_ref = stored.cached_program.template get<ValidatorCachedWorkload>();
+        tt::tt_metal::distributed::EnqueueMeshWorkload(
+            mesh_device->mesh_command_queue(), cached_ref.workload, /*blocking=*/false);
+    } else {
+        tt::tt_metal::distributed::EnqueueMeshWorkload(
+            mesh_device->mesh_command_queue(), workload, /*blocking=*/false);
+    }
 }
 
 }  // namespace ttnn::operations::experimental::test
