@@ -187,7 +187,7 @@ def run_reduce_scatter_impl(
             # Compile the op
             tt_reduce_scatter_output_trace_list = []
             for i in range(num_iters):
-                tt_reduce_scatter_output_tensor = run_op(i)
+                run_op(i)
             logger.info(f"Done compiling Op")
 
             # Capture the trace
