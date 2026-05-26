@@ -52,7 +52,7 @@
     ./build/test/tt_metal/tt_fabric/fabric_unit_tests --gtest_filter="Fabric2D*Fixture.*"
     ./build/test/tt_metal/tt_fabric/fabric_unit_tests --gtest_filter="Fabric*MuxFixture.*"
   skus:
-    wh_galaxy:
+    wh_galaxy_perf_uf:
       timeout: 5
 
 - id: galaxy-multiprocess
@@ -73,7 +73,7 @@
     tt-run --rank-binding 2x4_multi_mesh_cyclic_rank_binding.yaml --mpi-args "--allow-run-as-root" ./build/test/tt_metal/perf_microbenchmark/routing/test_tt_fabric --test_config tests/tt_metal/tt_metal/perf_microbenchmark/routing/test_wh_6u_quad_2x4_cyclic.yaml
     tt-run --rank-binding 4x2_multi_mesh_rank_binding.yaml --mpi-args "--allow-run-as-root" ./build/test/tt_metal/perf_microbenchmark/routing/test_tt_fabric --test_config tests/tt_metal/tt_metal/perf_microbenchmark/routing/test_fabric_multi_mesh_sanity_common.yaml
   skus:
-    wh_galaxy:
+    wh_galaxy_perf_uf:
       timeout: 15
 
 - id: galaxy-distributed-ops
@@ -86,7 +86,7 @@
     mkdir -p generated/test_reports
     pytest tests/ttnn/distributed/test_distributed_layernorm_TG.py
   skus:
-    wh_galaxy:
+    wh_galaxy_perf_uf:
       timeout: 5
 
 # - id: galaxy-prefetcher-tg
@@ -133,5 +133,5 @@
       --cov-config=models/common/tests/setup.cfg || failed=1
     exit $failed
   skus:
-    wh_galaxy_perf:
+    wh_galaxy_perf_uf:
       timeout: 10
