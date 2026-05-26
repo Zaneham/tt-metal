@@ -43,6 +43,10 @@ void kernel_main() {
     constexpr uint32_t cb_id_batch_idx = get_compile_time_arg_val(9);  // CB for reading from batch_idx_tensor
     constexpr uint32_t batch_idx_stick_size =
         get_compile_time_arg_val(10);  // Expected to be small (e.g., 4 for uint32)
+    // 0 = legacy unbounded (no wrap); nonzero = wrap seq_tile_id mod this value before
+    // page_table lookup. In TILE rows. Validator ensures capacity_t > 0 implies
+    // capacity_t is a multiple of block_size_t.
+    constexpr uint32_t capacity_t = get_compile_time_arg_val(11);
 
     uint32_t dst_addr = get_arg_val<uint32_t>(0);
     uint32_t page_table_addr = get_arg_val<uint32_t>(1);
@@ -56,7 +60,7 @@ void kernel_main() {
         return;  // Early exit, no work done
     }
 
-    constexpr auto s0_args = TensorAccessorArgs<11>();
+    constexpr auto s0_args = TensorAccessorArgs<12>();
     constexpr auto page_table_args = TensorAccessorArgs<s0_args.next_compile_time_args_offset()>();
     constexpr auto batch_idx_tensor_args = TensorAccessorArgs<page_table_args.next_compile_time_args_offset()>();
 
@@ -94,6 +98,12 @@ void kernel_main() {
     for (uint32_t row_id = start_row_num; row_id < start_row_num + num_rows; ++row_id) {
         uint32_t cur_head = row_id / num_blocks_of_work_per_head;
         uint32_t seq_tile_id = row_id % num_blocks_of_work_per_head;
+        // Bounded sliding-window cache: wrap the virtual tile index into the bounded
+        // capacity before the page_table lookup. capacity_t is a multiple of
+        // block_size_t (validated), so the wrap preserves intra-block layout.
+        if constexpr (capacity_t > 0) {
+            seq_tile_id %= capacity_t;
+        }
         uint32_t physical_tile_id =
             virtual_seq_tile_id_to_physical_tile_id<num_heads, block_size_t, Wt>(seq_tile_id, cur_head, page_table_ptr);
 
