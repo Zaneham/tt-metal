@@ -44,13 +44,19 @@ void kernel_main() {
     constexpr uint32_t NHV = get_compile_time_arg_val(27);
     constexpr bool v_uses_batch_chain = (NHV == 1);
     constexpr uint32_t q_heads_per_v = NH / NHV;
+    // Latent-V mode (V.seq == 0 from caller): V tiles are read from K's buffer.
+    // Tile addressing uses K's row stride (DHt) instead of vDHt so the per-row
+    // offset matches K; the existing V Slice(..., 0, vDHt) already truncates
+    // the read window to V's logical head dim.
+    constexpr bool v_shares_k_buffer = get_compile_time_arg_val(28) == 1;
+    constexpr uint32_t v_tile_columns = v_shares_k_buffer ? DHt : vDHt;
 
     // Joint-path compile-time gating. When zero, joint Q/K branches are statically dead
     // and dropped by the compiler, eliminating runtime ternaries and joint generator uses.
     constexpr bool has_joint_q = num_joint_q_chunks > 0;
     constexpr bool has_joint_k = num_joint_k_chunks > 0;
 
-    constexpr auto q_args = TensorAccessorArgs<28>();
+    constexpr auto q_args = TensorAccessorArgs<29>();
     constexpr auto k_args = TensorAccessorArgs<q_args.next_compile_time_args_offset()>();
     constexpr auto v_args = TensorAccessorArgs<k_args.next_compile_time_args_offset()>();
     constexpr auto gathered_k_args = TensorAccessorArgs<v_args.next_compile_time_args_offset()>();
@@ -268,18 +274,33 @@ void kernel_main() {
 
     const auto q_reader = TensorAccessor(q_args, q_addr);
     const auto local_k_reader = TensorAccessor(k_args, k_addr);
-    const auto local_v_reader = TensorAccessor(v_args, v_addr);
+    // Latent-V mode: V accessors point at K's buffer (with K's stride). The v_args
+    // CT slot still appears in the arg list (the program factory pushes V's
+    // TensorAccessorArgs unconditionally), but we don't construct an accessor from it.
+    const auto local_v_reader = [&]() {
+        if constexpr (v_shares_k_buffer) {
+            return TensorAccessor(k_args, k_addr);
+        } else {
+            return TensorAccessor(v_args, v_addr);
+        }
+    }();
     const auto gathered_k_reader = TensorAccessor(gathered_k_args, gathered_k_addr);
-    const auto gathered_v_reader = TensorAccessor(gathered_v_args, gathered_v_addr);
+    const auto gathered_v_reader = [&]() {
+        if constexpr (v_shares_k_buffer) {
+            return TensorAccessor(gathered_k_args, gathered_k_addr);
+        } else {
+            return TensorAccessor(gathered_v_args, gathered_v_addr);
+        }
+    }();
     const auto joint_q_reader = TensorAccessor(joint_q_args, joint_q_addr);
     const auto joint_k_reader = TensorAccessor(joint_k_args, joint_k_addr);
     const auto joint_v_reader = TensorAccessor(joint_v_args, joint_v_addr);
 
     const auto input_q_tile_logical = TensorTileShape(B, NH, q_local_padded_Nt, DHt);
     const auto input_k_tile_logical = TensorTileShape(B, NHK, kv_local_padded_Nt, DHt);
-    const auto input_v_tile_logical = TensorTileShape(B, NHV, kv_local_padded_Nt, vDHt);
+    const auto input_v_tile_logical = TensorTileShape(B, NHV, kv_local_padded_Nt, v_tile_columns);
     const auto gathered_k_input_tile_logical = TensorTileShape(B, NHK, padded_Nt, DHt);
-    const auto gathered_v_input_tile_logical = TensorTileShape(B, NHV, padded_Nt, vDHt);
+    const auto gathered_v_input_tile_logical = TensorTileShape(B, NHV, padded_Nt, v_tile_columns);
     const auto joint_input_tile_logical = TensorTileShape(B, NH, Lt, DHt);
 
     const auto q_generator = PaddedAddrGenerator(q_reader, input_q_tile_logical);
