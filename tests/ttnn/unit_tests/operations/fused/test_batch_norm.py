@@ -751,3 +751,55 @@ def test_batch_norm_mixed_precision(
             comp_BN_running_var = tt_updated_var is None
         comp_BN_Output = comp_BN_Output and comp_BN_running_mean and comp_BN_running_var
     assert comp_BN_Output
+
+
+def test_batch_norm_aliased_running_and_affine_tensors(device):
+    """Regression for #41127: running_mean/running_var must not be updated before the affine step.
+
+    tt-xla may alias running_mean with bias and running_var with weight. Updating running stats
+    in-place before batch_norm would overwrite weight/bias with batch statistics.
+    """
+    input_shape = torch.Size([1, 16, 24, 32])
+    channels = input_shape[1]
+    eps = 9.99999996e-13
+    momentum = 1.0
+
+    in_data, input_tensor = data_gen_with_range_batch_norm(input_shape, 5, 10, device, is_input=True)
+    input_tensor = ttnn.fill_implicit_tile_padding(input_tensor, TEST_PADDING_VALUE)
+
+    weight_data = torch.zeros(channels, dtype=torch.bfloat16)
+    bias_data = torch.ones(channels, dtype=torch.bfloat16)
+    weight_tensor = ttnn.from_torch(
+        weight_data.view(1, channels, 1, 1), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+    )
+    bias_tensor = ttnn.from_torch(
+        bias_data.view(1, channels, 1, 1), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+    )
+
+    tt_output_tensor = ttnn.batch_norm(
+        input_tensor,
+        weight=weight_tensor,
+        bias=bias_tensor,
+        running_mean=bias_tensor,
+        running_var=weight_tensor,
+        training=True,
+        eps=eps,
+        momentum=momentum,
+    )
+    tt_output = ttnn.to_torch(tt_output_tensor)
+
+    # PyTorch also corrupts aliased running_mean/weight buffers if they are the same object.
+    # Reference uses separate running stat tensors with the same initial values as bias/weight.
+    running_mean_ref = torch.ones(channels, dtype=torch.bfloat16)
+    running_var_ref = torch.zeros(channels, dtype=torch.bfloat16)
+    torch_result = torch.nn.functional.batch_norm(
+        input=in_data,
+        running_mean=running_mean_ref,
+        running_var=running_var_ref,
+        weight=weight_data,
+        bias=bias_data,
+        training=True,
+        eps=eps,
+        momentum=momentum,
+    )
+    assert_numeric_metrics(torch_result, tt_output, pcc_threshold=0.99, rtol=0.1, atol=4.0, frobenius_threshold=0.15)
