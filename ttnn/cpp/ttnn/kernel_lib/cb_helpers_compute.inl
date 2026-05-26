@@ -71,4 +71,25 @@ ALWI bool is_valid_cb_tile_page_size(uint32_t cb_id, DataFormat format) {
     return page_size_bytes == tile_size;
 }
 
+template <uint32_t cb_id>
+constexpr uint32_t cb_l1_format() {
+#if defined(UCK_CHLKC_PACK)
+    return pack_dst_format[cb_id];
+#else
+    return unpack_src_format[cb_id];
+#endif
+}
+
+template <uint32_t cb_id>
+constexpr bool cb_has_32x32_tiles() {
+#if defined(UCK_CHLKC_PACK)
+    constexpr uint32_t tile_r_dim = pack_tile_r_dim[cb_id];
+    constexpr uint32_t tile_c_dim = pack_tile_c_dim[cb_id];
+#else
+    constexpr uint32_t tile_r_dim = unpack_tile_r_dim[cb_id];
+    constexpr uint32_t tile_c_dim = unpack_tile_c_dim[cb_id];
+#endif
+    return tile_r_dim == 32 && tile_c_dim == 32;
+}
+
 }  // namespace compute_kernel_lib

@@ -27,6 +27,12 @@ ALWI bool is_valid_cb_tile_page_size(uint32_t cb_id);
 
 ALWI bool is_valid_cb_tile_page_size(uint32_t cb_id, DataFormat format);
 
+template <uint32_t cb_id>
+constexpr uint32_t cb_l1_format();
+
+template <uint32_t cb_id>
+constexpr bool cb_has_32x32_tiles();
+
 }  // namespace compute_kernel_lib
 
 #include "cb_helpers_compute.inl"

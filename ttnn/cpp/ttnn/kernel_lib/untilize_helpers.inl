@@ -12,7 +12,6 @@
  */
 
 #include "ttnn/cpp/ttnn/kernel_lib/cb_helpers_compute.hpp"
-#include "ttnn/cpp/ttnn/kernel_lib/tile_format_helpers.hpp"
 #include "api/dataflow/circular_buffer.h"
 
 namespace compute_kernel_lib {
