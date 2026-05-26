@@ -648,6 +648,7 @@ def test_prefill_transformer(
             # Only meaningful when `is_balanced` so `tt_kvpe_all_layers` is
             # position-continuous (matching the lookup table's position index).
             if is_balanced:
+                logger.info(f"Starting KV cache table validity check")
                 chunk_shape = [1, 1, NUM_CONTIGUOUS_TOKENS_IN_DRAM_BANK, kvpe_cache_head_dim]
                 for layer in range(num_layers):
                     for position in range(0, isl_total, NUM_CONTIGUOUS_TOKENS_IN_DRAM_BANK):
@@ -658,6 +659,7 @@ def test_prefill_transformer(
                             layer : layer + 1, :, position : position + NUM_CONTIGUOUS_TOKENS_IN_DRAM_BANK, :
                         ]
                         assert_equal(chunk_torch, expected_chunk)
+                logger.info(f"KV cache table validity check passed!")
 
         # --- Logits PCC check (last-token logits vs trace reference) ---
         # Trace logits / next-token are products of the full traced model. They are

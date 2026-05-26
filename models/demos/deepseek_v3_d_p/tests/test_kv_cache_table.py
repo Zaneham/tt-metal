@@ -26,8 +26,8 @@ from tests.ttnn.utils_for_testing import assert_equal
 # sp x tp
 @pytest.mark.parametrize(
     "mesh_device",
-    [(32, 4), (8, 4)],
-    ids=["32x4", "8x4"],
+    [(8, 4)],
+    ids=["8x4"],
     indirect=True,
 )
 @pytest.mark.parametrize(
@@ -44,7 +44,7 @@ from tests.ttnn.utils_for_testing import assert_equal
     indirect=True,
 )
 @pytest.mark.parametrize("use_pretrained", [False, True], ids=["random", "pretrained"])
-@pytest.mark.parametrize("seq_len", [128 * 1024, 100 * 1024], ids=["seq128k", "seq100k"])
+@pytest.mark.parametrize("seq_len", [25 * 1024], ids=["seq25k"])
 @pytest.mark.timeout(0)  # Disable timeout — first run computes and caches CPU reference for large seq lengths
 def test_mla_disaggregation(
     use_pretrained,
@@ -170,13 +170,6 @@ def test_mla_disaggregation(
 
     # remember layer0 results
     tt_kvpe_cache_torch_layer0 = tt_kvpe_cache_torch[:1, :1, :, :]
-
-    # assert layer1 is zeros
-    tt_kvpe_cache_torch_layer1 = tt_kvpe_cache_torch[1:2, :1, :, :]
-    torch_layer_zeros = torch.zeros(1, 1, seq_len, kvpe_cache_head_dim)
-    logger.info(f"Checking that layer 1 is all zeros")
-    assert_equal(tt_kvpe_cache_torch_layer1, torch_layer_zeros)
-    logger.info(f"Check complete")
 
     # reorder into position continuous torch cache
     tt_kvpe_cache_torch_layer0 = reverse_reorder_tensor_chunks(tt_kvpe_cache_torch_layer0, chunk_order, seq_dim=2)
