@@ -37,6 +37,53 @@ def _compute_per_device_vocab(vocab_size, num_tp):
     return 1 << (per_device - 1).bit_length()
 
 
+def _get_lm_head_program_config(mesh_device, m: int, k: int, n: int):
+    """Build a 1D-mcast matmul program config for the LM head.
+
+    LM head shape is [B, 1, H] x [H, V_per_dev] with B padded to 32 for
+    decode (so M_tiles=1). Primary target is gemma-4-31B-it on T3K (1x8):
+    H=5376 (K_tiles=168), vocab=262144, V_per_dev=32768 (N_tiles=1024).
+    Layout: the activation tile is small,
+    the weight slab is large — mcast in0 across the whole compute grid and
+    split N evenly across cores.
+
+    Picks per_core_N = ceil(N_tiles / num_cores) — the kernel pads the
+    trailing core when num_cores doesn't divide N_tiles (e.g. 80 BH cores
+    against 1024 tiles → 13 per core with a partial tail). in0_block_w is
+    the largest power of 2 dividing K_tiles, capped at 32 so the in0 CB
+    stays small. out_subblock_w stays <=4 to fit the dest register file.
+    """
+    tile_size = 32
+    grid = mesh_device.compute_with_storage_grid_size()
+    num_cores = grid.x * grid.y
+
+    m_tiles = max(1, (m + tile_size - 1) // tile_size)
+    k_tiles = max(1, k // tile_size)
+    n_tiles = max(1, n // tile_size)
+
+    per_core_n = max(1, (n_tiles + num_cores - 1) // num_cores)
+
+    in0_block_w = 32
+    while in0_block_w > 1 and k_tiles % in0_block_w != 0:
+        in0_block_w //= 2
+
+    out_subblock_w = min(per_core_n, 4)
+    while out_subblock_w > 1 and per_core_n % out_subblock_w != 0:
+        out_subblock_w -= 1
+
+    return ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+        compute_with_storage_grid_size=ttnn.CoreCoord(grid.x, grid.y),
+        in0_block_w=in0_block_w,
+        out_subblock_h=1,
+        out_subblock_w=out_subblock_w,
+        per_core_M=m_tiles,
+        per_core_N=per_core_n,
+        fuse_batch=True,
+        fused_activation=None,
+        mcast_in0=True,
+    )
+
+
 def create_rope_caches(mesh_device, hf_config, max_seq_len):
     """Create HF-format cos/sin caches for both sliding and global layer types.
 
@@ -602,9 +649,22 @@ class Gemma4Model:
                 (1, 1, get_last_token + 32, hidden_states.shape[-1]),
             )
 
-        # LM head (column-parallel on vocab dim when TP > 1)
+        # LM head (column-parallel on vocab dim when TP > 1).
+        # Decode + prefill last-token both feed an M=32-row tile here
+        # (decode batch <=32 pads to a tile; prefill is sliced to 32 above),
+        # so the 1D-mcast program config below is shared across both paths.
+        # ttnn.linear's default heuristic picks a generic config that doesn't
+        # account for the 1024-N-tile width of the 262k-vocab shard; pinning
+        # an explicit MatmulMultiCoreReuseMultiCast1DProgramConfig keeps the
+        # split across the full compute grid (8x8 WH / 8x10 BH) deterministic.
         if self.lm_head_weight is not None:
-            logits = ttnn.linear(hidden_states, self.lm_head_weight)
+            lm_head_pc = _get_lm_head_program_config(
+                self.mesh_device,
+                m=hidden_states.shape[2],
+                k=self.hidden_size,
+                n=self.lm_head_weight.shape[-1],
+            )
+            logits = ttnn.linear(hidden_states, self.lm_head_weight, program_config=lm_head_pc)
             hidden_states.deallocate(True)
         else:
             logits = hidden_states
