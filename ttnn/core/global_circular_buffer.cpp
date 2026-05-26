@@ -46,7 +46,7 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     MeshDevice* mesh_device,
     const std::vector<ttnn::operations::matmul::MatmulMultiCoreReuseMultiCast1DProgramConfig>& program_configs,
     const std::vector<tt::tt_metal::Tensor>& weights,
-    uint32_t num_buffered_blocks,
+    uint32_t size,
     BufferType buffer_type) {
     TT_FATAL(!program_configs.empty(), "Must provide at least one program config");
     TT_FATAL(
@@ -54,7 +54,7 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         "Expected one weight tensor per program config; got {} configs and {} weights",
         program_configs.size(),
         weights.size());
-    TT_FATAL(num_buffered_blocks > 0, "num_buffered_blocks must be > 0");
+    TT_FATAL(size > 0, "size must be > 0");
 
     // All matmuls share the same GCB receiver rectangle, so they must all agree on the
     // ring shape and per-bank receiver count.
@@ -186,30 +186,40 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
             num_recv_per_bank);
 
         // ---- This matmul's in1 block size ----
+        // gather_in0 matmul derives its effective in0_block_w from weight_K_tiles / ring_size,
+        // not from cfg.in0_block_w (which is typically left at 1 in the program config). Use the
+        // same derivation here so the GCB page matches what the matmul will actually consume.
+        const uint32_t actual_in0_block_w = weight_K_tiles / ring_size;
         const uint32_t bytes_per_tile = tt::tile_size(tt::tt_metal::datatype_to_dataformat_converter(w.dtype()));
-        const uint32_t in1_block_size = static_cast<uint32_t>(cfg.in0_block_w * cfg.per_core_N) * bytes_per_tile;
+        const uint32_t in1_block_size = static_cast<uint32_t>(actual_in0_block_w * cfg.per_core_N) * bytes_per_tile;
         TT_FATAL(in1_block_size > 0, "config[{}] in1_block_size computed as 0", i);
         max_in1_block_size = std::max(max_in1_block_size, in1_block_size);
     }
 
-    // ---- GCB size: large enough to buffer num_buffered_blocks of the biggest in1 block,
-    // capped at the L1 and CB-page budgets.
+    // ---- Validate the caller-supplied size fits the L1 / CB-page budget and at least
+    // one full layer's worth of pages (the matmul does wait_front(num_blocks)).
     constexpr uint32_t kL1Cap = 1'400'000;
     constexpr uint32_t kMaxCbPagesBytes = 65000u * 16u;
+    const uint32_t num_blocks = ring_size;
+    const uint32_t min_size = max_in1_block_size * num_blocks;
     const uint32_t l1_budget = kL1Cap > max_in1_block_size ? kL1Cap - max_in1_block_size : 0;
     const uint32_t upper = std::min(l1_budget, kMaxCbPagesBytes);
     TT_FATAL(
-        upper >= max_in1_block_size,
-        "GCB upper bound ({} B = min(L1 budget {}, max CB pages {})) cannot fit a single in1 block "
-        "({} B). Reduce per_core_N or in0_block_w.",
+        size >= min_size,
+        "GCB size ({} B) must be at least num_blocks * largest in1_block ({} * {} = {} B); the "
+        "matmul does wait_front(num_blocks) so it needs that many pages buffered before it consumes.",
+        size,
+        num_blocks,
+        max_in1_block_size,
+        min_size);
+    TT_FATAL(
+        size <= upper,
+        "GCB size ({} B) exceeds budget ({} B = min(L1 budget {}, max CB pages {})). Reduce size, "
+        "per_core_N, or in0_block_w.",
+        size,
         upper,
         l1_budget,
-        kMaxCbPagesBytes,
-        max_in1_block_size);
-    const uint32_t desired = max_in1_block_size * num_buffered_blocks;
-    const uint32_t gcb_size = std::min(desired, upper);
-    TT_FATAL(
-        gcb_size > 0, "Internal: gcb_size computed as 0 (upper={}, desired={})", upper, desired);
+        kMaxCbPagesBytes);
 
     // ---- Build bank_to_receivers (row-major through the ring rectangle) ----
     std::vector<std::pair<uint32_t, CoreRangeSet>> bank_to_receivers;
@@ -227,7 +237,7 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     }
 
     return tt::tt_metal::experimental::CreateGlobalCircularBufferWithDramSenders(
-        mesh_device, bank_to_receivers, gcb_size, buffer_type);
+        mesh_device, bank_to_receivers, size, buffer_type);
 }
 
 }  // namespace ttnn::global_circular_buffer

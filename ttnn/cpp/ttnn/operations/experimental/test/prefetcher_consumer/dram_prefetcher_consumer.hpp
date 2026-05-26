@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -23,7 +24,9 @@ struct DramPrefetcherConsumerDeviceOperation {
     struct operation_attributes_t {
         uint32_t num_iters;
         uint32_t page_size_bytes;
-        tt::tt_metal::experimental::GlobalCircularBuffer global_cb;
+        // optional<> because reflection-based profiler serialization needs a default-
+        // constructible attribute struct, and GlobalCircularBuffer has no default ctor.
+        std::optional<tt::tt_metal::experimental::GlobalCircularBuffer> global_cb;
         ttnn::MeshDevice* mesh_device;
     };
 

@@ -269,6 +269,202 @@ def test_dram_core_prefetcher_BH_param(
 
 
 # ---------------------------------------------------------------------------
+# create_global_circular_buffer_for_matmul_1d factory
+# ---------------------------------------------------------------------------
+# Drive the same shape as the qkv_small case (K=256, N=8*32, bf16) but build the GCB
+# via the matmul-aware factory instead of calling create_global_circular_buffer_with_dram_senders
+# directly. End-to-end PCC check confirms the factory's bank-to-receivers mapping +
+# size validation match what the matmul + prefetcher expect.
+@pytest.mark.parametrize(
+    "layers_buffered",
+    [
+        1,  # minimum: exactly one layer worth of pages (num_blocks * in1_block_size)
+        2,  # 2 layers buffered: double-buffer between prefetcher and matmul
+    ],
+)
+def test_create_global_circular_buffer_for_matmul_1d(device, layers_buffered):
+    num_dram_banks = device.dram_grid_size().x
+    recv_per_bank = 1
+    ring_size = num_dram_banks * recv_per_bank
+    ring_cols = num_dram_banks
+    ring_rows = recv_per_bank
+    dtype = ttnn.bfloat16
+    k_tiles_per_shard = 8  # K = 8 * ring_size * TILE_SIZE
+    n_tiles_per_receiver = 1  # N = ring_size * 1 * TILE_SIZE
+    tile_bytes = _bytes_per_tile(dtype)
+
+    M = 32
+    K = k_tiles_per_shard * ring_size * ttnn.TILE_SIZE
+    N = ring_size * n_tiles_per_receiver * ttnn.TILE_SIZE
+    receiver_core_range_set = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(ring_cols - 1, ring_rows - 1))}
+    )
+
+    # ---- Weight + activation (same setup as the qkv_small case) ----
+    torch.manual_seed(zlib.crc32(f"factory_{layers_buffered}".encode()))
+    pt_weight = torch.randn(1, 1, K, N)
+    dram_core_range_set = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_dram_banks - 1, 0))}
+    )
+    weight_mem_config = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+        ttnn.BufferType.DRAM,
+        ttnn.ShardSpec(dram_core_range_set, [K, N // num_dram_banks], ttnn.ShardOrientation.ROW_MAJOR),
+    )
+    tt_weight = ttnn.as_tensor(
+        pt_weight, device=device, dtype=dtype, memory_config=weight_mem_config, layout=ttnn.TILE_LAYOUT
+    )
+
+    pt_act = torch.randn(1, 1, M, K)
+    K_per_shard = _round_up(math.ceil(K / ring_size), ttnn.TILE_SIZE)
+    act_mem_config = ttnn.create_sharded_memory_config(
+        shape=(M, K_per_shard),
+        core_grid=receiver_core_range_set,
+        strategy=ttnn.ShardStrategy.WIDTH,
+        orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        use_height_and_width_as_shard_shape=True,
+    )
+    tt_act = ttnn.from_torch(
+        pt_act, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, memory_config=act_mem_config
+    )
+    addrs = ttnn.from_torch(
+        torch.zeros(1, 1),
+        device=device,
+        dtype=ttnn.uint32,
+        memory_config=ttnn.MemoryConfig(
+            ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            ttnn.BufferType.L1,
+            ttnn.ShardSpec(
+                ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))}),
+                [1, 1],
+                ttnn.ShardOrientation.ROW_MAJOR,
+            ),
+        ),
+    )
+
+    # ---- Matmul program config (must match the factory's expectations) ----
+    out_block_h = M // ttnn.TILE_SIZE
+    out_block_w = N // ring_size // ttnn.TILE_SIZE
+    out_subblock_w = min(out_block_w, 8)
+    while out_subblock_w > 1 and out_block_w % out_subblock_w != 0:
+        out_subblock_w -= 1
+    program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+        compute_with_storage_grid_size=(ring_cols, ring_rows),
+        in0_block_w=1,
+        out_subblock_h=1,
+        out_subblock_w=out_subblock_w,
+        per_core_M=out_block_h,
+        per_core_N=out_block_w,
+        fuse_batch=True,
+        fused_activation=None,
+        mcast_in0=False,
+        gather_in0=True,
+        hop_cores=ttnn.CoreRangeSet([]),
+        num_global_cb_receivers=recv_per_bank,
+        untilize_out=False,
+    )
+
+    # ---- Build GCB via the matmul-aware factory ----
+    # gather_in0 matmul uses actual_in0_block_w = weight_K_tiles / ring_size (= k_tiles_per_shard
+    # here), not program_config.in0_block_w; the factory matches that. The minimum useful size is
+    # num_blocks (= ring_size) * in1_block_size — one full layer's worth of pages.
+    weight_K_tiles = K // ttnn.TILE_SIZE
+    actual_in0_block_w = weight_K_tiles // ring_size
+    in1_block_size = actual_in0_block_w * program_config.per_core_N * tile_bytes
+    num_blocks = ring_size
+    size = num_blocks * in1_block_size * layers_buffered
+    gcb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
+        device, [program_config], [tt_weight], size=size
+    )
+    logger.info(
+        f"[factory layers_buffered={layers_buffered}] in1_block={in1_block_size} num_blocks={num_blocks} size={size}"
+    )
+
+    # ---- Run: prefetcher (async) -> matmul (consumes via gcb) -> stop drains ----
+    output_mem_config = ttnn.create_sharded_memory_config(
+        shape=(M, N // ring_size),
+        core_grid=receiver_core_range_set,
+        strategy=ttnn.ShardStrategy.WIDTH,
+        orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        use_height_and_width_as_shard_shape=True,
+    )
+    compute_kernel_config = ttnn.WormholeComputeKernelConfig(
+        math_fidelity=ttnn.MathFidelity.HiFi4,
+        math_approx_mode=False,
+        fp32_dest_acc_en=True,
+        packer_l1_acc=True,
+        dst_full_sync_en=True,
+    )
+    ttnn.experimental.start_dram_core_prefetcher(device, [tt_weight, addrs], num_layers=1, global_cb=gcb)
+    tt_out = ttnn.linear(
+        tt_act,
+        tt_weight,
+        program_config=program_config,
+        memory_config=output_mem_config,
+        compute_kernel_config=compute_kernel_config,
+        dtype=ttnn.bfloat16,
+        global_cb=gcb,
+    )
+    ttnn.experimental.stop_dram_core_prefetcher(device)
+
+    out_torch = ttnn.to_torch(tt_out)
+    expected = pt_act.float() @ pt_weight.float()
+    passing, output_str = comp_pcc(expected, out_torch, 0.999)
+    logger.info(f"[factory layers_buffered={layers_buffered}] {output_str}")
+    assert passing, f"[factory layers_buffered={layers_buffered}] PCC check failed: {output_str}"
+
+
+def test_create_global_circular_buffer_for_matmul_1d_rejects_undersized(device):
+    """Factory must TT_FATAL when size < num_blocks * in1_block_size (matmul would deadlock)."""
+    num_dram_banks = device.dram_grid_size().x
+    recv_per_bank = 1
+    ring_size = num_dram_banks * recv_per_bank
+    dtype = ttnn.bfloat16
+    tile_bytes = _bytes_per_tile(dtype)
+
+    K = 8 * ring_size * ttnn.TILE_SIZE
+    N = ring_size * ttnn.TILE_SIZE
+    pt_weight = torch.zeros(1, 1, K, N)
+    dram_core_range_set = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_dram_banks - 1, 0))}
+    )
+    weight_mem_config = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+        ttnn.BufferType.DRAM,
+        ttnn.ShardSpec(dram_core_range_set, [K, N // num_dram_banks], ttnn.ShardOrientation.ROW_MAJOR),
+    )
+    tt_weight = ttnn.as_tensor(
+        pt_weight, device=device, dtype=dtype, memory_config=weight_mem_config, layout=ttnn.TILE_LAYOUT
+    )
+
+    program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+        compute_with_storage_grid_size=(num_dram_banks, recv_per_bank),
+        in0_block_w=1,
+        out_subblock_h=1,
+        out_subblock_w=1,
+        per_core_M=1,
+        per_core_N=1,
+        fuse_batch=True,
+        fused_activation=None,
+        mcast_in0=False,
+        gather_in0=True,
+        hop_cores=ttnn.CoreRangeSet([]),
+        num_global_cb_receivers=recv_per_bank,
+        untilize_out=False,
+    )
+
+    weight_K_tiles = K // ttnn.TILE_SIZE
+    actual_in0_block_w = weight_K_tiles // ring_size
+    in1_block_size = actual_in0_block_w * program_config.per_core_N * tile_bytes
+    num_blocks = ring_size
+    min_size = num_blocks * in1_block_size
+    with pytest.raises(RuntimeError, match="must be at least num_blocks"):
+        ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
+            device, [program_config], [tt_weight], size=min_size - 16
+        )
+
+
+# ---------------------------------------------------------------------------
 # Multi-tensor smoke (discard receiver)
 # ---------------------------------------------------------------------------
 _MT_NUM_RECV_PER_BANK = 2

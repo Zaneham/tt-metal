@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -25,7 +26,9 @@ struct DramPrefetcherValidatorDeviceOperation {
     struct operation_attributes_t {
         uint32_t num_layers;
         uint32_t print_stride;
-        tt::tt_metal::experimental::GlobalCircularBuffer global_cb;
+        // optional<> because reflection-based profiler serialization needs a default-
+        // constructible attribute struct, and GlobalCircularBuffer has no default ctor.
+        std::optional<tt::tt_metal::experimental::GlobalCircularBuffer> global_cb;
     };
 
     struct tensor_args_t {

@@ -103,22 +103,19 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
               * matmul per_core_N == weight per-receiver N.
             All configs must agree on compute_with_storage_grid_size and num_global_cb_receivers.
 
-            Picking num_buffered_blocks:
-              * 1: no overlap; DRISC and matmul are fully serialized.
-              * 2: double-buffer ping-pong (minimum useful value).
-              * 4 (default): comfortable slack against jitter; fits L1 for typical shapes.
-              * num_blocks of the largest matmul (max(weight_K_tiles / in0_block_w)): full-
-                layer decoupling. Above this, more buffering doesn't add throughput - the
-                DRISC just stalls on remote_cb_reserve_back. This matches the production
-                llama 70B pattern.
-            Larger values are clamped by an L1 budget so the GCB leaves room for the matmul's
-            in0/out/interm CBs.
+            Picking size (in bytes):
+              * Must fit at least one in1 block of the biggest consumer matmul.
+              * Larger lets the DRISC prefetcher run further ahead of the matmul. Past one
+                full layer's worth (num_blocks_largest_matmul * largest_in1_block_size) more
+                buffering doesn't add throughput; the DRISC just stalls on
+                remote_cb_reserve_back.
+              * Capped by an L1 budget (~1.4 MB) so the matmul's in0/out/interm CBs still fit.
 
             Args:
                 mesh_device: The mesh device.
                 program_configs: List of 1D mcast matmul program configs (each gather_in0=True).
                 weights: List of DRAM-sharded in1 tensors, one per program_config.
-                num_buffered_blocks: How many of the largest in1 block fit per receiver in the GCB ring.
+                size: GCB size in bytes.
                 buffer_type: Buffer type (L1 or L1_SMALL).
         )doc",
         &ttnn::global_circular_buffer::create_global_circular_buffer_for_matmul_1d,
@@ -126,7 +123,7 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
         nb::arg("mesh_device"),
         nb::arg("program_configs"),
         nb::arg("weights"),
-        nb::arg("num_buffered_blocks") = 4,
+        nb::arg("size"),
         nb::arg("buffer_type") = tt::tt_metal::BufferType::L1);
 }
 

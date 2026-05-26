@@ -31,9 +31,10 @@ void DramPrefetcherValidatorDeviceOperation::validate_on_program_cache_miss(
     const auto* tensor_buffer = tensor_args.source_tensor.buffer();
     TT_FATAL(tensor_buffer != nullptr, "source_tensor must be on device");
     TT_FATAL(tensor_buffer->is_dram(), "source_tensor must be a DRAM buffer");
-    TT_FATAL(attrs.global_cb.receiver_cores().num_cores() > 0, "GCB has no receiver cores");
+    TT_FATAL(attrs.global_cb.has_value(), "global_cb required");
+    TT_FATAL(attrs.global_cb->receiver_cores().num_cores() > 0, "GCB has no receiver cores");
 
-    const auto& sr_mapping = attrs.global_cb.sender_receiver_core_mapping();
+    const auto& sr_mapping = attrs.global_cb->sender_receiver_core_mapping();
     TT_FATAL(!sr_mapping.empty(), "GCB has no senders");
     const uint32_t num_receivers_per_sender = sr_mapping.front().second.num_cores();
     for (const auto& [_, recv] : sr_mapping) {
@@ -69,7 +70,7 @@ tt::stl::hash::hash_t DramPrefetcherValidatorDeviceOperation::compute_program_ha
         ttsl::hash::type_hash<DramPrefetcherValidatorDeviceOperation>,
         attrs.num_layers,
         attrs.print_stride,
-        static_cast<uint64_t>(attrs.global_cb.config_address()),
+        static_cast<uint64_t>(attrs.global_cb->config_address()),
         static_cast<uint64_t>(tensor_buffer != nullptr ? tensor_buffer->address() : 0),
         static_cast<uint32_t>(dataformat));
 }
@@ -83,7 +84,7 @@ DramPrefetcherValidatorDeviceOperation::ProgramFactory::create_at(
     using namespace tt::tt_metal;
 
     const auto& source_tensor = tensor_args.source_tensor;
-    const auto& global_cb = attrs.global_cb;
+    const auto& global_cb = attrs.global_cb.value();
 
     // Derive ring topology from the GCB (matches both worker-sender and DRAM-sender paths).
     const auto& sr_mapping = global_cb.sender_receiver_core_mapping();

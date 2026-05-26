@@ -26,7 +26,8 @@ void DramPrefetcherConsumerDeviceOperation::validate_on_program_cache_miss(
     TT_FATAL(attrs.mesh_device != nullptr, "mesh_device required");
     TT_FATAL(attrs.num_iters > 0, "num_iters must be > 0");
     TT_FATAL(attrs.page_size_bytes > 0, "page_size_bytes must be > 0");
-    TT_FATAL(attrs.global_cb.receiver_cores().num_cores() > 0, "GCB has no receiver cores");
+    TT_FATAL(attrs.global_cb.has_value(), "global_cb required");
+    TT_FATAL(attrs.global_cb->receiver_cores().num_cores() > 0, "GCB has no receiver cores");
 }
 
 void DramPrefetcherConsumerDeviceOperation::validate_on_program_cache_hit(
@@ -50,7 +51,7 @@ tt::stl::hash::hash_t DramPrefetcherConsumerDeviceOperation::compute_program_has
         ttsl::hash::type_hash<DramPrefetcherConsumerDeviceOperation>,
         attrs.num_iters,
         attrs.page_size_bytes,
-        static_cast<uint64_t>(attrs.global_cb.config_address()));
+        static_cast<uint64_t>(attrs.global_cb->config_address()));
 }
 
 ttnn::device_operation::CachedProgram<DramPrefetcherConsumerDeviceOperation::ProgramFactory::shared_variables_t>
@@ -62,14 +63,15 @@ DramPrefetcherConsumerDeviceOperation::ProgramFactory::create_at(
     using namespace tt::tt_metal;
 
     Program program = CreateProgram();
-    const CoreRangeSet receiver_cores = attrs.global_cb.receiver_cores();
+    const auto& global_cb = attrs.global_cb.value();
+    const CoreRangeSet receiver_cores = global_cb.receiver_cores();
 
     // Configure the receiver-side CB. set_page_size matches what the sender resizes the CB to
     // (in_block_w_tiles * n_tiles_per_recv * tile_bytes); receiver wait_front/pop_front operate
     // in units of this page size.
     CircularBufferConfig cb_config(attrs.page_size_bytes);
     cb_config.remote_index(kRemoteCBId).set_page_size(attrs.page_size_bytes).set_data_format(tt::DataFormat::Float16_b);
-    tt::tt_metal::experimental::CreateCircularBuffer(program, receiver_cores, cb_config, attrs.global_cb);
+    tt::tt_metal::experimental::CreateCircularBuffer(program, receiver_cores, cb_config, global_cb);
 
     const std::vector<uint32_t> compile_args = {kRemoteCBId, attrs.num_iters};
     CreateKernel(
