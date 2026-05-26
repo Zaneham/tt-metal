@@ -100,7 +100,11 @@ jobs:
           mkdir -p generated/test_reports
           source tests/scripts/t3000/run_t3000_unit_tests.sh
           run_t3000_ttfabric_tests
-      # The multiprocess tests are currently disabled as they are not stable. We will re-enable them once we have improved their stability.
+      # DISABLED: T3K TTNN multiprocess tests exhibit non-deterministic failures
+      # (race conditions during multi-device startup causing hangs/crashes).
+      # Owner: Joseph Chu (UBHPP2NDP)
+      # TODO: File a tracking issue for multiprocess test stabilization.
+      # Re-enable once root cause is identified and startup races are resolved.
       # - name: Run t3k ttnn multiprocess tests
       #   id: t3k-ttnn-multiprocess-tests
       #   timeout-minutes: 15
