@@ -57,7 +57,7 @@ def _round_up_to_power_of_two(n: int, floor: int = _MIN_PREFILL_LEN) -> int:
 #: and when HF_MODEL is an absolute local path (which it is here, to avoid
 #: HF auth), the default ends up writing into the read-only checkpoint
 #: directory.
-DEFAULT_TT_CACHE_DIR = Path(__file__).resolve().parents[4] / "model_cache" / "llama31_8b_readiness_shim"
+DEFAULT_TT_CACHE_DIR = Path(__file__).resolve().parents[6] / "model_cache" / "llama31_8b_readiness_shim"
 
 
 def _set_env_for_tt_transformers(hf_model_id: str, mesh_device_label: str) -> None:
