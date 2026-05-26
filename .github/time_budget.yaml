@@ -75,7 +75,7 @@ ttnn:
     wh_llmbox: 50
     wh_galaxy: 35
   e2e:
-    wh_llmbox: 90
+    wh_llmbox: 100
     wh_galaxy: 90
     bh_galaxy: 70
     bh_p150b_civ2: 55

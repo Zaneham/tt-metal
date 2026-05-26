@@ -25,6 +25,15 @@
   owner_id: U013121KDH9 # Austin Ho
   team: scaleout
 
+# 1x8 LINE fabric (not t3k_1x8 ring MGD). Tier-1 moe_compute linear cases only (gpt_oss by default).
+- name: t3k_moe_compute_1x8_linear
+  cmd: TT_MESH_GRAPH_DESC_PATH=tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_1x8_linear_graph_descriptor.textproto pytest tests/nightly/tg/ccl/moe/test_moe_compute_6U.py -k "1x8-linear"
+  skus:
+    wh_llmbox:
+      timeout: 10
+  owner_id: U05ACKAJTHS # Naif Tarafdar
+  team: ttnn
+
 - name: t3k_fabric_unit_tests
   cmd: build/test/tt_metal/tt_fabric/fabric_unit_tests --gtest_filter="NightlyFabric*Fixture.*"
   skus:
