@@ -46,6 +46,7 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     MeshDevice* mesh_device,
     const std::vector<ttnn::operations::matmul::MatmulMultiCoreReuseMultiCast1DProgramConfig>& program_configs,
     const std::vector<tt::tt_metal::Tensor>& weights,
+    const std::vector<std::pair<uint32_t, CoreRangeSet>>& bank_to_receivers,
     uint32_t size,
     BufferType buffer_type) {
     TT_FATAL(!program_configs.empty(), "Must provide at least one program config");
@@ -55,6 +56,7 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         program_configs.size(),
         weights.size());
     TT_FATAL(size > 0, "size must be > 0");
+    TT_FATAL(!bank_to_receivers.empty(), "bank_to_receivers must be non-empty");
 
     // All matmuls share the same GCB receiver rectangle, so they must all agree on the
     // ring shape and per-bank receiver count.
@@ -69,19 +71,34 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     const uint32_t ring_cols = grid.x;
     const uint32_t ring_rows = grid.y;
     const uint32_t ring_size = ring_cols * ring_rows;
-    const uint32_t num_dram_banks = mesh_device->dram_grid_size().x;
+    const uint32_t num_senders = static_cast<uint32_t>(bank_to_receivers.size());
     const uint32_t num_recv_per_bank = static_cast<uint32_t>(first.num_global_cb_receivers);
 
+    // Validate bank_to_receivers shape against the program config:
+    //   - num_senders * num_recv_per_bank must equal ring_size (the matmul's worker count).
+    //   - Each bank must own exactly num_recv_per_bank receiver cores.
+    // We don't check that the receivers row-major-walk matches the matmul's activation grid in
+    // ring-position order — that's the matmul op's responsibility at op-construction time.
     TT_FATAL(
-        ring_cols == num_dram_banks,
-        "program_config[0].compute_with_storage_grid_size.x ({}) must equal num_dram_banks ({})",
+        num_senders * num_recv_per_bank == ring_size,
+        "bank_to_receivers has {} senders * {} receivers/bank = {} cores, but program_config "
+        "ring_size ({} x {} = {}) needs that many receivers",
+        num_senders,
+        num_recv_per_bank,
+        num_senders * num_recv_per_bank,
         ring_cols,
-        num_dram_banks);
-    TT_FATAL(
-        ring_rows == num_recv_per_bank,
-        "program_config[0].compute_with_storage_grid_size.y ({}) must equal num_global_cb_receivers ({})",
         ring_rows,
-        num_recv_per_bank);
+        ring_size);
+    for (size_t b = 0; b < bank_to_receivers.size(); ++b) {
+        const uint32_t bank_recv_count = bank_to_receivers[b].second.num_cores();
+        TT_FATAL(
+            bank_recv_count == num_recv_per_bank,
+            "bank_to_receivers[{}] (bank_id={}) has {} receiver cores; expected num_global_cb_receivers={}",
+            b,
+            bank_to_receivers[b].first,
+            bank_recv_count,
+            num_recv_per_bank);
+    }
 
     // Validate every (config, weight) pair against the matmul invariants, and collect
     // the largest in1_block_size to size the buffer.
@@ -140,11 +157,11 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
             i,
             cfg.in0_block_w);
         TT_FATAL(
-            weight_N_tiles % num_dram_banks == 0,
-            "weights[{}] N ({} tiles) must be divisible by num_dram_banks ({})",
+            weight_N_tiles % num_senders == 0,
+            "weights[{}] N ({} tiles) must be divisible by num_senders ({})",
             i,
             weight_N_tiles,
-            num_dram_banks);
+            num_senders);
 
         // ---- Weight DRAM shard layout ----
         TT_FATAL(w.buffer() != nullptr && w.buffer()->is_dram(), "weights[{}] must live in DRAM", i);
@@ -159,11 +176,11 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
             shard_K,
             weight_K);
         TT_FATAL(
-            shard_N * num_dram_banks == weight_N,
-            "weights[{}] DRAM shard N ({}) * num_dram_banks ({}) must equal full N ({})",
+            shard_N * num_senders == weight_N,
+            "weights[{}] DRAM shard N ({}) * num_senders ({}) must equal full N ({})",
             i,
             shard_N,
-            num_dram_banks,
+            num_senders,
             weight_N);
         const uint32_t shard_N_tiles = shard_N / tile_w;
         TT_FATAL(
@@ -203,14 +220,22 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     // GCB (matmul in0/in1/out/interm CBs etc.) and we don't have enough context at the
     // factory to compute a real cap. Callers must size the GCB to fit their own L1.
     //
-    // kMaxCbPagesBytes is a conservative cap on fifo_aligned_num_pages = fifo_size /
-    // REMOTE_CIRCULAR_BUFFER_ALIGNED_PAGE_SIZE. The remote-CB receiver tracks pages with
-    // 32-bit counters wrapped at 2^31 (noc_fast_atomic_increment wrap=31) and computes
-    // free_pages = fifo_aligned_num_pages - (pages_sent - pages_acked) in unsigned 32-bit
-    // arithmetic. Keeping fifo_aligned_num_pages well under 2^16 leaves orders of magnitude
-    // between the counter range and any plausible in-flight count, so signed/unsigned
-    // interpretation of the difference can never misfire.
-    constexpr uint32_t kMaxCbPagesBytes = 65000u * 16u;
+    // kMaxCbPagesBytes is a cap on fifo_aligned_num_pages = fifo_size /
+    // REMOTE_CIRCULAR_BUFFER_ALIGNED_PAGE_SIZE. Two reasons it exists:
+    //   1. The NoC stream overlay's STREAM_REMOTE_DEST_BUF_SIZE register holds the
+    //      buffer size in 16-byte words and is 17 bits wide on BH/WH (see
+    //      MEM_WORD_ADDR_WIDTH in noc_overlay_parameters.h), so the largest representable
+    //      buffer is (2^17 - 1) * 16 ≈ 2 MB. Paths that wire the GCB through the overlay
+    //      would silently truncate beyond that.
+    //   2. The remote-CB receiver tracks pages with 32-bit counters wrapped at 2^31
+    //      (noc_fast_atomic_increment wrap=31) and computes
+    //      free_pages = fifo_aligned_num_pages - (pages_sent - pages_acked) in unsigned
+    //      32-bit arithmetic. Keeping fifo_aligned_num_pages well under 2^30 leaves
+    //      plenty of headroom between the counter range and any plausible in-flight count
+    //      so signed/unsigned interpretation of the difference can never misfire.
+    // 2 MB satisfies both — it's the hardware overlay-field max, and ~5 orders of magnitude
+    // under the counter wrap.
+    constexpr uint32_t kMaxCbPagesBytes = 131072u * 16u;
     const uint32_t num_blocks = ring_size;
     const uint32_t min_size = max_in1_block_size * num_blocks;
     TT_FATAL(
@@ -226,21 +251,6 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         "GCB size ({} B) exceeds the remote-CB page-count cap ({} B). Reduce size.",
         size,
         kMaxCbPagesBytes);
-
-    // ---- Build bank_to_receivers (row-major through the ring rectangle) ----
-    std::vector<std::pair<uint32_t, CoreRangeSet>> bank_to_receivers;
-    bank_to_receivers.reserve(num_dram_banks);
-    for (uint32_t b = 0; b < num_dram_banks; ++b) {
-        std::vector<CoreRange> ranges;
-        ranges.reserve(num_recv_per_bank);
-        for (uint32_t k = 0; k < num_recv_per_bank; ++k) {
-            const uint32_t ring_pos = b * num_recv_per_bank + k;
-            const uint32_t col = ring_pos % ring_cols;
-            const uint32_t row = ring_pos / ring_cols;
-            ranges.emplace_back(CoreCoord{col, row}, CoreCoord{col, row});
-        }
-        bank_to_receivers.emplace_back(b, CoreRangeSet(ranges));
-    }
 
     return tt::tt_metal::experimental::CreateGlobalCircularBufferWithDramSenders(
         mesh_device, bank_to_receivers, size, buffer_type);

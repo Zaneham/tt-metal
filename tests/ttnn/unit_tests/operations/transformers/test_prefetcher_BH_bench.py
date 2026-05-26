@@ -380,13 +380,18 @@ def test_bench_dram_core_repeats(device, op_name, shape):
         )
         for bank_idx, row in enumerate(receivers_per_y)
     ]
-    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
-
     cc_program_config = _build_program_config(
         ring_size=ring_size,
         ring_cols=ring_cols,
         ring_rows=ring_rows,
         num_global_cb_receivers=num_receivers_per_bank,
+    )
+    gcb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
+        device,
+        [cc_program_config],
+        [tt_weight],
+        bank_to_receivers=bank_to_receivers,
+        size=gcb_size,
     )
     output_mem_config = ttnn.create_sharded_memory_config(
         shape=(_M, _N // ring_size),

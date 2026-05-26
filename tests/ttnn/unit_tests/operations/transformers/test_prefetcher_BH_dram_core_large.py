@@ -185,29 +185,6 @@ def test_dram_core_prefetcher_BH_param(
         ),
     )
 
-    # ---- DRAM-sender GlobalCircularBuffer ----
-    # in1_block_size is the matmul's receiver fifo_page_size = in0_block_w * per_core_N * tile_bytes
-    # (matmul-computed in0_block_w = K_per_shard_tiles).
-    tile_bytes = _bytes_per_tile(dtype)
-    in1_block_size_bytes = k_tiles_per_shard * n_tiles_per_receiver * tile_bytes
-    # Per-receiver weight footprint = K_tiles_total * n_tiles_per_receiver * tile_bytes
-    max_tensor_bytes = (k_tiles_per_shard * ring_size) * n_tiles_per_receiver * tile_bytes
-    gcb_size = max(in1_block_size_bytes, (max_tensor_bytes // in1_block_size_bytes) * in1_block_size_bytes)
-    if gcb_size_misalign_bytes != 0:
-        gcb_size += gcb_size_misalign_bytes
-        assert gcb_size % in1_block_size_bytes != 0, (
-            "misalignment test requires gcb_size to NOT be a multiple of in1_block_size"
-        )
-
-    bank_to_receivers = [
-        (b, _bank_receivers_row_major(b, num_receivers_per_bank, ring_cols)) for b in range(num_dram_banks)
-    ]
-    gcb = ttnn.experimental.create_global_circular_buffer_with_dram_senders(device, bank_to_receivers, gcb_size)
-    logger.info(
-        f"[{name}] M={M} K={K} N={N} ring={ring_size} recv/bank={num_receivers_per_bank} dtype={dtype} "
-        f"K_per_shard={K_per_shard} fifo_page={in1_block_size_bytes} gcb_size={gcb_size}"
-    )
-
     # ---- Matmul program config (1D-mcast gather_in0) ----
     in0_block_w = 1  # DRISC factory's kbw defaults to 1
     out_block_h = M // ttnn.TILE_SIZE
@@ -229,6 +206,30 @@ def test_dram_core_prefetcher_BH_param(
         hop_cores=ttnn.CoreRangeSet([]),
         num_global_cb_receivers=num_receivers_per_bank,
         untilize_out=False,
+    )
+
+    # ---- DRAM-sender GlobalCircularBuffer (via matmul-aware factory) ----
+    # in1_block_size is the matmul's receiver fifo_page_size = in0_block_w * per_core_N * tile_bytes
+    # (matmul-computed in0_block_w = K_per_shard_tiles).
+    tile_bytes = _bytes_per_tile(dtype)
+    in1_block_size_bytes = k_tiles_per_shard * n_tiles_per_receiver * tile_bytes
+    # Per-receiver weight footprint = num_blocks * in1_block_size (the factory's minimum).
+    gcb_size = ring_size * in1_block_size_bytes
+    if gcb_size_misalign_bytes != 0:
+        gcb_size += gcb_size_misalign_bytes
+        assert (
+            gcb_size % in1_block_size_bytes != 0
+        ), "misalignment test requires gcb_size to NOT be a multiple of in1_block_size"
+
+    bank_to_receivers = [
+        (b, _bank_receivers_row_major(b, num_receivers_per_bank, ring_cols)) for b in range(num_dram_banks)
+    ]
+    gcb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
+        device, [program_config], [tt_weight], bank_to_receivers=bank_to_receivers, size=gcb_size
+    )
+    logger.info(
+        f"[{name}] M={M} K={K} N={N} ring={ring_size} recv/bank={num_receivers_per_bank} dtype={dtype} "
+        f"K_per_shard={K_per_shard} fifo_page={in1_block_size_bytes} gcb_size={gcb_size}"
     )
     output_mem_config = ttnn.create_sharded_memory_config(
         shape=(M, N // ring_size),
@@ -373,8 +374,9 @@ def test_create_global_circular_buffer_for_matmul_1d(device, layers_buffered):
     in1_block_size = actual_in0_block_w * program_config.per_core_N * tile_bytes
     num_blocks = ring_size
     size = num_blocks * in1_block_size * layers_buffered
+    bank_to_receivers = [(b, _bank_receivers_row_major(b, recv_per_bank, ring_cols)) for b in range(num_dram_banks)]
     gcb = ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
-        device, [program_config], [tt_weight], size=size
+        device, [program_config], [tt_weight], bank_to_receivers=bank_to_receivers, size=size
     )
     logger.info(
         f"[factory layers_buffered={layers_buffered}] in1_block={in1_block_size} num_blocks={num_blocks} size={size}"
@@ -458,9 +460,16 @@ def test_create_global_circular_buffer_for_matmul_1d_rejects_undersized(device):
     in1_block_size = actual_in0_block_w * program_config.per_core_N * tile_bytes
     num_blocks = ring_size
     min_size = num_blocks * in1_block_size
+    bank_to_receivers = [
+        (b, _bank_receivers_row_major(b, recv_per_bank, num_dram_banks)) for b in range(num_dram_banks)
+    ]
     with pytest.raises(RuntimeError, match="must be at least num_blocks"):
         ttnn.experimental.create_global_circular_buffer_for_matmul_1d(
-            device, [program_config], [tt_weight], size=min_size - 16
+            device,
+            [program_config],
+            [tt_weight],
+            bank_to_receivers=bank_to_receivers,
+            size=min_size - 16,
         )
 
 

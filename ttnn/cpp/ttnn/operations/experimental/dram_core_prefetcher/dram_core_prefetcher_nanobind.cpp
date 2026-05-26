@@ -116,6 +116,11 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
                 mesh_device: The mesh device.
                 program_configs: List of 1D mcast matmul program configs (each gather_in0=True).
                 weights: List of DRAM-sharded in1 tensors, one per program_config.
+                bank_to_receivers: List of (bank_id, receivers) pairs. num_senders *
+                    num_global_cb_receivers must equal ring_size; every bank must own
+                    exactly num_global_cb_receivers receiver cores. The matmul op asserts
+                    at construction time that the receivers row-major-walk into the same
+                    order as its activation grid.
                 size: GCB size in bytes.
                 buffer_type: Buffer type (L1 or L1_SMALL).
         )doc",
@@ -124,6 +129,7 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
         nb::arg("mesh_device"),
         nb::arg("program_configs"),
         nb::arg("weights"),
+        nb::arg("bank_to_receivers"),
         nb::arg("size"),
         nb::arg("buffer_type") = tt::tt_metal::BufferType::L1);
 }
