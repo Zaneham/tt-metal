@@ -178,8 +178,8 @@ jobs:
             exit 0
           fi
 
-          SHA=$(gh api repos/tenstorrent/tt-metal/branches/stable --jq .commit.sha)
-          echo "Gating release on 'RTL Sim CI test' check for stable HEAD $SHA"
+          SHA="${{ github.sha }}"
+          echo "Gating release on 'RTL Sim CI test' check for workflow commit $SHA"
 
           for i in $(seq 1 120); do  # 120 * 30s = 60 min
             read -r STATUS CONCLUSION URL < <(
