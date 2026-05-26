@@ -625,8 +625,8 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
                         const uint32_t bytes_per_tile =
                             tt::tile_size(tt::tt_metal::datatype_to_dataformat_converter(input_tensor_b.dtype()));
                         const uint32_t actual_in0_block_w = weight_K_tiles / ring_size;
-                        const uint32_t in1_block_size = static_cast<uint32_t>(
-                            actual_in0_block_w * program_config.per_core_N * bytes_per_tile);
+                        const uint32_t in1_block_size =
+                            static_cast<uint32_t>(actual_in0_block_w * program_config.per_core_N * bytes_per_tile);
                         TT_FATAL(
                             in1_block_size > 0 && gcb.size() % in1_block_size == 0,
                             "global_cb size ({} B) must be an exact multiple of in1_block_size ({} = "

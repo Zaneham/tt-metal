@@ -19,16 +19,23 @@ import torch
 import ttnn
 from loguru import logger
 
+from models.common.utility_functions import run_for_blackhole
+
+
+pytestmark = [
+    run_for_blackhole("DRAM-core prefetcher requires Blackhole"),
+    pytest.mark.skipif(
+        os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") != "1",
+        reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set",
+    ),
+]
+
 
 _GCB_DEPTH_PAGES = 4  # small ring so the validator stresses reserve_back/wait_front handshakes
 
 
 _TILE_BYTES_BF16 = 2048  # 32*32*2
 _TILE_BYTES_BF8 = 1088  # 32*32 (data) + 64 (exponent header)
-
-
-def _dram_programmable_enabled() -> bool:
-    return os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") == "1"
 
 
 def _round_up(n, m):
@@ -181,9 +188,6 @@ def _setup_weight_and_gcb_worker_sender(device, K, N, dtype, recv_per_bank, num_
     return tt_weight, tt_addrs, gcb, num_iters_total, push_page_size, ring_size
 
 
-@pytest.mark.skipif(
-    not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
-)
 @pytest.mark.parametrize(
     "K,N,dtype,recv_per_bank,num_layers",
     [
@@ -194,12 +198,6 @@ def _setup_weight_and_gcb_worker_sender(device, K, N, dtype, recv_per_bank, num_
     ids=["bench_default", "multi_ksub", "ff1_ksub_mchunk"],
 )
 def test_validator_dram_sender(device, K, N, dtype, recv_per_bank, num_layers):
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("DRAM-core prefetcher requires Blackhole")
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        pytest.skip("Validator test requires fast dispatch")
-
     tt_weight, addrs, gcb, num_iters_total, push_page_size, ring_size = _setup_weight_and_gcb_dram_sender(
         device, K, N, dtype, recv_per_bank, num_layers
     )
@@ -227,11 +225,6 @@ def test_validator_dram_sender(device, K, N, dtype, recv_per_bank, num_layers):
     ids=["bench_default", "multi", "ff1"],
 )
 def test_validator_worker_sender(device, K, N, dtype, recv_per_bank, num_layers):
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("Worker-core prefetcher tuned for Blackhole topology")
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        pytest.skip("Validator test requires fast dispatch")
     if device.dram_grid_size().x != 8:
         # Worker prefetcher's reader_dram.cpp uses a fixed per-row TRID layout that hits
         # known issues on harvested cards (P100, 7 banks). Tracked separately from the

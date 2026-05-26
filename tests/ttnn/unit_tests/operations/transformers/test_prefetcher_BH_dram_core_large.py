@@ -52,6 +52,7 @@ import torch
 import ttnn
 from loguru import logger
 
+from models.common.utility_functions import run_for_blackhole
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_pcc
 
 
@@ -63,8 +64,13 @@ from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_
 # to the unharvested case; on P100 the same parametrization runs at ring=7*recv_per_bank.
 
 
-def _dram_programmable_enabled() -> bool:
-    return os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") == "1"
+pytestmark = [
+    run_for_blackhole("DRAM-core prefetcher requires Blackhole"),
+    pytest.mark.skipif(
+        os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") != "1",
+        reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set",
+    ),
+]
 
 
 def _round_up(n, m):
@@ -95,9 +101,6 @@ def _bank_receivers_row_major(bank_idx: int, recv_per_bank: int, ring_cols: int)
 #   N = ring_size * n_tiles_per_receiver * TILE_SIZE
 # Constraint: K_tiles_total = k_tiles_per_shard * ring_size must be a multiple of ring_size
 # (trivially true by construction) so gather_in0 doesn't pad K.
-@pytest.mark.skipif(
-    not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
-)
 @pytest.mark.parametrize(
     "name,k_tiles_per_shard,n_tiles_per_receiver,recv_per_bank,dtype",
     [
@@ -115,13 +118,6 @@ def _bank_receivers_row_major(bank_idx: int, recv_per_bank: int, ring_cols: int)
     ],
 )
 def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_per_receiver, recv_per_bank, dtype):
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("DRAM-core prefetcher matmul requires Blackhole")
-
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        ttnn.device.enable_asynchronous_slow_dispatch(device)
-
     # ---- Topology (queries DRAM bank count so the test adapts to harvested BHs) ----
     num_dram_banks = device.dram_grid_size().x
     num_receivers_per_bank = recv_per_bank
@@ -292,18 +288,8 @@ def _make_mt_weight(device, seed: int, num_dram_banks: int) -> ttnn.Tensor:
     )
 
 
-@pytest.mark.skipif(
-    not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
-)
 @pytest.mark.parametrize("num_tensors,num_layers", [(1, 1), (2, 1), (3, 1), (2, 5), (3, 10)])
 def test_dram_core_prefetcher_multi_tensor(device, num_tensors, num_layers):
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("DRAM-core prefetcher requires Blackhole")
-
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        ttnn.device.enable_asynchronous_slow_dispatch(device)
-
     # Query the chip's actual DRAM bank count so the test adapts to harvested BHs
     # (P100 has 7, P150/P300 have 8). The receiver grid is laid out as
     # `num_dram_banks` columns × `_MT_NUM_RECV_PER_BANK` rows.

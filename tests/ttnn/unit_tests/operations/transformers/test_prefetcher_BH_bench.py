@@ -48,11 +48,17 @@ import torch
 import ttnn
 from loguru import logger
 
+from models.common.utility_functions import run_for_blackhole
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_pcc
 
 
-def _dram_programmable_enabled() -> bool:
-    return os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") == "1"
+pytestmark = [
+    run_for_blackhole("DRAM-core prefetcher requires Blackhole"),
+    pytest.mark.skipif(
+        os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") != "1",
+        reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set",
+    ),
+]
 
 
 def _round_up(n, m):
@@ -257,9 +263,6 @@ def _flops_per_matmul(k: int) -> int:
     indirect=True,
 )
 @pytest.mark.parametrize("op_name,shape", LLAMA_SHAPES)
-@pytest.mark.skipif(
-    not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
-)
 def test_bench_dram_core_repeats(device, op_name, shape):
     """Trace replay of N single-matmul launches fed by the DRISC prefetcher.
 
@@ -267,12 +270,6 @@ def test_bench_dram_core_repeats(device, op_name, shape):
     BENCH_K / BENCH_N / BENCH_DTYPE / BENCH_RECV_PER_BANK env vars override per-parameter.
     """
     _apply_shape(shape)
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("DRAM-core prefetcher requires Blackhole")
-
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        pytest.skip("Trace benchmark requires fast dispatch")
 
     trace_repeats = int(os.environ.get("BENCH_TRACE_REPEATS", "100"))
     num_prefetch_layers = trace_repeats + 1  # 1 warmup + trace_repeats inside the trace
@@ -493,12 +490,6 @@ def test_bench_workercore_repeats(device, op_name, shape):
     sender/receiver core grid (logical rows 0..ring_rows) clear of dispatch cores.
     """
     _apply_shape(shape)
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("Bench tuned for Blackhole topology")
-
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        pytest.skip("Trace benchmark requires fast dispatch")
     if device.dram_grid_size().x != 8:
         pytest.skip("Worker-sender bench expects 8 unharvested DRAM banks")
 

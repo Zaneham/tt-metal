@@ -48,6 +48,17 @@ import torch
 import ttnn
 from loguru import logger
 
+from models.common.utility_functions import run_for_blackhole
+
+
+pytestmark = [
+    run_for_blackhole("DRAM-core prefetcher requires Blackhole"),
+    pytest.mark.skipif(
+        os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") != "1",
+        reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set",
+    ),
+]
+
 
 _M = 32
 _NUM_DRAM_BANKS = 8
@@ -93,10 +104,6 @@ LLAMA_SHAPES = [
     pytest.param("70B_FF1_8d", dict(K=8192, N=3584, dtype="bfloat8_b", recv_per_bank=8), id="70B_FF1_8d"),
     pytest.param("70B_FF2_8d", dict(K=3584, N=8192, dtype="bfloat8_b", recv_per_bank=8), id="70B_FF2_8d"),
 ]
-
-
-def _dram_programmable_enabled() -> bool:
-    return os.environ.get("TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES", "0") == "1"
 
 
 def _bench_trace_repeats() -> int:
@@ -186,9 +193,6 @@ def _gbps(bytes_total: float, elapsed_s: float) -> float:
     indirect=True,
 )
 @pytest.mark.parametrize("op_name,shape", LLAMA_SHAPES)
-@pytest.mark.skipif(
-    not _dram_programmable_enabled(), reason="TT_METAL_ENABLE_BLACKHOLE_DRAM_PROGRAMMABLE_CORES not set"
-)
 def test_bw_dram_core_prefetcher(device, op_name, shape):
     """DRAM-core prefetcher → discard receiver. Prefetcher launched out-of-band with
     num_layers = trace_repeats + 1 (1 warmup + N traced). A trace captures N consumer
@@ -196,11 +200,6 @@ def test_bw_dram_core_prefetcher(device, op_name, shape):
     methodology as the matmul bench (test_bench_dram_core_repeats).
     """
     _apply_shape(shape)
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("DRAM-core prefetcher requires Blackhole")
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        pytest.skip("Trace bench requires fast dispatch")
 
     trace_repeats = _bench_trace_repeats()
     num_prefetch_layers = trace_repeats + 1  # 1 warmup + trace_repeats inside the trace
@@ -287,11 +286,6 @@ def test_bw_workercore_prefetcher(device, op_name, shape):
     layout from `models/tt_transformers/tt/prefetcher/prefetcher_config.yaml`.
     """
     _apply_shape(shape)
-    arch = getattr(device, "arch", lambda: None)()
-    if arch is not None and "BLACKHOLE" not in str(arch).upper():
-        pytest.skip("Bench tuned for Blackhole topology")
-    if os.environ.get("TT_METAL_SLOW_DISPATCH_MODE", "0") == "1":
-        pytest.skip("Trace bench requires fast dispatch")
     if device.dram_grid_size().x != 8:
         pytest.skip("Worker-sender bench expects 8 unharvested DRAM banks")
 
