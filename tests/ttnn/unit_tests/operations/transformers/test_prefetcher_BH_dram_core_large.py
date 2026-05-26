@@ -12,11 +12,11 @@ Two scopes:
    single BH uses recv_per_bank=8 (ring=64); smaller rings are exercised for
    QKV/FF cases that fit at lower recv_per_bank.
 
-   Each case builds a fresh DRAM-sender GlobalCircularBuffer, pushes the
-   weight via ``ttnn.dram_prefetcher(global_cb=gcb)`` (the op infers the
-   DRAM-core program factory from ``gcb.sender_core_type() == "dram"``),
+   Each case builds a fresh DRAM-sender GlobalCircularBuffer, launches the
+   DRAM-core prefetcher via ``ttnn.experimental.start_dram_core_prefetcher``,
    runs ``ttnn.linear`` with the same gcb, and PCC-checks against
-   ``torch.matmul``.
+   ``torch.matmul``. ``stop_dram_core_prefetcher`` drains the pipeline after
+   the matmul finishes.
 
    Receiver layout: each bank's receivers sit at row-major-adjacent ring
    positions ``[b*recv_per_bank, (b+1)*recv_per_bank)`` on a
@@ -30,11 +30,6 @@ Two scopes:
    the original single-push-per-K-block path; M=2 unlocks FF1
    (K=4096 N=14336) at ring=64.
 
-   Known prototype limits:
-   - ``dram_core_k_block_w_tiles`` is auto-derived; manual overrides ≥4 hang
-     on a fifo-wrap edge case (gather_in0 uses kbw=1 so this is non-blocking).
-   - Fast dispatch on the DRAM-core path is not implemented (slow dispatch only).
-
 2. ``test_dram_core_prefetcher_multi_tensor`` — multi-tensor smoke. The
    DRAM-core kernel's main loop iterates
    ``for layer in num_layers: for t in num_tensors:`` and prior versions
@@ -47,6 +42,7 @@ Two scopes:
 
 import math
 import os
+import zlib
 import pytest
 import torch
 import ttnn
@@ -136,7 +132,7 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     N = ring_size * n_tiles_per_receiver * ttnn.TILE_SIZE
 
     # ---- Weight tensor (B): width-sharded in DRAM across `num_dram_banks` banks ----
-    torch.manual_seed(hash(name) % 0x7FFFFFFF)
+    torch.manual_seed(zlib.crc32(name.encode()))
     pt_weight = torch.randn(1, 1, K, N)
     dram_core_range_set = ttnn.CoreRangeSet(
         {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_dram_banks - 1, 0))}
@@ -253,7 +249,7 @@ def test_dram_core_prefetcher_BH_param(device, name, k_tiles_per_shard, n_tiles_
     out_torch = ttnn.to_torch(tt_out)
     expected = pt_act.float() @ pt_weight.float()
     # Lower PCC threshold for bf8_b cases (precision noise is larger than at bf16).
-    pcc_threshold = 0.99 if dtype == ttnn.bfloat16 else 0.999
+    pcc_threshold = 0.999 if dtype == ttnn.bfloat16 else 0.99
     passing, output_str = comp_pcc(expected, out_torch, pcc_threshold)
     logger.info(f"[{name}] {output_str}")
     assert passing, f"[{name}] PCC check failed: {output_str}"

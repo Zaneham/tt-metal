@@ -51,7 +51,7 @@ void test_dram_prefetcher_validator(
     const uint32_t num_blocks = num_senders * num_receivers_per_sender;
 
     // Derive per-tensor geometry from the source tensor (single-tensor path; matches
-    // docs/prefetcher_matmul_design.md §3). All sizes are in tiles, layout assumed TILE.
+    // tt_metal/impl/buffers/prefetcher_matmul_design.md §3). All sizes are in tiles, layout assumed TILE.
     Buffer* tensor_buffer = source_tensor.buffer();
     TT_FATAL(tensor_buffer != nullptr, "source_tensor must be on device");
     TT_FATAL(tensor_buffer->is_dram(), "source_tensor must be a DRAM buffer");

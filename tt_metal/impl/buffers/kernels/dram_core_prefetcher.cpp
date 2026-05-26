@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // DRISC prefetcher kernel for the DRAM-core mode of ttnn.dram_prefetcher.
-// See docs/prefetcher_matmul_design.md for the architecture and contract; in
-// particular §3 (what a "block" is), §6 (DRAM-core path: fit ladder, L1
-// layout, helpers, main loop), and §8 (cross-component invariants).
+// See tt_metal/impl/buffers/prefetcher_matmul_design.md for the architecture
+// and contract; in particular §3 (what a "block" is), §6 (DRAM-core path: fit
+// ladder, L1 layout, helpers, main loop), and §8 (cross-component invariants).
 //
 // Pipeline summary:
 //   For each (layer, tensor, block), reserve one fifo page on every receiver,
@@ -183,7 +183,7 @@ FORCE_INLINE void prefetcher_finalize_block(
 }  // namespace
 
 void kernel_main() {
-    // ---- Compile-time args (13). See docs/prefetcher_matmul_design.md §6. ----
+    // ---- Compile-time args (13). See tt_metal/impl/buffers/prefetcher_matmul_design.md §6. ----
     constexpr uint32_t num_layers = get_compile_time_arg_val(0);
     constexpr uint32_t num_tensors = get_compile_time_arg_val(1);
     constexpr uint32_t num_blocks = get_compile_time_arg_val(2);

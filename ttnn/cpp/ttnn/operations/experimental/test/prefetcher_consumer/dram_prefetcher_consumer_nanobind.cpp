@@ -49,7 +49,7 @@ void bind_test_dram_prefetcher_consumer(nb::module_& mod) {
 
             The kernel derives its expected bytes from the (bank, receiver, block) ->
             tile-range mapping documented in
-            docs/prefetcher_matmul_design.md §3 ("Per-block source tiles"). Used for
+            tt_metal/impl/buffers/prefetcher_matmul_design.md §3 ("Per-block source tiles"). Used for
             debugging purposes; please avoid in any production code.
 
             Args:

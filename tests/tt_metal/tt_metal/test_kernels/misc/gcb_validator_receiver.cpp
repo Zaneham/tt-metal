@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Validator receiver for the prefetcher-vs-matmul contract.
-// See docs/prefetcher_matmul_design.md §3 ("Per-block source tiles") for the
+// See tt_metal/impl/buffers/prefetcher_matmul_design.md §3 ("Per-block source tiles") for the
 // (bank, receiver, block) -> tile-range mapping this kernel derives expected
 // bytes from.
 //
@@ -69,7 +69,7 @@ void kernel_main() {
             RemoteReceiverCBInterface& iface = get_remote_receiver_cb_interface(remote_cb_id);
             const uint32_t page_addr = iface.fifo_rd_ptr;
 
-            // Read expected tiles via TensorAccessor. Per docs/prefetcher_matmul_design.md §3,
+            // Read expected tiles via TensorAccessor. Per tt_metal/impl/buffers/prefetcher_matmul_design.md §3,
             // page row h = tiles (blk*kw + h, n_col_start + n) for n in [0, n_per_recv). One
             // accessor call per tile keeps bank-routing logic out of this kernel.
             uint32_t scratch_cursor = scratch_addr;

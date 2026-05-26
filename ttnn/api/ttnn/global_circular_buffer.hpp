@@ -27,8 +27,7 @@ GlobalCircularBuffer create_global_circular_buffer(
     BufferType buffer_type = BufferType::L1);
 
 // DRAM-sender variant: senders are programmable DRAM cores identified by DRAM bank id.
-// MeshDevice-only because the per-mesh DRISC L1 arena lives on MeshDeviceImpl. The
-// returned GlobalCircularBuffer is the same type as the worker variant; the sender
+// The returned GlobalCircularBuffer is the same type as the worker variant; the sender
 // domain is queryable via tt::tt_metal::experimental::sender_core_type(gcb).
 GlobalCircularBuffer create_global_circular_buffer_with_dram_senders(
     MeshDevice* mesh_device,

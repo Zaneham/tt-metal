@@ -25,7 +25,7 @@ namespace ttnn::operations::experimental::test {
 // identical for both. `source_tensor` must be the same width-sharded DRAM tensor
 // the prefetcher is being driven with. The per-(bank, receiver, block) -> tile
 // mapping the kernel uses is documented in
-// docs/prefetcher_matmul_design.md §3 ("Per-block source tiles").
+// tt_metal/impl/buffers/prefetcher_matmul_design.md §3 ("Per-block source tiles").
 void test_dram_prefetcher_validator(
     tt::tt_metal::distributed::MeshDevice* mesh_device,
     const ttnn::Tensor& source_tensor,

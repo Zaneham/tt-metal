@@ -10,7 +10,7 @@ and detects over/under-counts. Drives both the worker-core sender
 (`ttnn.experimental.start_dram_core_prefetcher`) against the same validator so any
 divergence between the two paths surfaces immediately.
 
-See docs/prefetcher_matmul_design.md for the contract being validated.
+See tt_metal/impl/buffers/prefetcher_matmul_design.md for the contract being validated.
 """
 
 import os

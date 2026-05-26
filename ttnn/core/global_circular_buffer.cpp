@@ -206,11 +206,20 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         "LCM of in1_block_sizes ({}) overflows uint32; check program_configs",
         lcm_in1_block_size);
     const uint32_t lcm = static_cast<uint32_t>(lcm_in1_block_size);
-    const uint32_t upper_l1 = std::max(lcm, kL1Cap > max_in1_block_size ? kL1Cap - max_in1_block_size : 0);
-    const uint32_t upper = std::min(upper_l1, kMaxCbPagesBytes);
+    const uint32_t l1_budget = kL1Cap > max_in1_block_size ? kL1Cap - max_in1_block_size : 0;
+    const uint32_t upper = std::min(l1_budget, kMaxCbPagesBytes);
+    TT_FATAL(
+        upper >= lcm,
+        "GCB upper bound ({} B = min(L1 budget {}, max CB pages {})) is smaller than LCM of in1 "
+        "block sizes ({} B); cannot pick a gcb_size that is both within budget and a multiple of "
+        "every consumer's in1_block_size. Reduce num_buffered_blocks, per_core_N, or in0_block_w.",
+        upper,
+        l1_budget,
+        kMaxCbPagesBytes,
+        lcm);
     const uint32_t desired = max_in1_block_size * num_buffered_blocks;
-    uint32_t gcb_size = std::min(desired, upper);
-    gcb_size = std::max(lcm, (gcb_size / lcm) * lcm);
+    const uint32_t gcb_size = (std::min(desired, upper) / lcm) * lcm;
+    TT_FATAL(gcb_size > 0, "Internal: gcb_size computed as 0 (lcm={}, upper={}, desired={})", lcm, upper, desired);
 
     // ---- Build bank_to_receivers (row-major through the ring rectangle) ----
     std::vector<std::pair<uint32_t, CoreRangeSet>> bank_to_receivers;

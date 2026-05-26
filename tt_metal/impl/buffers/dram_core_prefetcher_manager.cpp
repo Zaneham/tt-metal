@@ -46,7 +46,7 @@ inline uint32_t align_up(uint32_t a, uint32_t align) { return (a + align - 1) & 
 // (NOC_MAX_BURST_WORDS=256 × NOC_WORD_BYTES=64 = 16 KB; see
 // `tt_metal/hw/inc/internal/tt-1xx/blackhole/noc/noc_parameters.h:287-290`).
 // File-local duplicate by design — the two prefetcher paths share the algorithm but
-// not a header (see docs/prefetcher_matmul_design.md cross-component invariants).
+// not a header (see tt_metal/impl/buffers/prefetcher_matmul_design.md cross-component invariants).
 constexpr uint32_t kMaxStagePageSize = 16 * 1024;
 
 // Largest `page` (multiple of tile_size, <= max_page_size) such that num_tiles*tile_size
@@ -69,7 +69,7 @@ std::pair<uint32_t, uint32_t> pick_page_size(uint32_t max_page_size, uint32_t nu
 // Per-tensor geometry handed to the DRAM-core prefetcher kernel. All values are derived
 // from the tensor shape + dtype + GCB ring topology + DRISC L1 stage budget; the caller
 // (compute_tensor_geom) picks (rows_per_sub, M) by the fit ladder documented in
-// docs/prefetcher_matmul_design.md §6.
+// tt_metal/impl/buffers/prefetcher_matmul_design.md §6.
 //
 // Invariant: rows_per_sub > 1 implies M == 1 (the kernel cannot row-stride DMA).
 struct TensorGeom {
@@ -90,6 +90,13 @@ TensorGeom compute_tensor_geom(
     const auto* ref_buffer = t.mesh_buffer().get_reference_buffer();
     const auto shard_shape = ref_buffer->shard_spec().shape();
     const uint32_t tile_bytes = tt::tile_size(datatype_to_dataformat_converter(t.dtype()));
+    TT_FATAL(
+        shard_shape[0] % tt::constants::TILE_HEIGHT == 0 && shard_shape[1] % tt::constants::TILE_WIDTH == 0,
+        "DRAM-core prefetcher requires tile-aligned shards; got shard_shape=({}, {}), tile=({}, {})",
+        shard_shape[0],
+        shard_shape[1],
+        tt::constants::TILE_HEIGHT,
+        tt::constants::TILE_WIDTH);
     const uint32_t k_tiles_raw = shard_shape[0] / tt::constants::TILE_HEIGHT;
     const uint32_t n_per_bank = shard_shape[1] / tt::constants::TILE_WIDTH;
     const uint32_t num_blocks = num_senders * num_receivers;
@@ -100,7 +107,7 @@ TensorGeom compute_tensor_geom(
         num_receivers);
     // ceil-up matches worker-core ttnn.dram_prefetcher's tt::round_up(height, num_blocks);
     // the tail block reads past the tensor bytes for tensors whose K_tiles doesn't divide
-    // ring_size. See docs/prefetcher_matmul_design.md §5.
+    // ring_size. See tt_metal/impl/buffers/prefetcher_matmul_design.md §5.
     const uint32_t k_block_w_tiles = (k_tiles_raw + num_blocks - 1) / num_blocks;
     const uint32_t n_per_recv = n_per_bank / num_receivers;
     const uint32_t row_bytes = n_per_bank * tile_bytes;
@@ -113,11 +120,11 @@ TensorGeom compute_tensor_geom(
         coalesced_page_size,
         kNocMaxBurstSizeBytes);
 
-    // Fit ladder (docs/prefetcher_matmul_design.md §6).
+    // Fit ladder (tt_metal/impl/buffers/prefetcher_matmul_design.md §6).
     uint32_t rows_per_sub = 0;
     uint32_t M = 1;
     if (block_bytes <= ring_half) {
-        // Case 1: full block fits — fast path (matches the pre-refactor single-shot).
+        // Case 1: full block fits — fast path, single-shot push.
         rows_per_sub = k_block_w_tiles;
         M = 1;
     } else if (row_bytes <= ring_half) {
@@ -131,8 +138,8 @@ TensorGeom compute_tensor_geom(
         }
         M = 1;
     } else {
-        // Case 3: K-sub + N-chunk; rows_per_sub=1 forces M-chunking onto a single K-row,
-        // which is bit-exact today's M>1 N-chunked behavior (contiguous N-stripe per chunk).
+        // Case 3: K-sub + N-chunk; rows_per_sub=1 forces M-chunking onto a single K-row
+        // (contiguous N-stripe per chunk).
         rows_per_sub = 1;
         bool picked = false;
         for (uint32_t m = 1; m <= num_receivers; ++m) {
@@ -290,7 +297,7 @@ std::unique_ptr<Program> build_program(
 
         // RT args: bank_id, then per-tensor blocks (length num_tensors each), then [recv_xy].
         // Order must match the kernel's read order at the top of kernel_main; see
-        // docs/prefetcher_matmul_design.md §6 "Runtime args".
+        // tt_metal/impl/buffers/prefetcher_matmul_design.md §6 "Runtime args".
         std::vector<uint32_t> rt_args;
         rt_args.reserve(1 + 10 * num_tensors + 2 * num_receivers);
         rt_args.push_back(/*bank_id=*/sender_logical.x);
