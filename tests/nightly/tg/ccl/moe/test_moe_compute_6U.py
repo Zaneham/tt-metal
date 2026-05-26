@@ -310,8 +310,6 @@ def _run_model_test(
 # ---------------------------------------------------------------------------
 # Validation functions
 # ---------------------------------------------------------------------------
-
-
 def validate_per_expert_tokens(
     mesh_device, experts_per_device, num_devices, per_expert_total_tokens_output_tensor, expert_token_counts
 ):
@@ -786,8 +784,6 @@ def validate_combine(layer_id, mesh_device, cluster_axis, tt_combine_output, com
 # ---------------------------------------------------------------------------
 # Tensor creation functions
 # ---------------------------------------------------------------------------
-
-
 def create_torch_w0(L, E, K, N):
     """
     Create torch w0 weight tensor.
