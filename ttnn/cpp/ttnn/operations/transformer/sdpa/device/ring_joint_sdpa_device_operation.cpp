@@ -169,9 +169,11 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
             k_shape[3]);
     }
 
+    // Latent-V (gathered V seq == 0) reuses K's gathered buffer for V reads.
     TT_FATAL(
-        v_shape[2] == N_global,
-        "V sequence length must be equal to global sequence length. Got V: {}, global sequence length: {}",
+        v_shape[2] == 0 || v_shape[2] == N_global,
+        "V sequence length must equal global sequence length, or 0 for latent-V mode. Got V: {}, global sequence "
+        "length: {}",
         v_shape[2],
         N_global);
 

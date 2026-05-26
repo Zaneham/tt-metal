@@ -91,7 +91,13 @@ def run_ring_joint_sdpa(
     is_balanced=False,
     cache_path=None,
     math_fidelity=ttnn.MathFidelity.HiFi2,
+    latent_v=False,
 ):
+    # Latent-V mode: V is passed as a seq=0 placeholder carrying only the V head
+    # dim (head_dim_v); the op reads V tiles from K's buffer with K's row stride,
+    # truncated to V's head dim. Persistent V buffer is also seq=0.
+    if latent_v:
+        assert nhv == 1, f"latent_v requires nhv == 1, got nhv={nhv}"
     full_compute_grid = submesh.compute_with_storage_grid_size()
 
     sdpa_compute_grid = (full_compute_grid.x - 1, full_compute_grid.y)
@@ -138,7 +144,8 @@ def run_ring_joint_sdpa(
     # Create persistent output buffers
     # Check sharding on these
     ag_output_shape_k = (b, nhk, padded_seq_len, head_dim_k)
-    ag_output_shape_v = (b, nhv, padded_seq_len, head_dim_v)
+    # Latent-V: persistent V buffer is seq=0 (V data comes from K's buffer).
+    ag_output_shape_v = (b, nhv, 0 if latent_v else padded_seq_len, head_dim_v)
 
     persistent_k_output_shard_dims = [None, None]
     if nhk != 1:
@@ -208,7 +215,15 @@ def run_ring_joint_sdpa(
         logger.info("Creating PyTorch tensors (cache miss)")
         Q = fa_rand(b, nhq, base_seq_len, head_dim_q)
         K = fa_rand(b, nhk, base_seq_len, head_dim_k)
-        V = fa_rand(b, nhv, base_seq_len, head_dim_v)
+        if latent_v:
+            # Latent-V: V's data lives in K's first head_dim_v columns. The op reads
+            # V tiles from K's buffer; the reference SDPA must do the same to match.
+            assert head_dim_v <= head_dim_k, "latent_v requires head_dim_v <= head_dim_k"
+            # NHK == NHV == 1 here (existing test contract), so we can broadcast K's
+            # head dim directly. V's reference is K's first head_dim_v columns.
+            V = K[..., :head_dim_v].contiguous()
+        else:
+            V = fa_rand(b, nhv, base_seq_len, head_dim_v)
 
         padded_Q = torch.cat([Q, torch.zeros(b, nhq, padded_seq_len - base_seq_len, head_dim_q)], dim=2)
         padded_K = torch.cat([K, torch.zeros(b, nhk, padded_seq_len - base_seq_len, head_dim_k)], dim=2)
@@ -290,7 +305,17 @@ def run_ring_joint_sdpa(
         )
 
     logger.debug("Creating tt_V")
-    if all_caches_exist:
+    if latent_v:
+        # Latent-V: seq=0 placeholder carrying V head dim only. Op reads V from K's buffer.
+        tt_V = ttnn.from_torch(
+            torch.zeros(b, nhv, 0, head_dim_v),
+            dtype=kv_dtype,
+            layout=ttnn.TILE_LAYOUT,
+            device=submesh,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(submesh),
+        )
+    elif all_caches_exist:
         tt_V = load_cached_tensor(cache_path, "padded_V", kv_dtype, ttnn.TILE_LAYOUT, submesh, ttnn.DRAM_MEMORY_CONFIG)
     else:
         tt_V = ttnn.as_tensor(
@@ -523,6 +548,7 @@ def run_ring_joint_sdpa(
     ],
 )
 @pytest.mark.parametrize("is_balanced", [False, True], ids=["no_balancing", "balanced"])
+@pytest.mark.parametrize("latent_v", [False, True], ids=["v_tensor", "v_latent"])
 @pytest.mark.timeout(0)
 def test_mla_sdpa(
     mesh_device,
@@ -545,8 +571,11 @@ def test_mla_sdpa(
     all_gather_topology,
     skip_check,
     is_balanced,
+    latent_v,
     reset_seeds,
 ):
+    if latent_v and nhv != 1:
+        pytest.skip("latent_v requires nhv == 1")
     production_shape = [32, 4]  # hardcoded for now
 
     mesh_device_shape = list(mesh_device.shape)
@@ -596,6 +625,7 @@ def test_mla_sdpa(
         is_causal=True,
         is_balanced=is_balanced,
         cache_path=cache_path,
+        latent_v=latent_v,
     )
 
 
