@@ -1087,7 +1087,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilize) {
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Float32_SyncHalf) {
     run_quasar_tilize_untilize_test(
-        this->devices_.at(0)->get_devices()[0],
+        this->devices_.at(0),
         /*num_tiles_r=*/1,
         /*num_tiles_c=*/1,
         QuasarTestMode::TILIZE,
@@ -1098,7 +1098,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Float3
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Float32_SyncFull) {
     run_quasar_tilize_untilize_test(
-        this->devices_.at(0)->get_devices()[0],
+        this->devices_.at(0),
         /*num_tiles_r=*/1,
         /*num_tiles_c=*/1,
         QuasarTestMode::TILIZE,
@@ -1109,7 +1109,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Float3
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Int32_SyncHalf) {
     run_quasar_tilize_untilize_test(
-        this->devices_.at(0)->get_devices()[0],
+        this->devices_.at(0),
         /*num_tiles_r=*/1,
         /*num_tiles_c=*/1,
         QuasarTestMode::TILIZE,
@@ -1120,7 +1120,7 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Int32_
 
 TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeToDest_Int32_SyncFull) {
     run_quasar_tilize_untilize_test(
-        this->devices_.at(0)->get_devices()[0],
+        this->devices_.at(0),
         /*num_tiles_r=*/1,
         /*num_tiles_c=*/1,
         QuasarTestMode::TILIZE,

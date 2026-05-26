@@ -213,18 +213,6 @@ void validate_transpose_wh_32b(
     EXPECT_TRUE(pass);
 }
 
-static void read_and_validate_transpose_result(
-    const MeshTensor& dst_tensor,
-    const std::vector<uint32_t>& src_vec,
-    const std::vector<uint32_t>& shape,
-    const TransposeDims& dims) {
-    std::vector<uint32_t> result_vec;
-    tt_metal::detail::ReadFromBuffer(*dst_tensor.mesh_buffer().get_reference_buffer(), result_vec);
-    // Expecting one tile in H, and half the elements since the vector packs 2 uint16_ts.
-    EXPECT_EQ(result_vec.size(), dims.NC * dims.H * dims.W / 2);
-    validate_transpose_wh(src_vec, shape, result_vec);
-}
-
 // Build a TensorSpec describing a flat DRAM-interleaved buffer of `total_entries`
 // pages, each `entry_size` bytes. Used to bind src/dst tensors as TensorParameters
 // to the reader/writer kernels via the Metal 2.0 named TensorAccessor ctor.
