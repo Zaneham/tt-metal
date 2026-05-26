@@ -95,9 +95,28 @@ void kernel_main() {
 
     volatile tt_l1_ptr uint32_t* page_table_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(page_table_cb_wr_ptr);
 
+    // Bounded sliding-window cache (capacity_t > 0): only the last capacity_t tiles
+    // of each head's input range will survive in the cache (earlier tiles would map
+    // to wrapped slots that get overwritten by later writes). Compute the skip
+    // count once so we can consume those earlier input tiles without committing
+    // them to DRAM — a strict bandwidth win for prefills longer than the bounded
+    // capacity. For prefills <= capacity_t this is 0 and the legacy path runs.
+    const uint32_t skip_tiles =
+        (capacity_t > 0 && num_blocks_of_work_per_head > capacity_t) ? (num_blocks_of_work_per_head - capacity_t) : 0;
+
     for (uint32_t row_id = start_row_num; row_id < start_row_num + num_rows; ++row_id) {
         uint32_t cur_head = row_id / num_blocks_of_work_per_head;
         uint32_t seq_tile_id = row_id % num_blocks_of_work_per_head;
+
+        // Drop the early-prefill tiles whose final slot would be overwritten by a
+        // later iteration anyway. The input CB still has to be drained so the
+        // reader doesn't stall, but no NOC writes go out.
+        if (seq_tile_id < skip_tiles) {
+            cb_wait_front(cb_id_in, Wt);
+            cb_pop_front(cb_id_in, Wt);
+            continue;
+        }
+
         // Bounded sliding-window cache: wrap the virtual tile index into the bounded
         // capacity before the page_table lookup. capacity_t is a multiple of
         // block_size_t (validated), so the wrap preserves intra-block layout.
