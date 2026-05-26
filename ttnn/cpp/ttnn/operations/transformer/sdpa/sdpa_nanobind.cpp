@@ -26,12 +26,12 @@ namespace {
 std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> ring_joint_scaled_dot_product_attention_wrapper(
     const ttnn::Tensor& input_tensor_q,
     const ttnn::Tensor& input_tensor_k,
-    const ttnn::Tensor& input_tensor_v,
+    const std::optional<ttnn::Tensor>& input_tensor_v,
     const ttnn::Tensor& joint_tensor_q,
     const ttnn::Tensor& joint_tensor_k,
-    const ttnn::Tensor& joint_tensor_v,
+    const std::optional<ttnn::Tensor>& joint_tensor_v,
     ttnn::Tensor& persistent_output_buffer_k,
-    ttnn::Tensor& persistent_output_buffer_v,
+    const std::optional<ttnn::Tensor>& persistent_output_buffer_v,
     const std::string& joint_strategy,
     std::size_t logical_n,
     const SDPAProgramConfig& program_config,
@@ -47,7 +47,8 @@ std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> ring_joint_scaled_dot_produ
     CoreCoord ccl_core_grid_offset,
     bool use_column_major_ccl,
     bool is_causal,
-    bool is_balanced) {
+    bool is_balanced,
+    std::optional<uint32_t> head_dim_v) {
     auto strategy = use_column_major_ccl ? ttnn::ccl::CoreAllocationStrategy::COL_MAJOR
                                          : ttnn::ccl::CoreAllocationStrategy::ROW_MAJOR;
     auto outputs = ttnn::transformer::ring_joint_scaled_dot_product_attention(
@@ -74,7 +75,8 @@ std::tuple<ttnn::Tensor, ttnn::Tensor, ttnn::Tensor> ring_joint_scaled_dot_produ
         is_balanced,
         scale,
         compute_kernel_config,
-        strategy);
+        strategy,
+        head_dim_v);
     return outputs;
 }
 
@@ -394,15 +396,19 @@ void bind_sdpa(nb::module_& mod) {
         Args:
             input_tensor_q (ttnn.Tensor): Original queries  [b x nh x N/num_devices x dh].
             input_tensor_k (ttnn.Tensor): Original keys     [b x nh x N/num_devices x dh].
-            input_tensor_v (ttnn.Tensor): Original values   [b x nh x N/num_devices x dh].
+            input_tensor_v (ttnn.Tensor, optional): Original values [b x nhv x N/num_devices x dv].
+                Pass None for latent-V mode, where V is read from K's first head_dim_v columns.
 
             joint_tensor_q (ttnn.Tensor): Joint queries     [b x nh x L x dh].
             joint_tensor_k (ttnn.Tensor): Joint keys        [b x nh x L x dh].
-            joint_tensor_v (ttnn.Tensor): Joint values      [b x nh x L x dh].
+            joint_tensor_v (ttnn.Tensor, optional): Joint values [b x nhv x L x dv].
+                May be None in latent-V mode when L == 0.
 
         Keyword args:
             persistent_output_buffer_k (ttnn.Tensor): Persistent buffer for gathered K tensor.
-            persistent_output_buffer_v (ttnn.Tensor): Persistent buffer for gathered V tensor.
+            persistent_output_buffer_v (ttnn.Tensor, optional): Persistent buffer for gathered V tensor.
+                Must be None when input_tensor_v is None.
+            head_dim_v (int, optional): Required when input_tensor_v is None.
             joint_strategy (str): Strategy for joint attention. Must be "rear".
             logical_n (int): The logical sequence length N before sharding across devices.
             program_config (ttnn.SDPAProgramConfig): Program configuration for the operation.
@@ -441,13 +447,13 @@ void bind_sdpa(nb::module_& mod) {
         &ring_joint_scaled_dot_product_attention_wrapper,
         nb::arg("input_tensor_q").noconvert(),
         nb::arg("input_tensor_k").noconvert(),
-        nb::arg("input_tensor_v").noconvert(),
+        nb::arg("input_tensor_v"),
         nb::arg("joint_tensor_q").noconvert(),
         nb::arg("joint_tensor_k").noconvert(),
-        nb::arg("joint_tensor_v").noconvert(),
+        nb::arg("joint_tensor_v"),
         nb::kw_only(),
         nb::arg("persistent_output_buffer_k").noconvert(),
-        nb::arg("persistent_output_buffer_v").noconvert(),
+        nb::arg("persistent_output_buffer_v"),
         nb::arg("joint_strategy"),
         nb::arg("logical_n"),
         nb::arg("program_config").noconvert(),
@@ -463,7 +469,8 @@ void bind_sdpa(nb::module_& mod) {
         nb::arg("ccl_core_grid_offset"),
         nb::arg("use_column_major_ccl") = false,
         nb::arg("is_causal").noconvert() = false,
-        nb::arg("is_balanced").noconvert() = false);
+        nb::arg("is_balanced").noconvert() = false,
+        nb::arg("head_dim_v").noconvert() = nb::none());
 
     const auto* exp_ring_joint_doc = R"doc(
         ExpRingJointAttention operation that efficiently performs non-causal attention over two
