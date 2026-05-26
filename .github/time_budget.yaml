@@ -129,10 +129,10 @@ models:
     wh_galaxy_perf: 10
   e2e:
     wh_llmbox: 198
-    wh_llmbox_perf: 90
-    wh_n150: 30
-    wh_n300: 30
-    wh_galaxy: 30
+    wh_llmbox_perf: 307
+    wh_n150: 40
+    wh_n300: 35
+    wh_galaxy: 90
   unit:
     wh_llmbox: 370
     wh_llmbox_perf: 60
