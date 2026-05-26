@@ -104,12 +104,13 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
             All configs must agree on compute_with_storage_grid_size and num_global_cb_receivers.
 
             Picking size (in bytes):
-              * Must fit at least one in1 block of the biggest consumer matmul.
-              * Larger lets the DRISC prefetcher run further ahead of the matmul. Past one
-                full layer's worth (num_blocks_largest_matmul * largest_in1_block_size) more
-                buffering doesn't add throughput; the DRISC just stalls on
+              * Minimum = num_blocks * largest_in1_block_size (one full layer's pages).
+                The matmul does wait_front(num_blocks) per layer, so anything smaller deadlocks.
+              * Larger lets the DRISC prefetcher run further ahead. Past one full layer
+                worth more buffering doesn't add throughput; the DRISC just stalls on
                 remote_cb_reserve_back.
-              * Capped by an L1 budget (~1.4 MB) so the matmul's in0/out/interm CBs still fit.
+              * The factory does not check L1 capacity. Callers must size the GCB to fit
+                alongside the matmul's in0/in1/out/interm CBs on the receiver cores.
 
             Args:
                 mesh_device: The mesh device.

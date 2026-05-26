@@ -56,8 +56,9 @@ GlobalCircularBuffer create_global_circular_buffer_with_dram_senders(
 //   * Larger values let the DRISC prefetcher run further ahead. Past one full layer worth
 //     more buffering does not increase throughput — the DRISC stalls on
 //     remote_cb_reserve_back.
-//   * Capped by L1 (~1.4 MB) so the matmul's in0/out/interm CBs still fit; if you hit
-//     L1 OOM, lower this.
+//   * The factory only caps `size` against a conservative remote-CB page-count limit; it
+//     does NOT check L1 capacity. Callers must size the GCB to fit alongside the matmul's
+//     in0/in1/out/interm CBs on the receiver cores.
 GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
     MeshDevice* mesh_device,
     const std::vector<ttnn::operations::matmul::MatmulMultiCoreReuseMultiCast1DProgramConfig>& program_configs,

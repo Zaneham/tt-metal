@@ -196,14 +196,23 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         max_in1_block_size = std::max(max_in1_block_size, in1_block_size);
     }
 
-    // ---- Validate the caller-supplied size fits the L1 / CB-page budget and at least
-    // one full layer's worth of pages (the matmul does wait_front(num_blocks)).
-    constexpr uint32_t kL1Cap = 1'400'000;
+    // ---- Validate the caller-supplied size fits the remote-CB page-count cap and at
+    // least one full layer's worth of pages (the matmul does wait_front(num_blocks)).
+    //
+    // No L1 budget check here — receivers may have very different L1 usage on top of the
+    // GCB (matmul in0/in1/out/interm CBs etc.) and we don't have enough context at the
+    // factory to compute a real cap. Callers must size the GCB to fit their own L1.
+    //
+    // kMaxCbPagesBytes is a conservative cap on fifo_aligned_num_pages = fifo_size /
+    // REMOTE_CIRCULAR_BUFFER_ALIGNED_PAGE_SIZE. The remote-CB receiver tracks pages with
+    // 32-bit counters wrapped at 2^31 (noc_fast_atomic_increment wrap=31) and computes
+    // free_pages = fifo_aligned_num_pages - (pages_sent - pages_acked) in unsigned 32-bit
+    // arithmetic. Keeping fifo_aligned_num_pages well under 2^16 leaves orders of magnitude
+    // between the counter range and any plausible in-flight count, so signed/unsigned
+    // interpretation of the difference can never misfire.
     constexpr uint32_t kMaxCbPagesBytes = 65000u * 16u;
     const uint32_t num_blocks = ring_size;
     const uint32_t min_size = max_in1_block_size * num_blocks;
-    const uint32_t l1_budget = kL1Cap > max_in1_block_size ? kL1Cap - max_in1_block_size : 0;
-    const uint32_t upper = std::min(l1_budget, kMaxCbPagesBytes);
     TT_FATAL(
         size >= min_size,
         "GCB size ({} B) must be at least num_blocks * largest in1_block ({} * {} = {} B); the "
@@ -213,12 +222,9 @@ GlobalCircularBuffer create_global_circular_buffer_for_matmul_1d(
         max_in1_block_size,
         min_size);
     TT_FATAL(
-        size <= upper,
-        "GCB size ({} B) exceeds budget ({} B = min(L1 budget {}, max CB pages {})). Reduce size, "
-        "per_core_N, or in0_block_w.",
+        size <= kMaxCbPagesBytes,
+        "GCB size ({} B) exceeds the remote-CB page-count cap ({} B). Reduce size.",
         size,
-        upper,
-        l1_budget,
         kMaxCbPagesBytes);
 
     // ---- Build bank_to_receivers (row-major through the ring rectangle) ----
