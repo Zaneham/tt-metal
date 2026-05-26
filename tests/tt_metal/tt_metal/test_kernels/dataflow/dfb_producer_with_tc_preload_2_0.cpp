@@ -11,6 +11,7 @@
 #include "api/tensor/noc_traits.h"
 #include "api/kernel_thread_globals.h"
 #include "experimental/kernel_args.h"
+#include "internal/tt-2xx/dataflow_buffer_test_helpers.h"
 
 void kernel_main() {
     constexpr uint32_t num_entries_per_producer = get_arg(args::num_entries_per_producer);
@@ -31,7 +32,7 @@ void kernel_main() {
     if constexpr (kPreloadPostedValue > 0) {
 #ifdef ARCH_QUASAR
         if (producer_idx == 0) {
-            dfb.preload_posted_counter(kPreloadPostedValue);
+            preload_posted_counter(dfb, kPreloadPostedValue);
         }
 #endif
     }

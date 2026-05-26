@@ -26,12 +26,18 @@
 void kernel_main() {
     constexpr uint32_t per_core_tile_cnt = get_arg(args::per_core_tile_cnt);
 
-    unary_op_init_common(0, 2);
-    relu_tile_init();
-
     DataflowBuffer dfb_in(dfb::in);
     DataflowBuffer dfb_self(dfb::self);
     DataflowBuffer dfb_out(dfb::out);
+
+    // Init with the kernel's first input and final output DFBs. The per-init
+    // buf_desc_id state survives across per-tile pack_tile/copy_tile calls,
+    // so stage A's intermediate pack to dfb_self only works because the per-
+    // tile pack_tile(0, dfb_self.get_id()) reconfigures the destination —
+    // the init still needs to point at the kernel's outermost output.
+    // Matches production pattern (eltwise_sfpu.cpp / eltwise_binary.cpp).
+    unary_op_init_common(dfb_in.get_id(), dfb_out.get_id());
+    relu_tile_init();
 
     for (uint32_t b = 0; b < per_core_tile_cnt; ++b) {
         // Stage A: dfb_in → relu → dfb_self

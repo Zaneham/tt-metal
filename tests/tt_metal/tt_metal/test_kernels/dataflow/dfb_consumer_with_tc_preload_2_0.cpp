@@ -10,6 +10,7 @@
 #include "api/tensor/noc_traits.h"
 #include "api/kernel_thread_globals.h"
 #include "experimental/kernel_args.h"
+#include "internal/tt-2xx/dataflow_buffer_test_helpers.h"
 
 void kernel_main() {
     constexpr uint32_t num_entries_per_consumer = get_arg(args::num_entries_per_consumer);
@@ -31,7 +32,7 @@ void kernel_main() {
     if constexpr (kPreloadAckedValue > 0) {
 #ifdef ARCH_QUASAR
         if (consumer_idx == 0) {
-            dfb.preload_acked_counter(kPreloadAckedValue);
+            preload_acked_counter(dfb, kPreloadAckedValue);
         }
 #endif
     }

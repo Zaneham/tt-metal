@@ -388,36 +388,6 @@ inline void DataflowBuffer::commit_implicit_write() {
     local_dfb_interface_.tc_idx = (local_dfb_interface_.tc_idx + 1) % local_dfb_interface_.num_tcs_to_rr;
 }
 
-// Test-only: pre-advance implicit-sync state so subsequent transactions cross
-// the uint16 wrap point. See declaration in dataflow_buffer.h for usage rules.
-inline void DataflowBuffer::preload_posted_counter(uint16_t value) {
-    for (uint8_t i = 0; i < local_dfb_interface_.num_tcs_to_rr; i++) {
-        dfb::PackedTileCounter ptc = local_dfb_interface_.tc_slots[i].packed_tile_counter;
-        overlay::llk_intf_inc_posted(dfb::get_tensix_id(ptc), dfb::get_counter_id(ptc), value);
-    }
-    const uint16_t per_tc = local_dfb_interface_.num_entries_per_txn_id_per_tc;
-    if (per_tc > 0 && local_dfb_interface_.num_txn_ids > 0) {
-        ptxn_id_loop_cnt_ = value / per_tc;
-        ptxn_id_index_ = static_cast<uint8_t>(ptxn_id_loop_cnt_ % local_dfb_interface_.num_txn_ids);
-    }
-    // Bump the kernel-side transactions-issued counter so handle_final_credits's
-    // (transactions_issued % N, / N) math matches the HW posted value at finish time.
-    ptiles_read_ = value;
-}
-
-inline void DataflowBuffer::preload_acked_counter(uint16_t value) {
-    for (uint8_t i = 0; i < local_dfb_interface_.num_tcs_to_rr; i++) {
-        dfb::PackedTileCounter ptc = local_dfb_interface_.tc_slots[i].packed_tile_counter;
-        overlay::llk_intf_inc_acked(dfb::get_tensix_id(ptc), dfb::get_counter_id(ptc), value);
-    }
-    const uint16_t per_tc = local_dfb_interface_.num_entries_per_txn_id_per_tc;
-    if (per_tc > 0 && local_dfb_interface_.num_txn_ids > 0) {
-        ctxn_id_loop_cnt_ = value / per_tc;
-        ctxn_id_index_ = static_cast<uint8_t>(ctxn_id_loop_cnt_ % local_dfb_interface_.num_txn_ids);
-    }
-    ctiles_written_ = value;
-}
-
 // Out-of-line definitions of Noc DFB-specific implicit-sync overloads.
 // These are member functions of Noc but must be defined here because they need the complete
 // DataflowBuffer type (circular dependency: dataflow_buffer.h includes noc.h, not vice versa).

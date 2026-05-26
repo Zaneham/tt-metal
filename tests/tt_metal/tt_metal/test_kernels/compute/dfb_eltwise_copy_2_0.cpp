@@ -3,7 +3,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Metal 2.0 (declarative API) eltwise copy compute kernel.
-// Identity: copy each tile from dfb::in to dfb::out via copy_tile + pack_tile.
+//
+// Identity operation: consume one tile from dfb::in, copy it to the math dest
+// register via copy_tile, and pack it out to dfb::out. Runs per_core_tile_cnt
+// times.
+//
+// Bindings (set by host KernelSpec):
+//   dfb::in  — CONSUMER (the upstream DM producer writes here)
+//   dfb::out — PRODUCER (the downstream DM consumer drains here)
+//
+// Used by the A1 identity-pipeline test (DM → DFB → TRISC(copy) → DFB → DM) as
+// the middle Tensix stage. The relu variant in dfb_eltwise_relu_2_0.cpp is
+// identical except for inserting an SFPU relu between copy and pack.
 
 #include <cstdint>
 
@@ -17,10 +28,12 @@
 void kernel_main() {
     constexpr uint32_t per_core_tile_cnt = get_arg(args::per_core_tile_cnt);
 
-    unary_op_init_common(0, 1);
-
     DataflowBuffer dfb_in(dfb::in);
     DataflowBuffer dfb_out(dfb::out);
+
+    // Configure the compute pipeline against this kernel's input/output DFBs.
+    // Matches production pattern (eltwise_sfpu.cpp / eltwise_binary.cpp).
+    unary_op_init_common(dfb_in.get_id(), dfb_out.get_id());
 
     for (uint32_t b = 0; b < per_core_tile_cnt; ++b) {
         acquire_dst();
