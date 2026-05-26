@@ -103,6 +103,9 @@ void kernel_main() {
     // Deferred norm: sum save/restore CBs for multi Q-chunk DRAM round-trip.
     constexpr uint32_t cb_sum_out = tt::CBIndex::c_10;
     constexpr uint32_t cb_sum_in = tt::CBIndex::c_11;
+    constexpr uint32_t cb_signal = tt::CBIndex::c_12;
+
+    constexpr uint32_t num_q_chunks = local_padded_Nt / Sq_chunk_t + Lt / Sq_chunk_t;
 
     mm_init(cb_q_in, cb_k_in, cb_qk_im);
 
@@ -208,14 +211,19 @@ void kernel_main() {
                 cb_out,  // cb_normalized_out — output goes directly to cb_out
                 cb_sum_out,
                 cb_sum_in,
-                needs_lightweight_mask>(
+                cb_signal,
+                needs_lightweight_mask,
+                false,  // is_causal_sdpa
+                false,  // is_balanced_sdpa
+                false,  // chunked_enabled
+                local_padded_Nt>(
                 global_q_start,
                 global_q_end,
                 num_kv_chunks,
+                num_q_chunks,
                 ring_iter,
                 ring_id,
                 num_local_k_chunks,
-                local_padded_Nt,
                 logical_nt,
                 ring_iter_needs_global_n_mask,
                 ring_iter_needs_joint_n_mask,
@@ -226,7 +234,11 @@ void kernel_main() {
                 acc_state,
                 is_last_ring_iter,
                 q_per_core,
-                lw_mask);
+                lw_mask,
+                /*skip_first_half_q=*/false,
+                /*use_zigzag_balancing=*/false,
+                ChunkedContext{},
+                /*is_first_active_iter=*/(ring_iter == 0));
         } else {
             sdpa_ring<
                 cb_qk_im,

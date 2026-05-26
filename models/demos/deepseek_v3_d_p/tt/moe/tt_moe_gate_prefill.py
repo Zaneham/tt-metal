@@ -17,7 +17,6 @@ import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.common.utility_functions import is_blackhole
 from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
-from models.demos.deepseek_v3_d_p.tt.moe.tt_moe_routing_setup import TtMoERoutingSetup
 
 
 class GateComputeMode(Enum):
@@ -220,7 +219,6 @@ class TtMoEGatePrefill(LightweightModule):
         self,
         config,
         mesh_device,
-        dispatch_table: torch.Tensor,
         weight: torch.Tensor = None,
         bias: torch.Tensor = None,
         fallback_mode: GateComputeMode = GateComputeMode.DEVICE,
@@ -271,8 +269,6 @@ class TtMoEGatePrefill(LightweightModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             layout=ttnn.TILE_LAYOUT,
         )
-
-        self.routing_setup = TtMoERoutingSetup(mesh_device, dispatch_table, num_links=config.ccl_config["NUM_LINKS"])
 
         # Torch copies for host fallback paths — keep in HF convention (n_experts, dim)
         if fallback_mode not in (GateComputeMode.DEVICE, GateComputeMode.DEVICE_FP32):
@@ -459,7 +455,7 @@ class TtMoEGatePrefill(LightweightModule):
     # Forward
     # ------------------------------------------------------------------
 
-    def forward(self, x: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+    def forward(self, x: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         mode = self.fallback_mode
         logger.debug(f"[MoeGate] fallback_mode={mode.value}")
 
@@ -496,16 +492,8 @@ class TtMoEGatePrefill(LightweightModule):
             logits = self._host_logits_to_device(host_logits)
         signpost(header="moe_gate_grouped_gate")
 
-        # ---- Phase 3: Routing setup ----
-        signpost(header="moe_gate_calculate_dispatch_offsets")
-        ttnn_top_k_experts_indices = ttnn.to_layout(ttnn_top_k_experts_indices, ttnn.ROW_MAJOR_LAYOUT)
-
-        dispatch_offsets, total_counts_per_expert, _ = self.routing_setup(
-            ttnn_top_k_experts_indices=ttnn_top_k_experts_indices,
-            num_routed_experts=self.config.n_routed_experts,
-            seq_len_per_chip=self.config.sp_dim,
-            num_experts_per_tok=self.config.n_activated_experts,
+        return (
+            ttnn_scores,
+            ttnn_top_k_experts_indices,
+            logits,
         )
-        signpost(header="moe_gate_calculate_dispatch_offsets")
-
-        return (ttnn_scores, ttnn_top_k_experts_indices, logits, dispatch_offsets, total_counts_per_expert)
