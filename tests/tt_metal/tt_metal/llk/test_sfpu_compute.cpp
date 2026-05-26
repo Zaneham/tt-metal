@@ -647,7 +647,7 @@ bool run_sfpu_binary_two_input_buffer(
             .unique_id = COMPUTE,
             .source =
                 experimental::metal2_host_api::KernelSpec::SourceFilePath{
-                    "tt_metal/kernels/compute/eltwise_binary_quasar_SFPU.cpp"},
+                    "tt_metal/kernels/compute/eltwise_binary_quasar_sfpu.cpp"},
             .num_threads = 1,
             .compiler_options = {.defines = to_kernel_defines(sfpu_defines)},
             .dfb_bindings =
