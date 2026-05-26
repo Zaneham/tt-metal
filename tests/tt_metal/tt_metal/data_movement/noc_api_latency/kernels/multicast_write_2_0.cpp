@@ -7,8 +7,6 @@
 #include "api/dataflow/endpoints.h"
 
 void kernel_main() {
-#ifdef KERNEL_COMPILE_TIME_ARG_MAP
-    // Metal 2.0 API: use named compile-time args (all architectures)
     constexpr uint32_t l1_local_addr = get_arg(args::l1_addr);
     constexpr uint32_t num_transactions = get_arg(args::num_tx);
     constexpr uint32_t transaction_size = get_arg(args::tx_size);
@@ -17,17 +15,6 @@ void kernel_main() {
     constexpr uint32_t packed_dest_core_end = get_arg(args::dest_coords_end);
     constexpr uint32_t loopback = get_arg(args::loopback);
     constexpr uint32_t num_dests = get_arg(args::num_cores);
-#else
-    // Legacy API: use indexed compile-time args
-    constexpr uint32_t l1_local_addr = get_compile_time_arg_val(0);
-    constexpr uint32_t num_transactions = get_compile_time_arg_val(1);
-    constexpr uint32_t transaction_size = get_compile_time_arg_val(2);
-    constexpr uint32_t test_id = get_compile_time_arg_val(3);
-    constexpr uint32_t packed_dest_core_start = get_compile_time_arg_val(4);
-    constexpr uint32_t packed_dest_core_end = get_compile_time_arg_val(5);
-    constexpr uint32_t loopback = get_compile_time_arg_val(6);
-    constexpr uint32_t num_dests = get_compile_time_arg_val(7);
-#endif
 
     uint32_t dest_x_start = packed_dest_core_start >> 16;
     uint32_t dest_y_start = packed_dest_core_start & 0xFFFF;

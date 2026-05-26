@@ -6,7 +6,15 @@
 #include "experimental/kernel_args.h"
 #include "api/debug/dprint.h"
 
-// L1 to L1 send
+// L1 to L1 send (one packet, stateful + transaction-ID).
+//
+// NOTE: This kernel intentionally stays on the legacy NOC free functions
+// because the new Noc/UnicastEndpoint API does not yet expose a combined
+// "with_state + with_trid" form. The new API provides:
+//   - stateful only:        set_async_read_state + async_read_with_state
+//   - transaction-id only:  async_read<TxnIdMode::ENABLED>
+// but not the union of the two that this test exercises. Once the new API
+// surface adds a stateful+trid combined call, migrate this kernel to it.
 void kernel_main() {
     constexpr uint32_t l1_local_addr = get_arg(args::l1_addr);
     constexpr uint32_t test_id = get_arg(args::test_id);

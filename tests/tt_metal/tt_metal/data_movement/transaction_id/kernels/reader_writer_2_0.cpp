@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/endpoints.h"
 #include "experimental/kernel_args.h"
 #include "api/debug/dprint.h"
 
@@ -18,39 +19,51 @@ void kernel_main() {
     const uint32_t num_of_transactions = num_transactions_raw < 16 ? num_transactions_raw : 15;
     const uint32_t bytes_per_transaction = get_vararg(1);
 
-    // Runtime arguments
-    uint32_t sub0_receiver_x_coord = packed_sub0_core_coordinates >> 16;
-    uint32_t sub0_receiver_y_coord = packed_sub0_core_coordinates & 0xFFFF;
-    uint32_t sub1_sender_x_coord = packed_sub1_core_coordinates >> 16;
-    uint32_t sub1_sender_y_coord = packed_sub1_core_coordinates & 0xFFFF;
+    const uint32_t sub0_receiver_x_coord = packed_sub0_core_coordinates >> 16;
+    const uint32_t sub0_receiver_y_coord = packed_sub0_core_coordinates & 0xFFFF;
+    const uint32_t sub1_sender_x_coord = packed_sub1_core_coordinates >> 16;
+    const uint32_t sub1_sender_y_coord = packed_sub1_core_coordinates & 0xFFFF;
 
-    uint64_t sub0_dst_noc_addr = get_noc_addr(sub0_receiver_x_coord, sub0_receiver_y_coord, l1_local_addr);
-    uint64_t sub1_src_noc_addr = get_noc_addr(sub1_sender_x_coord, sub1_sender_y_coord, l1_local_addr);
+    Noc noc(noc_index);
+    UnicastEndpoint endpoint;
 
     {
         DeviceZoneScopedN("RISCV0");
 
-        uint32_t tmp_local_addr = l1_local_addr;
+        uint32_t local_addr = l1_local_addr;
+        uint32_t sub1_offset = 0;
 
         // Send out reads with transaction ids
         // Avoid using transaction id 0 in case fast dispatch breaks it in the future
-        for (uint32_t i = 1; i <= num_of_transactions; i++) {  // Using 1-(num_of_transactions) as the transaction ids
-            noc_async_read_set_trid(i);
-            noc_async_read(sub1_src_noc_addr, tmp_local_addr, bytes_per_transaction);
-            tmp_local_addr += bytes_per_transaction;
-            sub1_src_noc_addr += bytes_per_transaction;
+        for (uint32_t i = 1; i <= num_of_transactions; i++) {
+            noc.async_read<Noc::TxnIdMode::ENABLED>(
+                endpoint,
+                endpoint,
+                bytes_per_transaction,
+                {.noc_x = sub1_sender_x_coord, .noc_y = sub1_sender_y_coord, .addr = l1_local_addr + sub1_offset},
+                {.addr = local_addr},
+                NOC_UNICAST_WRITE_VC,
+                i);
+            local_addr += bytes_per_transaction;
+            sub1_offset += bytes_per_transaction;
         }
 
-        tmp_local_addr = l1_local_addr;
+        local_addr = l1_local_addr;
+        uint32_t sub0_offset = 0;
 
-        // Wait for reads with transaction ids to finish
-        for (uint32_t i = 1; i <= num_of_transactions; i++) {  // Using 1-(num_of_transactions) as the transaction ids
-            noc_async_read_barrier_with_trid(i);
-            noc_async_write(tmp_local_addr, sub0_dst_noc_addr, bytes_per_transaction);
-            tmp_local_addr += bytes_per_transaction;
-            sub0_dst_noc_addr += bytes_per_transaction;
+        // Wait for reads with transaction ids to finish, then write
+        for (uint32_t i = 1; i <= num_of_transactions; i++) {
+            noc.async_read_barrier<Noc::BarrierMode::TXN_ID>(i);
+            noc.async_write(
+                endpoint,
+                endpoint,
+                bytes_per_transaction,
+                {.addr = local_addr},
+                {.noc_x = sub0_receiver_x_coord, .noc_y = sub0_receiver_y_coord, .addr = l1_local_addr + sub0_offset});
+            local_addr += bytes_per_transaction;
+            sub0_offset += bytes_per_transaction;
         }
-        noc_async_write_barrier();
+        noc.async_write_barrier();
     }
 
     DeviceTimestampedData("Test id", test_id);

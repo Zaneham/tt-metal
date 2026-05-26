@@ -5,10 +5,11 @@
 #include <stdint.h>
 #include <cstdint>
 #include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/endpoints.h"
 #include "experimental/kernel_args.h"
 #include "tensix_types.h"
 
-// DRAM to L1 read
+// DRAM to L1 read with banked AllocatorBank + transaction-ID pipelining.
 void kernel_main() {
     // Runtime varargs (vary per call to run_dm in the host-side test loop):
     //   [0] src_addr, [1] l1_addr, [2] num_of_transactions, [3] pages_per_bank
@@ -20,7 +21,6 @@ void kernel_main() {
     uint32_t num_of_transactions = get_vararg(2);
     uint32_t pages_per_bank = get_vararg(3);
 
-    // True compile-time constants (do not change across iterations of any test).
     constexpr uint32_t num_banks = get_arg(args::num_banks);
     constexpr uint32_t page_size_bytes = get_arg(args::page_size);
     constexpr uint32_t test_id = get_arg(args::test_id);
@@ -30,26 +30,34 @@ void kernel_main() {
     DeviceTimestampedData("Transaction size in bytes", num_banks * pages_per_bank * page_size_bytes);
     DeviceTimestampedData("Test id", test_id);
 
+    Noc noc(noc_index);
+    UnicastEndpoint dst_l1;
+    constexpr AllocatorBankType bank_type = AllocatorBankType::DRAM;
+    AllocatorBank<bank_type> src_dram;
+
     uint32_t dst_addr = l1_addr;
-    uint32_t curr_trid = 1;
+    uint32_t curr_trid = 1;  // Start trids from 1; 0 may break under fast dispatch.
     {
         DeviceZoneScopedN("RISCV0");
         for (uint32_t n = 0; n < num_of_transactions; n++) {
             dst_addr = l1_addr;
             for (uint32_t bank_id = 0; bank_id < num_banks; bank_id++) {
-                uint64_t src_noc_addr = get_noc_addr_from_bank_id<true>(bank_id, src_addr);
-                noc_async_read_one_packet_set_state(src_noc_addr, page_size_bytes);
-                noc_async_read_set_trid(curr_trid);
                 for (uint32_t i = 0; i < pages_per_bank; i++) {
-                    noc_async_read_one_packet_with_state_with_trid(
-                        src_noc_addr, i * page_size_bytes, dst_addr, curr_trid);
+                    noc.async_read<Noc::TxnIdMode::ENABLED>(
+                        src_dram,
+                        dst_l1,
+                        page_size_bytes,
+                        {.bank_id = bank_id, .addr = src_addr + i * page_size_bytes},
+                        {.addr = dst_addr},
+                        NOC_UNICAST_WRITE_VC,
+                        curr_trid);
                     dst_addr += page_size_bytes;
                 }
-                curr_trid = (curr_trid % (num_of_trids - 1)) + 1;
+                curr_trid = (curr_trid % (num_of_trids - 1)) + 1;  // keep trid in [1, num_of_trids-1]
             }
         }
         for (uint32_t t = 1; t < num_of_trids; t++) {
-            noc_async_read_barrier_with_trid(t);
+            noc.async_read_barrier<Noc::BarrierMode::TXN_ID>(t);
         }
     }
 }

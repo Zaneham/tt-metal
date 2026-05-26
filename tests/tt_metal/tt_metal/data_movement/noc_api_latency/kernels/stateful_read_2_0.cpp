@@ -7,21 +7,11 @@
 #include "api/dataflow/endpoints.h"
 
 void kernel_main() {
-#ifdef KERNEL_COMPILE_TIME_ARG_MAP
-    // Metal 2.0 API: use named compile-time args (all architectures)
     constexpr uint32_t l1_local_addr = get_arg(args::l1_addr);
     constexpr uint32_t num_transactions = get_arg(args::num_tx);
     constexpr uint32_t transaction_size = get_arg(args::tx_size);
     constexpr uint32_t test_id = get_arg(args::test_id);
     constexpr uint32_t packed_dest_core_coordinates = get_arg(args::dest_coords);
-#else
-    // Legacy API: use indexed compile-time args
-    constexpr uint32_t l1_local_addr = get_compile_time_arg_val(0);
-    constexpr uint32_t num_transactions = get_compile_time_arg_val(1);
-    constexpr uint32_t transaction_size = get_compile_time_arg_val(2);
-    constexpr uint32_t test_id = get_compile_time_arg_val(3);
-    constexpr uint32_t packed_dest_core_coordinates = get_compile_time_arg_val(4);
-#endif
 
     uint32_t dst_x_coord = packed_dest_core_coordinates >> 16;
     uint32_t dst_y_coord = packed_dest_core_coordinates & 0xFFFF;
