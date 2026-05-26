@@ -95,6 +95,9 @@ void kernel_main() {
     constexpr uint32_t dispatch_core_idx = get_compile_time_arg_val(22);
     constexpr uint32_t num_dispatch_cores = get_compile_time_arg_val(23);
     constexpr uint32_t core_mask = num_dispatch_cores - 1;
+    // u1 (core_id=0): even batches, increments offset from start (left-to-right).
+    // u2 (core_id=1): odd batches, decrements offset from end  (right-to-left).
+    constexpr bool IS_RIGHT_UNTILIZER = (core_id == 1);
 
     constexpr uint32_t num_devices = get_compile_time_arg_val(24);
     constexpr uint32_t mesh_rows = get_compile_time_arg_val(25);
@@ -107,6 +110,7 @@ void kernel_main() {
     constexpr auto weights_args = TensorAccessorArgs<indices_args.next_compile_time_args_offset()>();
     constexpr auto offsets_args = TensorAccessorArgs<weights_args.next_compile_time_args_offset()>();
     constexpr auto dispatch_table_args = TensorAccessorArgs<offsets_args.next_compile_time_args_offset()>();
+    constexpr auto end_offsets_args = TensorAccessorArgs<dispatch_table_args.next_compile_time_args_offset()>();
 
     constexpr uint32_t tiles_per_row = hidden_size / 32;
     constexpr uint32_t block_ct_dim = 8;
@@ -130,6 +134,7 @@ void kernel_main() {
     uint32_t indices_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t weights_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t offsets_tensor_address = get_arg_val<uint32_t>(rt_idx++);
+    uint32_t end_offsets_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t dispatch_table_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t token_start_idx = get_arg_val<uint32_t>(rt_idx++);
     uint32_t token_end_idx = get_arg_val<uint32_t>(rt_idx++);
@@ -141,10 +146,19 @@ void kernel_main() {
     const auto dispatch_table_addr_gen = TensorAccessor(dispatch_table_args, dispatch_table_tensor_address);
 
     // ===== Startup: load offsets[] and dispatch_table[] into local L1 =====
+    // u1 loads tt_expert_offsets (start, increments left-to-right).
+    // u2 loads tt_end_offsets    (end,   decrements right-to-left).
     cb_reserve_back(cb_offsets_id, offsets_pages);
     uint32_t offsets_base_addr = get_write_ptr(cb_offsets_id);
-    for (uint32_t i = 0; i < offsets_pages; i++) {
-        noc_async_read_page(i, offsets_addr_gen, offsets_base_addr + i * aligned_offsets_page_size);
+    if constexpr (IS_RIGHT_UNTILIZER) {
+        const auto end_offsets_addr_gen = TensorAccessor(end_offsets_args, end_offsets_tensor_address);
+        for (uint32_t i = 0; i < offsets_pages; i++) {
+            noc_async_read_page(i, end_offsets_addr_gen, offsets_base_addr + i * aligned_offsets_page_size);
+        }
+    } else {
+        for (uint32_t i = 0; i < offsets_pages; i++) {
+            noc_async_read_page(i, offsets_addr_gen, offsets_base_addr + i * aligned_offsets_page_size);
+        }
     }
     cb_reserve_back(cb_dispatch_table_id, dispatch_table_pages);
     uint32_t dispatch_table_base_addr = get_write_ptr(cb_dispatch_table_id);
@@ -179,7 +193,8 @@ void kernel_main() {
 
         // 2. Stream tiled input stripe from DRAM in blocks of 8 tiles
         {
-            DeviceZoneScopedN("read_input_for_current_batch") for (uint32_t blk = 0; blk < num_tile_blocks; blk++) {
+            // DeviceZoneScopedN("read_input_for_current_batch")
+            for (uint32_t blk = 0; blk < num_tile_blocks; blk++) {
                 cb_reserve_back(cb_input_id, block_ct_dim);
                 uint32_t blk_write_ptr = get_write_ptr(cb_input_id);
                 uint32_t blk_start = tile_base_page + blk * block_ct_dim;
@@ -193,7 +208,8 @@ void kernel_main() {
 
         // 3. Read this batch's indices and weights pages
         {
-            DeviceZoneScopedN("read_indices_and_weights") for (uint32_t t = 0; t < batch_count; t++) {
+            // DeviceZoneScopedN("read_indices_and_weights")
+            for (uint32_t t = 0; t < batch_count; t++) {
                 noc_async_read_page(batch_start + t, indices_addr_gen, indices_base + t * aligned_indices_page_size);
                 noc_async_read_page(batch_start + t, weights_addr_gen, weights_base + t * aligned_weights_page_size);
             }
@@ -208,7 +224,8 @@ void kernel_main() {
         uint32_t entry_off = 8;  // entries start at u32 offset 8 (32B header)
 
         {
-            DeviceZoneScopedN("build_plan_for_32_tokens") for (uint32_t t = 0; t < batch_count; t++) {
+            // DeviceZoneScopedN("build_plan_for_32_tokens")
+            for (uint32_t t = 0; t < batch_count; t++) {
                 int32_t* indices_t = reinterpret_cast<int32_t*>(indices_base + t * aligned_indices_page_size);
                 uint16_t* weights_t = reinterpret_cast<uint16_t*>(weights_base + t * aligned_weights_page_size);
                 uint32_t token_idx = batch_start + t;
@@ -224,12 +241,26 @@ void kernel_main() {
                     }
 
                     uint32_t& offset = offsets[routed_expert];
-                    if (offset >= max_dispatch_buffer_token_size) {
-                        offset++;
-                        continue;
+                    uint32_t page_idx;
+                    if constexpr (IS_RIGHT_UNTILIZER) {
+                        // Decrement before use: end is exclusive, so first write is at end-1.
+                        // Guard: if offset is 0 it would wrap to UINT32_MAX; if the result
+                        // exceeds the buffer it is out-of-bounds — both are skipped.
+                        if (offset == 0) {
+                            continue;
+                        }
+                        page_idx = --offset;
+                        if (page_idx >= max_dispatch_buffer_token_size) {
+                            offset++;
+                            continue;
+                        }
+                    } else {
+                        if (offset >= max_dispatch_buffer_token_size) {
+                            offset++;
+                            continue;
+                        }
+                        page_idx = offset++;
                     }
-                    uint32_t page_idx = offset;
-                    offset++;
 
                     uint32_t expert_chip = device_begin_idx + (uint32_t)expert_chip_og * device_stride;
                     bool is_local = (expert_chip == linearized_mesh_coord);

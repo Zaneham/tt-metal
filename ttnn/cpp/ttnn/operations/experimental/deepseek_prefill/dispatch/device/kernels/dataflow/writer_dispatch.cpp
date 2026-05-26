@@ -110,7 +110,10 @@ void kernel_main() {
 #ifdef IS_TILE_LAYOUT
     // Writer-only tile-layout extras appended after the shared TensorAccessorArgs prefix.
     constexpr uint32_t writer_extra_args_base = dispatch_table_args.next_compile_time_args_offset();
-    constexpr uint32_t writer_cb_size = get_compile_time_arg_val(writer_extra_args_base + 0);  // 2
+    constexpr uint32_t writer_cb_size = get_compile_time_arg_val(writer_extra_args_base + 0);
+    constexpr uint32_t cb_route_info_2_id = get_compile_time_arg_val(writer_extra_args_base + 1);
+    constexpr uint32_t cb_payload_for_writer_2_id = get_compile_time_arg_val(writer_extra_args_base + 2);
+    constexpr uint32_t cb_metadata_for_writer_2_id = get_compile_time_arg_val(writer_extra_args_base + 3);
     constexpr uint32_t route_info_slot_stride = l1_alignment;
 #endif
 
@@ -132,6 +135,7 @@ void kernel_main() {
     uint32_t exit_semaphore_address = get_arg_val<uint32_t>(rt_args_idx++);
 
 #ifdef IS_TILE_LAYOUT
+    // u1 handshake + credit semaphores (c_4/c_5/c_6)
     uint32_t addr_ready_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
     uint32_t cross_c4_addr_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
     uint32_t cross_c5_addr_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
@@ -140,6 +144,15 @@ void kernel_main() {
     uint32_t untilize_noc_y = get_arg_val<uint32_t>(rt_args_idx++);
     uint32_t data_avail_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
     uint32_t space_avail_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
+    // u2 handshake + credit semaphores (c_16/c_17/c_18)
+    uint32_t addr_ready_u2_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t cross_c16_addr_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t cross_c17_addr_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t cross_c18_addr_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t untilize_u2_noc_x = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t untilize_u2_noc_y = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t data_avail_u2_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
+    uint32_t space_avail_u2_semaphore_id = get_arg_val<uint32_t>(rt_args_idx++);
 #endif
 
 #ifdef AXIS
@@ -154,14 +167,11 @@ void kernel_main() {
                     << " dispatch_devices=" << dispatch_devices << ENDL();
 
 #ifdef IS_TILE_LAYOUT
-    // c_4/c_5/c_6 base addresses (slot s at base + s * <stride>).
+    // ---- u1 address handshake (c_4/c_5/c_6) ----
     uint32_t writer_route_base = get_write_ptr(cb_route_info_id);
     uint32_t writer_payload_base = get_write_ptr(cb_payload_for_writer_id);
     uint32_t writer_metadata_base = get_write_ptr(cb_metadata_for_writer_id);
 
-    // Address handshake to untilize: stash bases into the local cross_c{4,5,6}_addr
-    // scratch slots (used as 1×u32 mailboxes), NOC-write them into the matching
-    // slots on untilize's L1, then NOC-inc untilize's addr_ready semaphore.
     uint32_t addr_ready_sem_l1_offset = get_semaphore(addr_ready_semaphore_id);
     uint32_t cross_c4_addr_sem_l1_offset = get_semaphore(cross_c4_addr_semaphore_id);
     uint32_t cross_c5_addr_sem_l1_offset = get_semaphore(cross_c5_addr_semaphore_id);
@@ -170,21 +180,53 @@ void kernel_main() {
     *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cross_c4_addr_sem_l1_offset) = writer_route_base;
     *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cross_c5_addr_sem_l1_offset) = writer_payload_base;
     *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cross_c6_addr_sem_l1_offset) = writer_metadata_base;
-
-    uint64_t untilize_c4_addr_noc_addr = get_noc_addr(untilize_noc_x, untilize_noc_y, cross_c4_addr_sem_l1_offset);
-    uint64_t untilize_c5_addr_noc_addr = get_noc_addr(untilize_noc_x, untilize_noc_y, cross_c5_addr_sem_l1_offset);
-    uint64_t untilize_c6_addr_noc_addr = get_noc_addr(untilize_noc_x, untilize_noc_y, cross_c6_addr_sem_l1_offset);
-    noc_async_write(cross_c4_addr_sem_l1_offset, untilize_c4_addr_noc_addr, sizeof(uint32_t));
-    noc_async_write(cross_c5_addr_sem_l1_offset, untilize_c5_addr_noc_addr, sizeof(uint32_t));
-    noc_async_write(cross_c6_addr_sem_l1_offset, untilize_c6_addr_noc_addr, sizeof(uint32_t));
+    noc_async_write(
+        cross_c4_addr_sem_l1_offset,
+        get_noc_addr(untilize_noc_x, untilize_noc_y, cross_c4_addr_sem_l1_offset),
+        sizeof(uint32_t));
+    noc_async_write(
+        cross_c5_addr_sem_l1_offset,
+        get_noc_addr(untilize_noc_x, untilize_noc_y, cross_c5_addr_sem_l1_offset),
+        sizeof(uint32_t));
+    noc_async_write(
+        cross_c6_addr_sem_l1_offset,
+        get_noc_addr(untilize_noc_x, untilize_noc_y, cross_c6_addr_sem_l1_offset),
+        sizeof(uint32_t));
     noc_async_write_barrier();
-
-    uint64_t untilize_addr_ready_noc_addr = get_noc_addr(untilize_noc_x, untilize_noc_y, addr_ready_sem_l1_offset);
-    noc_semaphore_inc(untilize_addr_ready_noc_addr, 1);
+    noc_semaphore_inc(get_noc_addr(untilize_noc_x, untilize_noc_y, addr_ready_sem_l1_offset), 1);
     noc_async_atomic_barrier();
 
-    DPRINT_DISPATCH << "Sender writer: addr handshake complete to untilize (" << untilize_noc_x << "," << untilize_noc_y
-                    << ")" << ENDL();
+    // ---- u2 address handshake (c_16/c_17/c_18) ----
+    uint32_t writer_route_base_2 = get_write_ptr(cb_route_info_2_id);
+    uint32_t writer_payload_base_2 = get_write_ptr(cb_payload_for_writer_2_id);
+    uint32_t writer_metadata_base_2 = get_write_ptr(cb_metadata_for_writer_2_id);
+
+    uint32_t addr_ready_u2_sem_l1_offset = get_semaphore(addr_ready_u2_semaphore_id);
+    uint32_t cross_c16_addr_sem_l1_offset = get_semaphore(cross_c16_addr_semaphore_id);
+    uint32_t cross_c17_addr_sem_l1_offset = get_semaphore(cross_c17_addr_semaphore_id);
+    uint32_t cross_c18_addr_sem_l1_offset = get_semaphore(cross_c18_addr_semaphore_id);
+
+    *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cross_c16_addr_sem_l1_offset) = writer_route_base_2;
+    *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cross_c17_addr_sem_l1_offset) = writer_payload_base_2;
+    *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(cross_c18_addr_sem_l1_offset) = writer_metadata_base_2;
+    noc_async_write(
+        cross_c16_addr_sem_l1_offset,
+        get_noc_addr(untilize_u2_noc_x, untilize_u2_noc_y, cross_c16_addr_sem_l1_offset),
+        sizeof(uint32_t));
+    noc_async_write(
+        cross_c17_addr_sem_l1_offset,
+        get_noc_addr(untilize_u2_noc_x, untilize_u2_noc_y, cross_c17_addr_sem_l1_offset),
+        sizeof(uint32_t));
+    noc_async_write(
+        cross_c18_addr_sem_l1_offset,
+        get_noc_addr(untilize_u2_noc_x, untilize_u2_noc_y, cross_c18_addr_sem_l1_offset),
+        sizeof(uint32_t));
+    noc_async_write_barrier();
+    noc_semaphore_inc(get_noc_addr(untilize_u2_noc_x, untilize_u2_noc_y, addr_ready_u2_sem_l1_offset), 1);
+    noc_async_atomic_barrier();
+
+    DPRINT_DISPATCH << "Sender writer: addr handshake done u1=(" << untilize_noc_x << "," << untilize_noc_y << ") u2=("
+                    << untilize_u2_noc_x << "," << untilize_u2_noc_y << ")" << ENDL();
 #endif
 
 #ifdef DEST_CHIP_ID
@@ -228,60 +270,103 @@ void kernel_main() {
         reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_semaphore(data_avail_semaphore_id));
     uint64_t untilize_space_avail_noc_addr =
         get_noc_addr(untilize_noc_x, untilize_noc_y, get_semaphore(space_avail_semaphore_id));
+    volatile tt_l1_ptr uint32_t* data_avail_u2_sem_ptr =
+        reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_semaphore(data_avail_u2_semaphore_id));
+    uint64_t untilize_u2_space_avail_noc_addr =
+        get_noc_addr(untilize_u2_noc_x, untilize_u2_noc_y, get_semaphore(space_avail_u2_semaphore_id));
 
-    uint32_t consumed_count = 0;
+    uint32_t consumed_1 = 0;
+    uint32_t consumed_2 = 0;
+    bool done_1 = false;
+    bool done_2 = false;
+
     {
         DeviceZoneScopedSumN2("main_writer_loop");
-        while (true) {
-            noc_semaphore_wait_min(data_avail_sem_ptr, consumed_count + 1);
-
-            uint32_t slot = consumed_count % writer_cb_size;
-            uint32_t route_addr = writer_route_base + slot * route_info_slot_stride;
-            volatile tt_l1_ptr uint32_t* route_info = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(route_addr);
-            uint32_t route = route_info[0];
-
-            if (route == ROUTE_INFO_SENTINEL) {
-                break;
-            }
-
-            uint32_t distance = route_info[1];
-            uint32_t page_idx = route_info[2];
-            uint32_t payload_addr = writer_payload_base + slot * aligned_output_page_size;
-            uint32_t metadata_addr = writer_metadata_base + slot * aligned_metadata_page_size;
-
-            DPRINT_DISPATCH << "Fabric send: route=" << route << " distance=" << distance << " page_idx=" << page_idx
-                            << ENDL();
-
+        while (!done_1 || !done_2) {
+            // ---- u1 entry ----
+            if (!done_1) {
+                noc_semaphore_wait_min(data_avail_sem_ptr, consumed_1 + 1);
+                uint32_t slot = consumed_1 % writer_cb_size;
+                volatile tt_l1_ptr uint32_t* route_info =
+                    reinterpret_cast<volatile tt_l1_ptr uint32_t*>(writer_route_base + slot * route_info_slot_stride);
+                if (route_info[0] == ROUTE_INFO_SENTINEL) {
+                    done_1 = true;
+                } else {
+                    uint32_t distance = route_info[1];
+                    uint32_t page_idx = route_info[2];
+                    uint32_t payload_addr = writer_payload_base + slot * aligned_output_page_size;
+                    uint32_t metadata_addr = writer_metadata_base + slot * aligned_metadata_page_size;
+                    DPRINT_DISPATCH << "u1 send: route=" << route_info[0] << " page=" << page_idx << ENDL();
 #ifdef DEST_CHIP_ID
-
-        {
-            DeviceZoneScopedSumN1("fabric_send");
-            fabric_set_unicast_route<false>(
-                (volatile tt_l1_ptr LowLatencyPacketHeader*)unicast_packet_header, distance);
-            fabric_send_noc_unicast<fabric_max_packet_size>(
-                output_addr_gen,
-                fabric_connections[route],
-                unicast_packet_header,
-                payload_addr,
-                page_idx,
-                (int)aligned_output_page_size,
-                l1_alignment);
-
-            fabric_send_noc_unicast<fabric_max_packet_size>(
-                metadata_addr_gen,
-                fabric_connections[route],
-                unicast_packet_header,
-                metadata_addr,
-                page_idx,
-                (int)aligned_metadata_page_size,
-                l1_alignment);
-
-            noc_async_writes_flushed();  // ensures fabric has read payload+metadata out of L1
-        }
+                    {
+                        DeviceZoneScopedN("fabric_send1");
+                        fabric_set_unicast_route<false>(
+                            (volatile tt_l1_ptr LowLatencyPacketHeader*)unicast_packet_header, distance);
+                        fabric_send_noc_unicast<fabric_max_packet_size>(
+                            output_addr_gen,
+                            fabric_connections[route_info[0]],
+                            unicast_packet_header,
+                            payload_addr,
+                            page_idx,
+                            (int)aligned_output_page_size,
+                            l1_alignment);
+                        fabric_send_noc_unicast<fabric_max_packet_size>(
+                            metadata_addr_gen,
+                            fabric_connections[route_info[0]],
+                            unicast_packet_header,
+                            metadata_addr,
+                            page_idx,
+                            (int)aligned_metadata_page_size,
+                            l1_alignment);
+                        noc_async_writes_flushed();
+                    }
 #endif
-
-        noc_semaphore_inc<true>(untilize_space_avail_noc_addr, 1);
-        consumed_count++;
+                    noc_semaphore_inc<true>(untilize_space_avail_noc_addr, 1);
+                    consumed_1++;
+                }
+            }
+            // ---- u2 entry ----
+            if (!done_2) {
+                noc_semaphore_wait_min(data_avail_u2_sem_ptr, consumed_2 + 1);
+                uint32_t slot = consumed_2 % writer_cb_size;
+                volatile tt_l1_ptr uint32_t* route_info =
+                    reinterpret_cast<volatile tt_l1_ptr uint32_t*>(writer_route_base_2 + slot * route_info_slot_stride);
+                if (route_info[0] == ROUTE_INFO_SENTINEL) {
+                    done_2 = true;
+                } else {
+                    uint32_t distance = route_info[1];
+                    uint32_t page_idx = route_info[2];
+                    uint32_t payload_addr = writer_payload_base_2 + slot * aligned_output_page_size;
+                    uint32_t metadata_addr = writer_metadata_base_2 + slot * aligned_metadata_page_size;
+                    DPRINT_DISPATCH << "u2 send: route=" << route_info[0] << " page=" << page_idx << ENDL();
+#ifdef DEST_CHIP_ID
+                    {
+                        DeviceZoneScopedN("fabric_send2");
+                        fabric_set_unicast_route<false>(
+                            (volatile tt_l1_ptr LowLatencyPacketHeader*)unicast_packet_header, distance);
+                        fabric_send_noc_unicast<fabric_max_packet_size>(
+                            output_addr_gen,
+                            fabric_connections[route_info[0]],
+                            unicast_packet_header,
+                            payload_addr,
+                            page_idx,
+                            (int)aligned_output_page_size,
+                            l1_alignment);
+                        fabric_send_noc_unicast<fabric_max_packet_size>(
+                            metadata_addr_gen,
+                            fabric_connections[route_info[0]],
+                            unicast_packet_header,
+                            metadata_addr,
+                            page_idx,
+                            (int)aligned_metadata_page_size,
+                            l1_alignment);
+                        noc_async_writes_flushed();
+                    }
+#endif
+                    noc_semaphore_inc<true>(untilize_u2_space_avail_noc_addr, 1);
+                    consumed_2++;
+                }
+            }
         }
     }
 #else

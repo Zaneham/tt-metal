@@ -138,7 +138,8 @@ void kernel_main() {
     for (uint32_t batch_idx = core_id; batch_idx < total_batches; batch_idx += total_workers) {
         // Wait for compute to finish untilizing this batch
         {
-            DeviceZoneScopedN("wait_for_32_tokens") cb_wait_front(cb_untilize_id, read_batch_size);
+            // DeviceZoneScopedN("wait_for_32_tokens")
+            cb_wait_front(cb_untilize_id, read_batch_size);
         }
         uint32_t untilize_read_ptr = get_read_ptr(cb_untilize_id);
 
@@ -164,12 +165,12 @@ void kernel_main() {
                 bool is_local = (flags & PLAN_FLAG_LOCAL) != 0;
 
                 if (is_local) {
-                    DeviceZoneScopedN("local_write")
-                        // Local: NOC1 write payload + metadata directly to DRAM.
-                        // No in-loop flush — payload source (src_addr) is unique per token,
-                        // and metadata source rotates through meta_scratch_slots ring slots.
-                        // Single noc_async_writes_flushed() at batch end covers reuse.
-                        noc_async_write_page(page_idx, output_addr_gen, src_addr);
+                    // DeviceZoneScopedN("local_write")
+                    //  Local: NOC1 write payload + metadata directly to DRAM.
+                    //  No in-loop flush — payload source (src_addr) is unique per token,
+                    //  and metadata source rotates through meta_scratch_slots ring slots.
+                    //  Single noc_async_writes_flushed() at batch end covers reuse.
+                    noc_async_write_page(page_idx, output_addr_gen, src_addr);
                     uint32_t meta_addr =
                         metadata_scratch_addr + (local_count % meta_scratch_slots) * aligned_metadata_page_size;
                     volatile tt_l1_ptr int32_t* meta = reinterpret_cast<volatile tt_l1_ptr int32_t*>(meta_addr);
@@ -187,12 +188,13 @@ void kernel_main() {
                     // Per-entry credit: wait until the sender has fabric-sent the slot we're
                     // about to overwrite (sender reader inc's space_avail once per slot freed).
                     {
-                        DeviceZoneScopedN("wait_for_space_avail")
-                            noc_semaphore_wait_min(space_avail_sem_ptr, produced_count + 1);
+                        // DeviceZoneScopedN("wait_for_space_avail")
+                        noc_semaphore_wait_min(space_avail_sem_ptr, produced_count + 1);
                     }
 
                     {
-                        DeviceZoneScopedN("send_cross_device") uint32_t slot = produced_count % writer_cb_size;
+                        // DeviceZoneScopedN("send_cross_device")
+                        uint32_t slot = produced_count % writer_cb_size;
 
                         // Build route_info (4 × u32) in local scratch, send as one NOC write.
                         route_info_scratch[0] = route;
@@ -232,7 +234,8 @@ void kernel_main() {
                     }
 
                     {
-                        DeviceZoneScopedN("signal_sender_core") noc_semaphore_inc<true>(sender_data_avail_noc_addr, 1);
+                        // DeviceZoneScopedN("signal_sender_core")
+                        noc_semaphore_inc<true>(sender_data_avail_noc_addr, 1);
                     }
 
                     produced_count++;
