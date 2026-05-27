@@ -293,6 +293,18 @@ template <DataCopyType type, bool is_fp32_dest_acc_en, BroadcastType bcast_type 
 inline void eltwise_unary_configure_mop(std::uint32_t rows_per_inst, std::uint32_t total_rows, const std::uint32_t num_faces, const std::uint32_t dst_format)
 {
     // always move 32x32 tile, packed as 16x16x4
+    lltt::record<lltt::NoExec>(ckernel::math::replay_buf_offset, 5);
+    TTI_SETC16(DISABLE_IMPLIED_SRCA_FMT_Base_ADDR32, 1);
+    /*
+    #define ALU_FORMAT_SPEC_REG0_SrcA_ADDR32 1
+    #define ALU_FORMAT_SPEC_REG0_SrcA_SHAMT 17
+    #define ALU_FORMAT_SPEC_REG0_SrcA_MASK 0x1e0000
+    */
+    // The first 16 bits of mask are zeroes, so can write to the third bit directly
+    TT_RMWCIB2(0x1e, to_underlying(DataFormat::Tf32) << (ALU_FORMAT_SPEC_REG0_SrcA_SHAMT - 16), ALU_FORMAT_SPEC_REG0_SrcA_ADDR32);
+    TTI_MOVB2D(p_mov::DEST_NORM, 0, ADDR_MOD_3, p_movb2d::MOV_4_ROWS, 0);
+    TTI_MOVB2D(p_mov::DEST_NORM, 0, ADDR_MOD_3, p_movb2d::MOV_4_ROWS, 4);
+    TTI_SETC16(DISABLE_IMPLIED_SRCA_FMT_Base_ADDR32, 0);
 
     if constexpr (type == DataCopyType::A2D)
     {
@@ -310,7 +322,12 @@ inline void eltwise_unary_configure_mop(std::uint32_t rows_per_inst, std::uint32
         {
             // Typecasting uint16 to 32bit data, need data to be written to lower 16 bits without modification
             // to be consumed by SFPU easily.
-            ckernel_template tmp(outerloop, innerloop, TT_OP_MOVA2D(p_mov::DEST_32B_LOW, 0, ADDR_MOD_2, p_mova2d::MOV_8_ROWS, 0));
+            ckernel_template tmp(
+                outerloop,
+                innerloop,
+                lltt::replay_insn(ckernel::math::replay_buf_offset, 5),
+                TT_OP_MOVA2D(p_mov::DEST_32B_LOW, 0, ADDR_MOD_2, p_mova2d::MOV_8_ROWS, 0));
+            tmp.set_start_op(TT_OP_ZEROSRC(0, 0, 1, 2));
             tmp.set_end_op(TT_OP_SETRWC(p_setrwc::CLR_AB, 0, 0, 0, 0, p_setrwc::SET_AB));
             tmp.program();
         }
